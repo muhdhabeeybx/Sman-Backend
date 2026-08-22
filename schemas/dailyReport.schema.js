@@ -47,6 +47,11 @@ const submitDailyReportSchema = z.object({
   yesterdayDeficitPayment: z.coerce.number().nonnegative().optional(),
   yesterdaySurplusPayment: z.coerce.number().nonnegative().optional(),
   totalInflow: z.coerce.number().nonnegative().optional(),
+  // Commission report. Nullable rather than defaulted — see the columns'
+  // own note in db/schema/dailyReport.js on why 0 and "not filled in" have
+  // to stay distinguishable here.
+  fundsReceived: z.coerce.number().nonnegative().nullish(),
+  commissionDue: z.coerce.number().nonnegative().nullish(),
   // security_gate's other truck count — truckCount above is "exited" for
   // this role, this is "entered".
   trucksEntered: z.coerce.number().int().nonnegative().optional(),

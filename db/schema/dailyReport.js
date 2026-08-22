@@ -54,6 +54,25 @@ const dailyReports = pgTable(
     // The running bank total for this PFI (deposits matched to it, to date),
     // as distinct from amountPaid, which is only today's sales receipt.
     totalInflow: decimal("total_inflow", { precision: 15, scale: 2 }).default("0"),
+
+    // --- Commission report ---------------------------------------------
+    // Money taken in against which commission is worked out, and what that
+    // works out to. Their own columns rather than borrowed generic ones: on
+    // a commission report `amountPaid` already means "commission paid", so
+    // reusing totalSalesAmount for "commission due" would leave two money
+    // columns on one row meaning something different from every other
+    // report type.
+    //
+    // Nullable with no default, unlike the money columns above: 0 and "not
+    // filled in" are different answers on a report somebody may file in
+    // stages, and the derived figures below should not read as settled when
+    // nothing has been entered.
+    //   commission outstanding = commissionDue - amountPaid
+    //   funds remaining        = fundsReceived - amountPaid
+    // Both are computed at render, never stored — a stored total drifts the
+    // moment one of its inputs is corrected.
+    fundsReceived: decimal("funds_received", { precision: 15, scale: 2 }),
+    commissionDue: decimal("commission_due", { precision: 15, scale: 2 }),
     // Trucks that entered today — security_gate's mirror of truckCount, which
     // this role uses for "trucks exited" instead.
     trucksEntered: integer("trucks_entered"),
