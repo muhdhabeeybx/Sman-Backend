@@ -458,6 +458,13 @@ const findFinanceReport = async ({
             amount: orderDepositAllocations.amount,
             depositReference: deposits.reference,
             depositCreatedAt: deposits.createdAt,
+            // What actually landed, as distinct from `amount` above — which
+            // is only the slice of this deposit that FIFO attributed to this
+            // order. Where a payment covered more than one order, or a
+            // surplus went to the wallet, the two differ, and the report
+            // wants the real figure so the differential against sales value
+            // is visible rather than pre-netted away.
+            depositAmount: deposits.amount,
             paystackDetails: deposits.paystackDetails,
             recorderFirstName: staff.firstName,
             recorderSurname: staff.surname,
