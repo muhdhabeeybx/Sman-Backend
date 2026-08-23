@@ -461,6 +461,23 @@ const findFinanceReport = async ({
             paystackDetails: deposits.paystackDetails,
             recorderFirstName: staff.firstName,
             recorderSurname: staff.surname,
+            // Who paid and when, taken from the bank statement line itself
+            // rather than the deposit's paystackDetails JSON. The JSON only
+            // started carrying senderName/paidAt recently, so 2,351 of the
+            // 2,434 statement-backed deposits have neither — while the line
+            // they were matched from has had the depositor and txn date all
+            // along. Reading the line makes every historical match show its
+            // payer and date, with no backfill of the JSON needed.
+            statementDepositor: sql`(
+              SELECT l.depositor FROM bank_statement_lines l
+              WHERE l.matched_deposit_id = ${deposits.id}
+              ORDER BY l.id LIMIT 1
+            )`,
+            statementTxnDate: sql`(
+              SELECT l.txn_date FROM bank_statement_lines l
+              WHERE l.matched_deposit_id = ${deposits.id}
+              ORDER BY l.id LIMIT 1
+            )`,
           })
           .from(orderDepositAllocations)
           .innerJoin(deposits, eq(orderDepositAllocations.depositId, deposits.id))
