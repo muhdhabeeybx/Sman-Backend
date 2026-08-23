@@ -116,7 +116,7 @@ const findAll = async ({ customer, pfiId, page = 1, limit = 50, type = "credit",
  */
 const findCustomerHistory = async ({ customerId, page = 1, limit = 50, dateFrom, dateTo } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(200, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [eq(deposits.customerId, customerId)];

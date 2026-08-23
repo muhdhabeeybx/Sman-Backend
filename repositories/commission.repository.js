@@ -31,7 +31,7 @@ const getRate = async (depotId, productId, tx = db) => {
 
 const getRates = async ({ depotId, page = 1, limit = 200 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(500, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
@@ -107,7 +107,7 @@ const findAll = async ({
   limit = 50,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
