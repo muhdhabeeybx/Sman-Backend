@@ -478,6 +478,18 @@ const findFinanceReport = async ({
               WHERE l.matched_deposit_id = ${deposits.id}
               ORDER BY l.id LIMIT 1
             )`,
+            // Internal wallet movements — a transfer between customers, or an
+            // overpayment carried over from another order — have no statement
+            // line and no reference, because no bank payment happened. Their
+            // source lives only in the description ("Wallet transfer from
+            // customer #1533"), so it goes out with the row and the customer
+            // id in it is resolved to a name here rather than leaving the
+            // report showing a bare dash for where the money came from.
+            depositDescription: deposits.description,
+            transferFromCustomerName: sql`(
+              SELECT c.name FROM customers c
+              WHERE c.id = NULLIF(substring(${deposits.description} from 'customer #([0-9]+)'), '')::int
+            )`,
           })
           .from(orderDepositAllocations)
           .innerJoin(deposits, eq(orderDepositAllocations.depositId, deposits.id))
