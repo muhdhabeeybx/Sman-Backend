@@ -186,26 +186,57 @@ const fleetSummary = async ({ dateFrom, dateTo } = {}) => {
 /**
  * Who owes us money on the delivery sales ledger, biggest first:
  * outstanding = sales value - payments, per customer.
+ *
+ * `totalOutstanding` is the whole book, not the slice `limit` returned. It
+ * used to be summed from `rows`, so a caller asking for the top 5 got a
+ * five-customer subtotal that the dashboard then presented as the total
+ * owed. The two figures answer different questions, so the total is now its
+ * own aggregate and `customerCount` says how many customers stand behind it.
  */
 const outstandingPayments = async ({ limit = 50 } = {}) => {
-  const rows = await db
+  const perCustomerOutstanding = sql`SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount})`;
+
+  const customerTotals = db
     .select({
       customerId: deliverySales.customerId,
-      customerName: sql`COALESCE(MAX(${deliveryCustomers.name}), MAX(${deliverySales.customerName}))`,
-      customerType: sql`MAX(${deliveryCustomers.customerType})`,
-      salesValue: sql`COALESCE(SUM(${deliverySales.salesValue}), 0)`,
-      paymentAmount: sql`COALESCE(SUM(${deliverySales.paymentAmount}), 0)`,
-      outstanding: sql`COALESCE(SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount}), 0)`,
+      outstanding: perCustomerOutstanding.as("outstanding"),
     })
     .from(deliverySales)
-    .leftJoin(deliveryCustomers, eq(deliverySales.customerId, deliveryCustomers.id))
     .groupBy(deliverySales.customerId)
-    .having(sql`SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount}) > 0`)
-    .orderBy(desc(sql`SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount})`))
-    .limit(Math.min(200, limit));
+    .having(sql`${perCustomerOutstanding} > 0`)
+    .as("customer_totals");
 
-  const totalOutstanding = rows.reduce((sum, row) => sum + num(row.outstanding), 0);
-  return { totalOutstanding, customers: rows };
+  const [rows, totals] = await Promise.all([
+    db
+      .select({
+        customerId: deliverySales.customerId,
+        customerName: sql`COALESCE(MAX(${deliveryCustomers.name}), MAX(${deliverySales.customerName}))`,
+        customerType: sql`MAX(${deliveryCustomers.customerType})`,
+        salesValue: sql`COALESCE(SUM(${deliverySales.salesValue}), 0)`,
+        paymentAmount: sql`COALESCE(SUM(${deliverySales.paymentAmount}), 0)`,
+        outstanding: sql`COALESCE(${perCustomerOutstanding}, 0)`,
+      })
+      .from(deliverySales)
+      .leftJoin(deliveryCustomers, eq(deliverySales.customerId, deliveryCustomers.id))
+      .groupBy(deliverySales.customerId)
+      .having(sql`${perCustomerOutstanding} > 0`)
+      .orderBy(desc(perCustomerOutstanding))
+      .limit(Math.min(200, limit)),
+    // Only customers in debit count toward the book — netting a customer in
+    // credit against one who owes would understate what is actually out.
+    db
+      .select({
+        total: sql`COALESCE(SUM(${customerTotals.outstanding}), 0)`,
+        customerCount: sql`COUNT(*)::int`,
+      })
+      .from(customerTotals),
+  ]);
+
+  return {
+    totalOutstanding: num(totals[0]?.total),
+    customerCount: Number(totals[0]?.customerCount) || 0,
+    customers: rows,
+  };
 };
 
 const dailyReportSummary = async ({ dateFrom, dateTo, location } = {}) => {

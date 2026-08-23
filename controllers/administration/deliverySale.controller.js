@@ -75,6 +75,31 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Confirm (or un-confirm) a hand-recorded deposit.
+ *
+ * Its own route because depositStatus is deliberately absent from the update
+ * schema — see the audit note in schemas/deliverySale.schema.js. The UI's
+ * toggle previously sent it on the update route, where zod stripped it, so
+ * the status never moved while the toast said it had.
+ */
+const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
+  const sale = await deliverySaleRepo.findById(req.params.id);
+  if (!sale) {
+    return res.status(404).json({ success: false, message: "Sale record not found" });
+  }
+
+  const updated = await deliverySaleRepo.update(sale.id, {
+    depositStatus: req.body.depositStatus,
+  });
+
+  res.json({
+    success: true,
+    message: `Deposit marked ${req.body.depositStatus}`,
+    data: { sale: updated },
+  });
+});
+
 const deleteDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {
@@ -88,5 +113,6 @@ module.exports = {
   getDeliverySaleById,
   createDeliverySale,
   updateDeliverySale,
+  setDeliverySaleDepositStatus,
   deleteDeliverySale,
 };

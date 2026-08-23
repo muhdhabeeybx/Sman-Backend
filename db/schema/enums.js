@@ -167,6 +167,24 @@ const paymentMethodEnum = pgEnum("payment_method", [
   "paystack_dva",
 ]);
 
+/**
+ * How a filling-station remittance reached the bank.
+ *
+ * Kept apart from payment_method, which says who keyed the payment in
+ * (a person or the gateway); this says what kind of money movement it was.
+ * The column is nullable: every row written before this existed has no
+ * channel on record and must not be guessed at, so it reads as unspecified
+ * rather than being defaulted into one of these.
+ *
+ * The pairing is what the ledger reports on — bank charges are the
+ * difference between what the POS transacted and what the bank credited,
+ * which is only knowable once both sides of a day are entered.
+ */
+const depositChannelEnum = pgEnum("deposit_channel", [
+  "pos",
+  "bank_deposit",
+]);
+
 const webhookStatusEnum = pgEnum("webhook_status", [
   "pending",
   "processed",
@@ -367,6 +385,7 @@ module.exports = {
   loadingStatusEnum,
   depositStatusEnum,
   paymentMethodEnum,
+  depositChannelEnum,
   webhookStatusEnum,
   fleetEntryTypeEnum,
   customerIdentityProviderEnum,

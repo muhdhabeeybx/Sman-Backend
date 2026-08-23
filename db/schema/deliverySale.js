@@ -12,7 +12,7 @@ const {
   uniqueIndex,
 } = require("drizzle-orm/pg-core");
 const { sql } = require("drizzle-orm");
-const { depositStatusEnum, paymentMethodEnum } = require("./enums");
+const { depositStatusEnum, paymentMethodEnum, depositChannelEnum } = require("./enums");
 const { deliveryCustomers } = require("./deliveryCustomer");
 
 const deliverySales = pgTable(
@@ -33,6 +33,16 @@ const deliverySales = pgTable(
     balance: decimal("balance", { precision: 15, scale: 2 }).default("0"),
     payerName: varchar("payer_name", { length: 255 }).default(""),
     bank: varchar("bank", { length: 255 }).default(""),
+    // Which bank account the money went into, as a real reference rather than
+    // only the free-text `bank` string above. That string stays the source of
+    // truth for every row written before this column existed, and is still
+    // written alongside it, so historical rows keep resolving by account
+    // number the way they always did.
+    bankAccountId: integer("bank_account_id"),
+    // POS or bank deposit — null on every pre-existing row and on rows that
+    // are not remittances at all (a pump sale, an expense). See
+    // depositChannelEnum for why it is not defaulted.
+    depositChannel: depositChannelEnum("deposit_channel"),
     dateOfPayment: varchar("date_of_payment", { length: 20 }),
     depositStatus: depositStatusEnum("deposit_status").default("pending").notNull(),
     phoneNumber: varchar("phone_number", { length: 30 }).default(""),
@@ -50,6 +60,7 @@ const deliverySales = pgTable(
   (table) => [
     index("delivery_sales_customer_idx").on(table.customerId),
     index("delivery_sales_truck_idx").on(table.truckNumber),
+    index("delivery_sales_deposit_channel_idx").on(table.depositChannel),
     uniqueIndex("delivery_sales_paystack_ref_unique_idx")
       .on(table.paystackReference)
       .where(sql`${table.paystackReference} IS NOT NULL AND ${table.paystackReference} != ''`),
