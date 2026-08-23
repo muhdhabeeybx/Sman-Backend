@@ -1028,6 +1028,64 @@ const reconcileOrderEffects = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * POST /orders/:id/rematch-funding — point a paid order at the statement
+ * line(s) that actually paid for it.
+ *
+ * For the case the matching flow had no answer to: the wrong line was
+ * matched, the order is already paid, and a MATCHED line could never be
+ * released again — so the finance report named the wrong payment for that
+ * order permanently. See walletService.rematchOrderFunding for the ordering
+ * the money movement depends on.
+ */
+const rematchOrderFunding = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const { bankAccountId, lineIds, description } = req.body;
+
+  const order = await orderRepo.findById(orderId);
+  if (!order) throw httpErr(404, "Order not found");
+  if (order.paymentStatus !== "Paid") {
+    throw httpErr(409, "Only a paid order has a payment to re-match");
+  }
+
+  const result = await walletService.rematchOrderFunding({
+    orderId,
+    bankAccountId: Number(bankAccountId),
+    lineIds: lineIds.map(Number),
+    staffId: req.user?.id || null,
+    description: description || "",
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ success: false, message: result.message });
+  }
+
+  await auditLogRepo.record({
+    entityType: "order",
+    entityId: orderId,
+    action: "order.funding_rematched",
+    actor: { type: "staff", staffId: req.user.id },
+    metadata: {
+      replacedDepositIds: result.replacedDepositIds,
+      newDepositIds: result.newDeposits.map((d) => d.id),
+      lineIds: lineIds.map(Number),
+      newTotal: result.newTotal,
+    },
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({
+    success: true,
+    message: "Payment re-matched — the previous statement line is back in the unmatched pool",
+    data: {
+      newTotal: result.newTotal,
+      unattributed: result.unattributed,
+      replaced: result.replacedDepositIds.length,
+    },
+  });
+});
+
 // Edit anything about an order short of its status — reassign it to another
 // customer, move it to a different PFI, correct its date, quantity, price or
 // logistics text. See orderService.updateOrder for why status/paymentStatus
@@ -1055,6 +1113,7 @@ module.exports = {
   getOrderById,
   createOrder,
   updateOrder,
+  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   generateOrderTickets,

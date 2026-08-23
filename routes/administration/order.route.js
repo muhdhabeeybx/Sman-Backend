@@ -9,6 +9,7 @@ const {
   getOrderById,
   createOrder,
   updateOrder,
+  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   deleteOrder,
@@ -51,6 +52,15 @@ router.patch(
   verifyStaff,
   validate({ params: orderSchemas.idParam, body: orderSchemas.updateOrder }),
   updateOrder
+);
+
+// Correcting which statement line is recorded against a paid order. Not a
+// lifecycle transition — the order stays paid and its hold is untouched.
+router.post(
+  "/:id/rematch-funding",
+  verifyStaff,
+  validate({ params: orderSchemas.idParam, body: orderSchemas.rematchFunding }),
+  rematchOrderFunding
 );
 
 // Lifecycle transitions are role-gated to the desk that owns the action, and

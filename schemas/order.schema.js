@@ -212,6 +212,13 @@ const loadTruck = z.object({
   driverPhone: optionalString("Driver phone", 50),
 });
 
+// Re-matching a paid order onto the statement line(s) that really paid it.
+const rematchFunding = z.object({
+  bankAccountId: id("Bank account"),
+  lineIds: z.array(id("Statement line")).min(1, "Pick at least one statement line"),
+  description: optionalString("Description", 500),
+});
+
 // A load-scoped route: /orders/:id/trucks/:loadId/...
 const loadParam = z.object({ id: id("Order id"), loadId: id("Load id") });
 
@@ -241,4 +248,5 @@ module.exports = {
   loadTruck,
   loadParam,
   updateTruckLoad,
+  rematchFunding,
 };
