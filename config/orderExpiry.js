@@ -11,4 +11,13 @@ const orderExpiryHours = () => {
 
 const orderExpiryMs = () => orderExpiryHours() * 60 * 60 * 1000;
 
-module.exports = { orderExpiryHours, orderExpiryMs };
+/**
+ * Kill switch for the whole expiry mechanism — both the sweep and the
+ * lazy per-request check. A temporary business call, not a config tune, so
+ * it's an explicit flag rather than an implausibly large ORDER_EXPIRY_HOURS:
+ * intent ("expiry is off") should be readable in the env, not inferred from
+ * a magic number.
+ */
+const orderExpiryDisabled = () => String(process.env.ORDER_EXPIRY_DISABLED || "").toLowerCase() === "true";
+
+module.exports = { orderExpiryHours, orderExpiryMs, orderExpiryDisabled };

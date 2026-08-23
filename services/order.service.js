@@ -36,7 +36,7 @@ const notifyWhatsAppPaymentConfirmed = (orderId) => {
   );
 };
 
-const { orderExpiryHours, orderExpiryMs } = require("../config/orderExpiry");
+const { orderExpiryHours, orderExpiryMs, orderExpiryDisabled } = require("../config/orderExpiry");
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -48,6 +48,7 @@ function httpError(status, message) {
  */
 function isOrderExpired(order, now = Date.now()) {
   return (
+    !orderExpiryDisabled() &&
     order.status === "Pending" &&
     order.paymentStatus !== "Paid" &&
     now - new Date(order.createdAt).getTime() >= orderExpiryMs()
@@ -57,9 +58,12 @@ function isOrderExpired(order, now = Date.now()) {
 /**
  * Compute the expiration deadline for an order. Returns an ISO string if the
  * order is Pending and unpaid; null otherwise (Paid/Released/Completed orders
- * never expire, Expired/Cancelled orders already have expiredAt).
+ * never expire, Expired/Cancelled orders already have expiredAt) — and null
+ * whenever the expiry mechanism itself is switched off, so the frontend stops
+ * showing a countdown that will never actually lapse anything.
  */
 function computeExpiresAt(order) {
+  if (orderExpiryDisabled()) return null;
   if (order.status !== "Pending" || order.paymentStatus === "Paid") return null;
   const created = new Date(order.createdAt).getTime();
   return new Date(created + orderExpiryMs()).toISOString();
@@ -90,7 +94,7 @@ async function withExpiresAt(orderOrOrders) {
  */
 async function expireAndAttach(order) {
   // If pending and unpaid, check if deadline has passed
-  if (order.status === "Pending" && order.paymentStatus !== "Paid") {
+  if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus !== "Paid") {
     const deadline = new Date(order.createdAt).getTime() + orderExpiryMs();
     if (Date.now() >= deadline) {
       try {
@@ -795,6 +799,7 @@ async function expireOrder(orderId, { tx } = {}) {
  * @returns {number} how many orders were expired
  */
 async function expireStaleOrders() {
+  if (orderExpiryDisabled()) return 0;
   const cutoff = new Date(Date.now() - orderExpiryMs());
   const stale = await orderRepo.findStalePending(cutoff);
 
