@@ -166,6 +166,7 @@ test("every copy string, pinned", (t) => {
 
     orderCreated: copy.orderCreated(ORDER),
     orderCreatedHoursOnly: copy.orderCreated({ ...ORDER, expiresAt: undefined }),
+    orderCreatedNoWindow: copy.orderCreated({ ...ORDER, expiresAt: undefined, expiryHours: null }),
     payFailedInsufficient: copy.payFailed("Insufficient wallet balance."),
     payFailedGeneric: copy.payFailed("Payment failed"),
     orderExpired: copy.orderExpired(),

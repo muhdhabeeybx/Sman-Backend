@@ -4,7 +4,7 @@ const { orders } = require("../db/schema");
 const { orderRepo, waMessageRepo } = require("../repositories");
 const { loadCatalog } = require("../services/catalog.service");
 const { computeExpiresAt } = require("../services/order.service");
-const { orderExpiryHours } = require("../config/orderExpiry");
+const { orderExpiryHours, orderExpiryDisabled } = require("../config/orderExpiry");
 
 /**
  * Builds the `context` the pure engine consumes. The engine never fetches —
@@ -60,7 +60,7 @@ const loadLastOrder = async (customerId, lastOrderId) => {
     virtualAccountNumber: full.virtualAccountNumber,
     // Payment window — same deadline the portal countdown uses.
     expiresAt: computeExpiresAt(full),
-    expiryHours: orderExpiryHours(),
+    expiryHours: orderExpiryDisabled() ? null : orderExpiryHours(),
   };
 };
 
