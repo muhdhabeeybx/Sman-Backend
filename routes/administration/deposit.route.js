@@ -11,6 +11,7 @@ const {
   syncPaystackDeposit,
   transferBalance,
   reverseDepositById,
+  unmatchDeposit,
 } = require("../../controllers/administration/deposit.controller");
 
 router.post("/sync-paystack", verifyStaff, validate({ body: depositSchemas.syncPaystack }), syncPaystackDeposit);
@@ -31,6 +32,15 @@ router.post(
   requireRole("super_admin", "finance"),
   validate({ params: depositSchemas.idParam, body: depositSchemas.reverseDeposit }),
   reverseDepositById
+);
+// Undo a statement match — see unmatchDeposit. Refused while the money is
+// committed to a live order, which the response explains.
+router.post(
+  "/:id/unmatch",
+  verifyStaff,
+  requireRole("super_admin", "finance"),
+  validate({ params: depositSchemas.idParam, body: depositSchemas.reverseDeposit }),
+  unmatchDeposit
 );
 router.post("/", verifyStaff, requireRole("super_admin", "finance"), validate({ body: depositSchemas.createDeposit }), createDeposit);
 

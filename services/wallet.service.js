@@ -537,6 +537,77 @@ const allocateOrderFunding = async (customerId, orderId, amount, tx) => {
 };
 
 /**
+ * Undo a statement match outright: take the deposit back out of the wallet,
+ * drop whatever order it was attributed to, and return its line to the
+ * unmatched pool so it can be matched where it belongs.
+ *
+ * Unlike rematchOrderFunding this removes money rather than swapping it, so
+ * it only works while that money is still free. If the deposit is what paid
+ * a live order, reversing it would take the balance below what that order's
+ * hold has committed — the guard in reverseDeposit refuses, and the caller
+ * is told to re-match instead, which brings a replacement with it.
+ *
+ * The deposit row is not deleted. It is reversed, leaving both it and its
+ * mirror debit on the ledger — a wallet's history is a record of what
+ * happened, including the corrections.
+ */
+const unmatchStatementDeposit = async ({ depositId, staffId = null, description = "" }, tx) => {
+  const run = async (trx) => {
+    const [deposit] = await trx
+      .select()
+      .from(deposits)
+      .where(eq(deposits.id, depositId))
+      .for("update")
+      .limit(1);
+    if (!deposit) return { success: false, message: "Deposit not found" };
+    if (deposit.type !== "credit") {
+      return { success: false, message: "Only a credit deposit can be unmatched" };
+    }
+
+    // Which orders were pointing at it, so the caller can be told what was
+    // detached rather than discovering it on the report afterwards.
+    const attached = await trx
+      .select({ orderId: orderDepositAllocations.orderId, amount: orderDepositAllocations.amount })
+      .from(orderDepositAllocations)
+      .where(eq(orderDepositAllocations.depositId, depositId));
+
+    await trx.delete(orderDepositAllocations).where(eq(orderDepositAllocations.depositId, depositId));
+
+    const res = await reverseDeposit(
+      {
+        depositId,
+        recordedBy: staffId,
+        description: description || `Unmatched — this payment was not for ${attached.length ? `order #${attached[0].orderId}` : "this customer"}`,
+      },
+      trx,
+    );
+    if (!res.success) {
+      return {
+        success: false,
+        insufficient: res.insufficient,
+        message: res.insufficient
+          ? "This payment is what funded a live order, so it cannot simply be removed — the money is already committed. Use Re-match on that order to swap in the correct statement line instead."
+          : res.message || "Could not unmatch this payment",
+      };
+    }
+
+    const freed = await trx
+      .update(bankStatementLines)
+      .set({ status: "UNMATCHED", matchedDepositId: null, matchedOrderId: null, matchedBy: null, matchedAt: null })
+      .where(eq(bankStatementLines.matchedDepositId, depositId))
+      .returning();
+
+    return {
+      success: true,
+      reversal: res.deposit,
+      detachedFrom: attached.map((a) => a.orderId),
+      freedLineIds: freed.map((l) => l.id),
+    };
+  };
+  return tx ? run(tx) : db.transaction(run);
+};
+
+/**
  * Point an order at the statement line(s) that actually paid for it.
  *
  * The situation this exists for: the wrong line was matched, the order is
@@ -927,6 +998,7 @@ module.exports = {
   reverseDeposit,
   reassignHold,
   rematchOrderFunding,
+  unmatchStatementDeposit,
   placeHold,
   releaseHold,
   convertHold,

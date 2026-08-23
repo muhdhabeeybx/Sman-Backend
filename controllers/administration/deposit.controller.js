@@ -219,6 +219,45 @@ const reverseDepositById = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * POST /deposits/:id/unmatch — undo a statement match.
+ *
+ * Detaches the deposit from whatever order it was attributed to, takes the
+ * money back out of the wallet and returns its statement line to the
+ * unmatched pool. Refused while that money is what funds a live order — the
+ * response says to re-match that order instead, which brings a replacement.
+ */
+const unmatchDeposit = asyncHandler(async (req, res) => {
+  const existing = await depositRepo.findByIdFull(req.params.id);
+  if (!existing) {
+    return res.status(404).json({ success: false, message: "Deposit not found" });
+  }
+
+  const result = await walletService.unmatchStatementDeposit({
+    depositId: Number(req.params.id),
+    staffId: req.user?.id || null,
+    description: req.body?.description || "",
+  });
+
+  if (!result.success) {
+    return res.status(result.insufficient ? 409 : 400).json({
+      success: false,
+      message: result.message,
+    });
+  }
+
+  res.json({
+    success: true,
+    message: result.freedLineIds.length
+      ? "Unmatched — the statement line is back in the pool"
+      : "Unmatched",
+    data: {
+      detachedFrom: result.detachedFrom,
+      freedLineIds: result.freedLineIds,
+    },
+  });
+});
+
 const syncPaystackDeposit = asyncHandler(async (req, res) => {
   const { reference } = req.body;
 
@@ -249,5 +288,5 @@ const syncPaystackDeposit = asyncHandler(async (req, res) => {
 
 module.exports = {
   getDeposits, getDepositById, createDeposit, syncPaystackDeposit,
-  transferBalance, reverseDepositById,
+  transferBalance, reverseDepositById, unmatchDeposit,
 };
