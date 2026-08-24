@@ -3,12 +3,21 @@ const { customerRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
 
 const getCustomers = asyncHandler(async (req, res) => {
-  const { search, searchType, status, page = 1, limit = 50 } = req.query;
+  const {
+    search, searchType, status,
+    depotId, activity, hasBalance, optedOut, sort,
+    page = 1, limit = 50,
+  } = req.query;
 
   const result = await customerRepo.findAll({
     search,
     searchType,
     status,
+    depotId,
+    activity,
+    hasBalance,
+    optedOut,
+    sort,
     page,
     limit,
   });

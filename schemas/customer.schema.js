@@ -46,6 +46,14 @@ const listCustomers = pagination.extend({
   search: searchTerm,
   searchType: enumOf("Search type", ["name", "email", "phone", "companyName"]).optional(),
   status: enumOf("Status", ["Active", "Inactive", "Pending", "all"]).optional(),
+  // How a customer trades, not who they are — the list sorts and filters on
+  // these. `sort` is an enum rather than a free string because the repository
+  // puts it into an ORDER BY; see SORTS there.
+  depotId: numberLike("Depot id").optional(),
+  activity: enumOf("Activity", ["frequent", "occasional", "dormant", "never"]).optional(),
+  hasBalance: enumOf("Has balance", ["yes", "no"]).optional(),
+  optedOut: enumOf("Opted out", ["yes", "no"]).optional(),
+  sort: enumOf("Sort", ["active", "recent", "spend", "balance", "name", "newest"]).optional(),
 });
 
 const idParam = z.object({ id: id("Customer id") });

@@ -47,59 +47,183 @@ const findByPaystackCustomerId = async (customerCode) => {
   return row || null;
 };
 
-const findAll = async ({ search, searchType, status, page = 1, limit = 50 } = {}) => {
+/**
+ * How recently a customer has ordered, as a band rather than a raw count.
+ *
+ * The customers page sorts on activity by default and filters on these, so
+ * the thresholds live here — one definition the list, the filter and the
+ * summary counts all read, instead of three that drift.
+ *
+ * "dormant" deliberately means ordered-before-but-not-lately, and is kept
+ * apart from "never": a customer who bought for two years and stopped is a
+ * different problem from one who has never bought at all, and lumping them
+ * together hides the first behind the second.
+ */
+const ACTIVITY_WINDOW_DAYS = 90;
+const FREQUENT_MIN_ORDERS = 3;
+
+const ACTIVITY_SQL = {
+  frequent: sql`s.orders_recent >= ${FREQUENT_MIN_ORDERS}`,
+  occasional: sql`s.orders_recent BETWEEN 1 AND ${FREQUENT_MIN_ORDERS - 1}`,
+  dormant: sql`COALESCE(s.order_count, 0) > 0 AND COALESCE(s.orders_recent, 0) = 0`,
+  never: sql`COALESCE(s.order_count, 0) = 0`,
+};
+
+/**
+ * Sort orders, whitelisted.
+ *
+ * The key arrives from a query string, so it selects one of these rather than
+ * being interpolated — a sort parameter is the classic way an ORDER BY turns
+ * into an injection point.
+ *
+ * NULLS LAST throughout: a customer who has never ordered has no last-order
+ * date and no spend, and Postgres sorts NULL highest on DESC, which would put
+ * exactly the least interesting rows at the top of every list.
+ */
+const SORTS = {
+  active: sql`s.orders_recent DESC NULLS LAST, s.order_count DESC NULLS LAST, s.last_order_at DESC NULLS LAST`,
+  recent: sql`s.last_order_at DESC NULLS LAST`,
+  spend: sql`s.lifetime_value DESC NULLS LAST`,
+  balance: sql`c.balance::numeric DESC`,
+  name: sql`c.name ASC`,
+  newest: sql`c.created_at DESC`,
+};
+
+/**
+ * The customer list, each row carrying how that customer actually trades.
+ *
+ * Order history is aggregated once in a CTE and joined, rather than fetched
+ * per row: the page shows order count, last order, lifetime value and the
+ * depot someone buys from most, and asking for those one customer at a time
+ * is 1,300 round trips to render one screen.
+ *
+ * `summary` is computed over the same WHERE clause as the rows, so the cards
+ * describe the filter in view rather than the whole table — a filtered list
+ * whose totals silently still describe everything is worse than no totals.
+ */
+const findAll = async ({
+  search,
+  searchType,
+  status,
+  depotId,
+  activity,
+  hasBalance,
+  optedOut,
+  sort = "active",
+  page = 1,
+  limit = 50,
+} = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(5000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
-  const conditions = [];
+  const where = [];
 
   if (search) {
     const pattern = `%${search}%`;
-    if (searchType === "email") {
-      conditions.push(ilike(customers.email, pattern));
-    } else if (searchType === "phone") {
-      conditions.push(ilike(customers.phone, pattern));
-    } else if (searchType === "companyName") {
-      conditions.push(ilike(customers.companyName, pattern));
-    } else {
-      conditions.push(
-        or(
-          ilike(customers.name, pattern),
-          ilike(customers.email, pattern),
-          ilike(customers.phone, pattern),
-          ilike(customers.companyName, pattern)
-        )
+    if (searchType === "email") where.push(sql`c.email ILIKE ${pattern}`);
+    else if (searchType === "phone") where.push(sql`c.phone ILIKE ${pattern}`);
+    else if (searchType === "companyName") where.push(sql`c.company_name ILIKE ${pattern}`);
+    else
+      where.push(
+        sql`(c.name ILIKE ${pattern} OR c.email ILIKE ${pattern} OR c.phone ILIKE ${pattern} OR c.company_name ILIKE ${pattern})`
       );
-    }
   }
 
-  if (status && status !== "all") {
-    conditions.push(eq(customers.status, status));
+  if (status && status !== "all") where.push(sql`c.status = ${status}`);
+
+  // The depot a customer has actually bought from — any of them, not just the
+  // one they use most. Filtering on the primary depot alone would drop a
+  // customer from their own second location's list.
+  if (depotId) {
+    where.push(
+      sql`EXISTS (SELECT 1 FROM orders o2 WHERE o2.customer_id = c.id AND o2.depot_id = ${Number(depotId)})`
+    );
   }
 
-  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  if (activity && ACTIVITY_SQL[activity]) where.push(ACTIVITY_SQL[activity]);
+  if (hasBalance === "yes") where.push(sql`c.balance::numeric > 0`);
+  if (hasBalance === "no") where.push(sql`c.balance::numeric <= 0`);
+  if (optedOut === "yes") where.push(sql`c.marketing_opt_out = true`);
+  if (optedOut === "no") where.push(sql`c.marketing_opt_out = false`);
 
-  const [rows, [statsRow]] = await Promise.all([
-    db
-      .select()
-      .from(customers)
-      .where(whereClause)
-      .orderBy(desc(customers.createdAt))
-      .limit(limitNum)
-      .offset(offset),
-    db
-      .select({
-        total: count(),
-        active: sql`SUM(CASE WHEN ${customers.status} = 'Active' THEN 1 ELSE 0 END)::int`,
-        inactive: sql`SUM(CASE WHEN ${customers.status} = 'Inactive' THEN 1 ELSE 0 END)::int`,
-        totalBalance: sql`COALESCE(SUM(${customers.balance}::numeric), 0)::float`,
-      })
-      .from(customers)
-      .where(whereClause),
+  const whereSql = where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
+  const orderBySql = SORTS[sort] || SORTS.active;
+
+  // One CTE, reused by both the page query and the summary, so the two can
+  // never disagree about what a customer's history is.
+  const statsCte = sql`
+    WITH stats AS (
+      SELECT
+        o.customer_id,
+        COUNT(*)::int AS order_count,
+        COUNT(*) FILTER (
+          WHERE o.created_at >= now() - (${ACTIVITY_WINDOW_DAYS} || ' days')::interval
+        )::int AS orders_recent,
+        COUNT(*) FILTER (WHERE o.created_at >= date_trunc('month', now()))::int AS orders_this_month,
+        MAX(o.created_at) AS last_order_at,
+        MIN(o.created_at) AS first_order_at,
+        -- Paid only: an unpaid or cancelled order is not revenue, and a
+        -- lifetime-value column that counts them overstates every customer
+        -- who ever abandoned one.
+        COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.payment_status = 'Paid'), 0)::float AS lifetime_value,
+        MODE() WITHIN GROUP (ORDER BY o.depot_id) AS primary_depot_id
+      FROM orders o
+      GROUP BY o.customer_id
+    )
+  `;
+
+  const [rowsResult, summaryResult] = await Promise.all([
+    db.execute(sql`
+      ${statsCte}
+      SELECT
+        c.*,
+        COALESCE(s.order_count, 0) AS "orderCount",
+        COALESCE(s.orders_recent, 0) AS "ordersRecent",
+        COALESCE(s.orders_this_month, 0) AS "ordersThisMonth",
+        s.last_order_at AS "lastOrderAt",
+        s.first_order_at AS "firstOrderAt",
+        COALESCE(s.lifetime_value, 0) AS "lifetimeValue",
+        d.name AS "primaryDepotName",
+        d.state AS "primaryDepotState",
+        s.primary_depot_id AS "primaryDepotId",
+        CASE
+          WHEN COALESCE(s.order_count, 0) = 0 THEN 'never'
+          WHEN COALESCE(s.orders_recent, 0) >= ${FREQUENT_MIN_ORDERS} THEN 'frequent'
+          WHEN COALESCE(s.orders_recent, 0) >= 1 THEN 'occasional'
+          ELSE 'dormant'
+        END AS "activityBand"
+      FROM customers c
+      LEFT JOIN stats s ON s.customer_id = c.id
+      LEFT JOIN depots d ON d.id = s.primary_depot_id
+      ${whereSql}
+      ORDER BY ${orderBySql}
+      LIMIT ${limitNum} OFFSET ${offset}
+    `),
+    db.execute(sql`
+      ${statsCte}
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE c.status = 'Active')::int AS active,
+        COUNT(*) FILTER (WHERE c.status = 'Inactive')::int AS inactive,
+        COALESCE(SUM(c.balance::numeric), 0)::float AS "totalBalance",
+        COALESCE(SUM(s.lifetime_value), 0)::float AS "lifetimeRevenue",
+        COUNT(*) FILTER (WHERE COALESCE(s.orders_this_month, 0) > 0)::int AS "orderedThisMonth",
+        COUNT(*) FILTER (WHERE c.created_at >= date_trunc('month', now()))::int AS "newThisMonth",
+        COUNT(*) FILTER (WHERE COALESCE(s.orders_recent, 0) >= ${FREQUENT_MIN_ORDERS})::int AS frequent,
+        COUNT(*) FILTER (WHERE COALESCE(s.order_count, 0) > 0 AND COALESCE(s.orders_recent, 0) = 0)::int AS dormant,
+        COUNT(*) FILTER (WHERE COALESCE(s.order_count, 0) = 0)::int AS never,
+        COUNT(*) FILTER (WHERE c.marketing_opt_out = true)::int AS "optedOut",
+        COUNT(*) FILTER (WHERE COALESCE(NULLIF(c.phone, ''), NULL) IS NOT NULL)::int AS "withPhone"
+      FROM customers c
+      LEFT JOIN stats s ON s.customer_id = c.id
+      ${whereSql}
+    `),
   ]);
 
-  const total = Number(statsRow?.total || 0);
+  const rows = rowsResult.rows ?? rowsResult;
+  const summary = (summaryResult.rows ?? summaryResult)[0] || {};
+  const total = Number(summary.total || 0);
 
   return {
     customers: rows,
@@ -110,9 +234,17 @@ const findAll = async ({ search, searchType, status, page = 1, limit = 50 } = {}
     },
     summary: {
       total,
-      active: Number(statsRow?.active || 0),
-      inactive: Number(statsRow?.inactive || 0),
-      totalBalance: Number(statsRow?.totalBalance || 0),
+      active: Number(summary.active || 0),
+      inactive: Number(summary.inactive || 0),
+      totalBalance: Number(summary.totalBalance || 0),
+      lifetimeRevenue: Number(summary.lifetimeRevenue || 0),
+      orderedThisMonth: Number(summary.orderedThisMonth || 0),
+      newThisMonth: Number(summary.newThisMonth || 0),
+      frequent: Number(summary.frequent || 0),
+      dormant: Number(summary.dormant || 0),
+      never: Number(summary.never || 0),
+      optedOut: Number(summary.optedOut || 0),
+      withPhone: Number(summary.withPhone || 0),
     },
   };
 };
