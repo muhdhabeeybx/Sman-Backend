@@ -370,6 +370,16 @@ const listExpenses = async ({
   limit = 25,
   /** Null means oversight — see everything. A number scopes to one submitter. */
   onlySubmitterId = null,
+  /**
+   * A user-chosen "who raised it" filter. Deliberately NOT onlySubmitterId:
+   * that one is a permission scope, and setting it also switches OFF the
+   * location/PFI narrowing below (see the note there). Reusing it here would
+   * have turned a dropdown into a way to read colleagues' expenses at
+   * locations the caller cannot otherwise see. This one stacks on top of the
+   * scope instead of replacing it, so an out-of-scope pick returns nothing
+   * rather than more.
+   */
+  submitterId = null,
   /** The authenticated caller, for location/PFI scoping (undefined = unfiltered). */
   scopeUser = null,
 } = {}) => {
@@ -428,18 +438,30 @@ const listExpenses = async ({
     base.push(client`to_char(e.expense_date, 'YYYY-MM') = ${month}`);
   }
 
+  // Held apart from `base` so the submitter dropdown can be built from
+  // everyone in view. Folded into `base` it would filter its own option list,
+  // which collapses to the one person already picked and leaves no way to
+  // switch to anybody else — the same trap the status tabs avoid below.
+  const submitterCond =
+    submitterId && submitterId !== "all"
+      ? client`COALESCE(e.added_by, e.recorded_by) = ${Number(submitterId)}`
+      : null;
+
   const join = (parts) => parts.reduce((a, c, i) => (i === 0 ? c : client`${a} AND ${c}`));
-  const baseClause = join(base);
+  /** Everything except who raised it — what the submitter dropdown is drawn from. */
+  const anySubmitterClause = join(base);
+  const scoped = submitterCond ? [...base, submitterCond] : base;
+  const baseClause = join(scoped);
 
   // The status filter is applied to rows and totals, but deliberately NOT to
   // the tab counts — otherwise every other tab reads zero once you are inside
   // one, which is the single most-reported "the numbers are wrong" bug.
-  const withStatus = [...base];
+  const withStatus = [...scoped];
   if (status === "awaiting") withStatus.push(client`e.status = ANY(${OPEN_STATES})`);
   else if (status && status !== "all") withStatus.push(client`e.status = ${status}`);
   const rowClause = join(withStatus);
 
-  const [rows, [totals], [counts], banks] = await Promise.all([
+  const [rows, [totals], [counts], banks, submitters] = await Promise.all([
     client`
       SELECT e.*, ${GL_COLS}, c.is_system_category, p.pfi_number,
              sub.first_name || ' ' || sub.surname AS submitted_by_name,
@@ -492,6 +514,17 @@ const listExpenses = async ({
       WHERE ${baseClause} AND e.bank_paid_from <> ''
       ORDER BY e.bank_paid_from
     `,
+    // An inner join, so someone who raised nothing in view is not offered —
+    // and neither is "nobody", which a legacy row with no added_by would
+    // otherwise contribute as a blank option that filters to nothing.
+    client`
+      SELECT DISTINCT s.id, s.first_name || ' ' || s.surname AS name
+      FROM pfi_expenses e
+      JOIN expense_categories c ON c.id = e.category_id
+      JOIN staff s ON s.id = COALESCE(e.added_by, e.recorded_by)
+      WHERE ${anySubmitterClause}
+      ORDER BY name
+    `,
   ]);
 
   return {
@@ -506,6 +539,7 @@ const listExpenses = async ({
     },
     statusCounts: counts,
     banks: banks.map((b) => b.bank_paid_from),
+    submitters: submitters.map((s) => ({ id: s.id, name: s.name })),
     pagination: {
       page: pageNum,
       limit: limitNum,
