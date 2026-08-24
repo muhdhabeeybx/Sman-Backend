@@ -395,10 +395,17 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
         d.created_at AS "createdAt",
         d.description,
         d.reference,
+        st.first_name AS "recorderFirstName",
+        st.surname AS "recorderSurname",
         l.depositor AS "statementDepositor",
         l.narration AS "statementNarration",
         l.txn_date AS "statementTxnDate"
       FROM deposits d
+      -- Who keyed the credit in. The allocation path has carried this from
+      -- the start; without it here the report's Recorded By column had
+      -- nothing to put in a wallet-funded order's rows and fell back to
+      -- printing the bank narration, which named the payer, not the staff.
+      LEFT JOIN staff st ON st.id = d.recorded_by
       LEFT JOIN LATERAL (
         SELECT depositor, narration, txn_date
         FROM bank_statement_lines
@@ -489,6 +496,8 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
           statementDepositor: c.statementDepositor || "",
           statementNarration: c.statementNarration || "",
           statementTxnDate: c.statementTxnDate || null,
+          recorderFirstName: c.recorderFirstName || null,
+          recorderSurname: c.recorderSurname || null,
           transferFromCustomerId: fromId,
           transferFromCustomerName: fromId ? nameById.get(fromId) || "" : "",
           // The bank credits behind an internal transfer, when they reconcile.
@@ -499,6 +508,8 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
             narration: b.statementNarration || "",
             txnDate: b.statementTxnDate || b.createdAt,
             reference: b.reference || "",
+            recorderFirstName: b.recorderFirstName || null,
+            recorderSurname: b.recorderSurname || null,
           })),
           reconciled: behind.length > 0,
         };
