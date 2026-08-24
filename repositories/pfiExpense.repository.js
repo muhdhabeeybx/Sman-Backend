@@ -1,5 +1,4 @@
 const { client } = require("../db");
-const { REVENUE_STATUSES } = require("../lib/pfiFinance");
 const { OPEN_STATES } = require("../lib/expenseChain");
 
 /**
@@ -57,10 +56,19 @@ const aggregatesFor = async (ids) => {
       WHERE e.pfi_id = ANY(${list}) AND e.deleted_at IS NULL
       GROUP BY e.pfi_id
     `,
+    // Invoiced value on every order whose payment is confirmed — the same
+    // rule and the same column as `sold` below, so litres sold and money
+    // earned can never tell different stories, and both agree with the
+    // finance report for the batch.
+    //
+    // This was `status = ANY(REVENUE_STATUSES)`. The two are co-extensive in
+    // the current data (no order is paid and also cancelled or expired), so
+    // no existing revenue, profit or margin figure moves; it is the rule
+    // being made to match the one beside it.
     client`
       SELECT pfi_id, COALESCE(SUM(total_amount), 0)::text AS total, COUNT(*)::int AS orders
       FROM orders
-      WHERE pfi_id = ANY(${list}) AND status = ANY(${REVENUE_STATUSES})
+      WHERE pfi_id = ANY(${list}) AND payment_status = 'Paid'
       GROUP BY pfi_id
     `,
     // The append-only ledger is the source of truth for released stock.
@@ -89,69 +97,45 @@ const aggregatesFor = async (ids) => {
       GROUP BY a.pfi_id
     `,
     /**
-     * What has actually been sold off each batch — the figure the stock
-     * report lives on.
+     * What has been sold off each batch: the ordered quantity on every order
+     * whose PAYMENT is confirmed. Nothing else.
      *
-     * Driven by the ORDER, not by the stock ledgers, because the ledgers are
-     * not guaranteed to have a row: an order assigned to a PFI through the
-     * bulk assign-orders action sets orders.pfi_id directly and writes
-     * neither an allocation nor a movement. Summing only the ledgers made
-     * every such order invisible — a batch with 20 million litres of
-     * confirmed sales read as untouched, full tank, nothing sold.
+     * This is deliberately the same rule, on the same column, that the
+     * finance report uses (orders.payment_status = 'Paid', summing
+     * orders.quantity), so a batch's Total Sold and the finance report's
+     * Total Quantity for that PFI are the same number by construction rather
+     * than by coincidence.
      *
-     * An order counts once its payment is confirmed (REVENUE_STATUSES —
-     * exactly the set `revenue` above uses, so litres sold and money earned
-     * can never tell different stories). A merely-placed, unpaid order does
-     * NOT count as sold; it still holds its reservation against
-     * pfis.sold_qty_litres, which is the capacity gate, not this.
+     * ── Why it no longer reads the stock ledgers ──────────────────────────
      *
-     * Per (batch, order) the most accurate figure available wins:
-     *   1. the movement — what was actually ticketed out, possibly partial
-     *   2. the allocation — this batch's share of a multi-PFI order
-     *   3. the order quantity — single batch, no ledger row written
+     * It used to take, per order, the most accurate physical figure
+     * available: the movement (what was actually ticketed out, possibly
+     * partial), else the allocation, else the order quantity. That answers
+     * "how much has physically left the gantry", which is a different
+     * question, and the two diverge on any order paid in full but only
+     * part-loaded.
+     *
+     * On PFI 41 three fully-paid Loading orders were only part-ticketed, and
+     * the batch reported 4,553,999 L sold against 6,257,999 L confirmed paid
+     * — 1.7 million litres of sold product missing from the stock report
+     * because the trucks had not finished loading.
+     *
+     * Sold means paid for. Loading progress is a separate fact, and
+     * movementQty / allocationQty are still returned below for anyone who
+     * wants it.
+     *
+     * ── On the status column ──────────────────────────────────────────────
+     *
+     * payment_status, not status. An order paid but not yet Released counts
+     * from the moment its payment is confirmed. The two are co-extensive in
+     * the current data — there is no paid-and-cancelled order anywhere — so
+     * this changes no existing figure; it is the rule that matters.
      */
     client`
-      WITH rev AS (
-        SELECT o.id, o.pfi_id, o.quantity
-        FROM orders o
-        WHERE o.pfi_id = ANY(${list}) AND o.status = ANY(${REVENUE_STATUSES})
-      ),
-      parts AS (
-        SELECT m.pfi_id, SUM(m.qty_litres)::bigint AS qty
-        FROM pfi_movements m
-        JOIN rev ON rev.id = m.order_id
-        WHERE m.pfi_id = ANY(${list})
-        GROUP BY m.pfi_id
-
-        UNION ALL
-
-        SELECT a.pfi_id, SUM(a.quantity)::bigint AS qty
-        FROM order_pfi_allocations a
-        JOIN rev ON rev.id = a.order_id
-        WHERE a.pfi_id = ANY(${list})
-          AND NOT EXISTS (
-            SELECT 1 FROM pfi_movements m
-            WHERE m.order_id = a.order_id AND m.pfi_id = a.pfi_id
-          )
-        GROUP BY a.pfi_id
-
-        UNION ALL
-
-        SELECT rev.pfi_id, SUM(rev.quantity)::bigint AS qty
-        FROM rev
-        WHERE NOT EXISTS (
-            SELECT 1 FROM pfi_movements m
-            WHERE m.order_id = rev.id AND m.pfi_id = rev.pfi_id
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM order_pfi_allocations a
-            WHERE a.order_id = rev.id AND a.pfi_id = rev.pfi_id
-          )
-        GROUP BY rev.pfi_id
-      )
-      SELECT pfi_id, COALESCE(SUM(qty), 0)::bigint AS qty
-      FROM parts
-      GROUP BY pfi_id
+      SELECT o.pfi_id, COALESCE(SUM(o.quantity), 0)::bigint AS qty
+      FROM orders o
+      WHERE o.pfi_id = ANY(${list}) AND o.payment_status = 'Paid'
+      GROUP BY o.pfi_id
     `,
   ]);
 
