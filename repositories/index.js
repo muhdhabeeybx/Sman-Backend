@@ -2,6 +2,7 @@ module.exports = {
   staffRepo: require("./staff.repository"),
   staffScopeRepo: require("./staffScope.repository"),
   customerRepo: require("./customer.repository"),
+  contactRepo: require("./contact.repository"),
   truckRepo: require("./truck.repository"),
   driverRepo: require("./driver.repository"),
   depotRepo: require("./depot.repository"),

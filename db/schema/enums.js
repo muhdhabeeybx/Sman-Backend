@@ -8,6 +8,22 @@ const customerStatusEnum = pgEnum("customer_status", [
   "Pending",
 ]);
 
+// A contact is someone we hold a number for who is not a customer. "lead" is
+// a sales prospect; "contact" is anyone else worth keeping (a haulier, a
+// depot officer, a referrer). Both are messageable — only the first is being
+// sold to. There is no "customer" member: becoming one is a phone match
+// against the customers table, not a value stored here. See
+// db/migrations/0005_contacts_and_leads.sql.
+const contactStageEnum = pgEnum("contact_stage", ["lead", "contact"]);
+
+const contactSourceEnum = pgEnum("contact_source", [
+  "manual",
+  "csv",
+  "referral",
+  "event",
+  "other",
+]);
+
 // Which realm a session belongs to. Drives the exclusive arc on `sessions`
 // and the domain separation of refresh-token hashes.
 const principalTypeEnum = pgEnum("principal_type", ["staff", "customer"]);
@@ -364,6 +380,8 @@ const notificationDeliveryStatusEnum = pgEnum("notification_delivery_status", [
 
 module.exports = {
   customerStatusEnum,
+  contactStageEnum,
+  contactSourceEnum,
   principalTypeEnum,
   auditActorTypeEnum,
   orderTruckStatusEnum,
