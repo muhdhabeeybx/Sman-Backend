@@ -387,6 +387,11 @@ const updateExpense = asyncHandler(async (req, res) => {
   if (!existing) throw httpErr(404, "Expense not found");
   if (existing.deleted_at) throw httpErr(400, "This expense has been deleted");
 
+  // Anyone on the request may edit it; a paid one is closed to everybody.
+  // See chain.canEditExpense — the rule lives there with the rest of them.
+  const gate = chain.canEditExpense(existing, req.user);
+  if (!gate.ok) throw httpErr(gate.status, gate.message);
+
   const data = {};
 
   // The account and the cargo are re-resolved together: moving a line onto an
