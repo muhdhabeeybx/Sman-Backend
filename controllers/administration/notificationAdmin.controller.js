@@ -23,7 +23,7 @@ const { runMaintenance } = require("../../notifications/worker");
  * the same trail as every other business action, with the actor attached.
  */
 const broadcast = asyncHandler(async (req, res) => {
-  const { title, body, audience, roles, customerIds, staffIds, channels, priority, actionUrl, imageUrl } =
+  const { title, body, audience, roles, customerIds, staffIds, contacts, channels, priority, actionUrl, imageUrl } =
     req.body;
 
   // The closed set the schema validated. `customers` has no "all customers"
@@ -34,6 +34,12 @@ const broadcast = asyncHandler(async (req, res) => {
   if (audience === "staff") to = { allStaff: true };
   else if (audience === "roles") to = { roles };
   else if (audience === "customers") to = (customerIds || []).map((id) => ({ customerId: id }));
+  // Leads and other non-customers. No principal exists to address, so the
+  // contact details go through directly — recipients.js resolves a bare
+  // {name, email, phone} as "a contact with no account behind it", which is
+  // exactly what these are.
+  else if (audience === "contacts")
+    to = (contacts || []).map((c) => ({ name: c.name, email: c.email, phone: c.phone }));
   else
     to = [
       ...(customerIds || []).map((id) => ({ customerId: id })),

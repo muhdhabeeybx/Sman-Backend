@@ -127,10 +127,26 @@ const broadcast = z
   .object({
     title: requiredString("Title", 200),
     body: requiredString("Message", 2000),
-    audience: enumOf("Audience", ["staff", "customers", "roles", "specific"]),
+    audience: enumOf("Audience", ["staff", "customers", "roles", "specific", "contacts"]),
     roles: z.array(z.string().trim().max(50)).max(30, "Too many roles").optional(),
     customerIds: z.array(id("Customer id")).max(1000, "Too many recipients in one broadcast").optional(),
     staffIds: z.array(id("Staff id")).max(1000, "Too many recipients in one broadcast").optional(),
+    // Leads and other non-customers. They have no principal to address, so
+    // the recipient is the contact details themselves — a shape the engine
+    // already resolves (see notifications/recipients.js, "a contact with no
+    // account behind it"). Sent as values rather than ids so the broadcast
+    // path does not have to grow a second database lookup, and so a recipient
+    // list assembled on the page is exactly what goes out.
+    contacts: z
+      .array(
+        z.object({
+          name: optionalString("Name", 255),
+          email: optionalString("Email", 255),
+          phone: optionalString("Phone", 30),
+        })
+      )
+      .max(1000, "Too many recipients in one broadcast")
+      .optional(),
     channels: z
       .array(z.enum(["in_app", "push", "email", "sms"]))
       .min(1, "Choose at least one channel")
@@ -146,6 +162,17 @@ const broadcast = z
   .refine(
     (v) => v.audience !== "specific" || (v.customerIds?.length ?? 0) + (v.staffIds?.length ?? 0) > 0,
     { message: "Select at least one recipient", path: ["customerIds"] }
+  )
+  .refine(
+    (v) => v.audience !== "contacts" || (v.contacts?.length ?? 0) > 0,
+    { message: "Select at least one contact", path: ["contacts"] }
+  )
+  .refine(
+    // A contact with neither an email nor a phone cannot be reached on any
+    // channel; letting it through would report a recipient that was never
+    // addressed.
+    (v) => v.audience !== "contacts" || (v.contacts ?? []).every((c) => c.email || c.phone),
+    { message: "Every contact needs an email address or a phone number", path: ["contacts"] }
   );
 
 /** The "does push actually work on my handset" button. */
