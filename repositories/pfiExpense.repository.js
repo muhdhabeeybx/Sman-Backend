@@ -318,6 +318,28 @@ const autoPopulateCategories = async () => {
 // row, so a corrected account name can never disagree with the code.
 const GL_COLS = client`c.name AS category_name, c.gl_code, c.gl_group, c.gl_subgroup`;
 
+/**
+ * Who entered the expense, as a NAME.
+ *
+ * `entered_by` is a free-text column and its contents are not uniform: newer
+ * rows carry the actor's name (the controller writes actorName), but well
+ * over half the table carries a bare staff id as a string — "1", "121", "87"
+ * — from an earlier implementation. Reports were printing those ids straight
+ * out, so "Added by" read as a number.
+ *
+ * Resolved in three steps, best first: the stored text when it is already a
+ * name (it may carry other names the staff row's first+surname would drop),
+ * then the staff row a numeric `entered_by` points at, and finally the staff
+ * who added the record.
+ */
+const ENTERED_BY_NAME = client`
+  COALESCE(
+    NULLIF(TRIM(CASE WHEN e.entered_by ~ '^\\s*\\d+\\s*$' THEN NULL ELSE e.entered_by END), ''),
+    NULLIF(TRIM(ent.first_name || ' ' || ent.surname), ''),
+    NULLIF(TRIM(sub.first_name || ' ' || sub.surname), ''),
+    ''
+  )`;
+
 const findExpenseById = async (id) => {
   const [row] = await client`
     SELECT e.*, ${GL_COLS}, c.is_system_category, p.pfi_number
@@ -331,9 +353,13 @@ const findExpenseById = async (id) => {
 
 const listExpensesForPfi = async (pfiId) => {
   return client`
-    SELECT e.*, ${GL_COLS}
+    SELECT e.*, ${GL_COLS},
+           ${ENTERED_BY_NAME} AS entered_by_name,
+           sub.first_name || ' ' || sub.surname AS submitted_by_name
     FROM pfi_expenses e
     JOIN expense_categories c ON c.id = e.category_id
+    LEFT JOIN staff sub ON sub.id = COALESCE(e.added_by, e.recorded_by)
+    LEFT JOIN staff ent ON ent.id = NULLIF(regexp_replace(COALESCE(e.entered_by, ''), '\\D', '', 'g'), '')::int
     WHERE e.pfi_id = ${Number(pfiId)} AND e.deleted_at IS NULL
     ORDER BY e.expense_date DESC, e.id DESC
   `;
