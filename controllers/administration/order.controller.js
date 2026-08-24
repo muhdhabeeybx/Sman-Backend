@@ -5,6 +5,7 @@ const {
   pfiRepo,
   truckRepo,
   orderTruckRepo,
+  orderPfiAllocationRepo,
   auditLogRepo,
 } = require("../../repositories");
 const { isWithinScope } = require("../../lib/scopeFilter");
@@ -662,6 +663,12 @@ const gateOutTruck = asyncHandler(async (req, res) => {
  * order_trucks, pfi_movements and pfi allocations cascade on their own;
  * delivery notes and WhatsApp sessions null their reference.
  *
+ * The cascade drops the allocation rows but not what they reserved: a PFI's
+ * `sold_qty_litres` is only ever incremented by reserveStock and decremented
+ * by releaseStock, and neither runs just because a row disappeared. Every
+ * allocation is released explicitly, before the cascade, or the litres stay
+ * claimed on a PFI forever against an order that no longer exists.
+ *
  * The audit row is written BEFORE the delete and survives it — audit_logs has
  * no foreign key to orders — so a deleted order still leaves a record of what
  * was destroyed, by whom, and what it was worth. That is the only trace left,
@@ -700,6 +707,13 @@ const deleteOrder = asyncHandler(async (req, res) => {
       },
       tx
     );
+
+    // Give back whatever this order still had reserved, before the cascade
+    // takes the allocation rows with it and there is nothing left to read.
+    const allocations = await orderPfiAllocationRepo.findByOrderId(orderId, tx);
+    for (const alloc of allocations) {
+      await pfiRepo.releaseStock(alloc.pfiId, alloc.quantity, tx);
+    }
 
     // The three RESTRICT relations, which would otherwise block the delete.
     const counts = {};
