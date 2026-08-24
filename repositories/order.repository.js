@@ -340,6 +340,175 @@ const findAll = async ({
  * rows genuinely predates the allocation ledger (see wallet.service.js) —
  * that's surfaced as fundingTracked: false, not an error.
  */
+/**
+ * Where a wallet-funded order's money came from, when the allocation ledger
+ * has nothing to say.
+ *
+ * An order paid out of wallet balance writes a wallet_holds row and no
+ * order_deposit_allocations row, so the finance report had no payment source
+ * for it at all — the dialog fell through to "paid before detailed payment
+ * tracking began" on orders raised last week, and the table and the export
+ * printed empty depositor and reference columns.
+ *
+ * The money is recoverable, just one hop further back: the credits sitting in
+ * the wallet when the hold was placed. This walks them newest-first until the
+ * hold is covered, which is what the wallet ledger itself did — deposit 4558,
+ * the one case in the data, is marked remaining_amount = 0 by exactly that
+ * consumption.
+ *
+ * ── Why every line is flagged `traced` ────────────────────────────────────
+ *
+ * None of this is a recorded link. An allocation row says "this deposit paid
+ * this order" as a fact; this says "these are the credits that must have
+ * covered it, by amount and date". The two must never look alike on screen,
+ * so the flag rides along with the data and the views mark it.
+ *
+ * ── The transfer hop ──────────────────────────────────────────────────────
+ *
+ * A wallet credit can itself be an internal transfer ("Wallet transfer from
+ * customer #1533"), which has no statement line of its own because no bank
+ * payment happened — the bank detail is on the SOURCE customer's credits.
+ * Those are pulled in too, but only when they sum to the transfer amount
+ * exactly. An inexact set is a guess, so it is dropped and the trail stops at
+ * the source customer's name, which is recorded fact.
+ */
+const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
+  const byOrder = new Map();
+
+  // Only orders the allocation ledger has nothing for: where it does, that is
+  // the answer and this must not compete with it.
+  const holds = walletRows.filter((w) => !(fundingByOrder.get(w.orderId) || []).length);
+  if (!holds.length) return byOrder;
+
+  const customerByOrder = new Map(rows.map((r) => [r.id, r.customerId]));
+  const customerIds = [...new Set(holds.map((w) => customerByOrder.get(w.orderId)).filter(Boolean))];
+  if (!customerIds.length) return byOrder;
+
+  /** Every credit on these wallets, newest first, with its statement line. */
+  const creditsFor = async (ids) => {
+    if (!ids.length) return [];
+    const result = await db.execute(sql`
+      SELECT
+        d.id AS "depositId",
+        d.customer_id AS "customerId",
+        d.amount,
+        d.created_at AS "createdAt",
+        d.description,
+        d.reference,
+        l.depositor AS "statementDepositor",
+        l.narration AS "statementNarration",
+        l.txn_date AS "statementTxnDate"
+      FROM deposits d
+      LEFT JOIN LATERAL (
+        SELECT depositor, narration, txn_date
+        FROM bank_statement_lines
+        WHERE matched_deposit_id = d.id
+        ORDER BY id LIMIT 1
+      ) l ON TRUE
+      WHERE d.type = 'credit'
+        AND d.customer_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY d.created_at DESC, d.id DESC
+    `);
+    return result.rows ?? result;
+  };
+
+  const credits = await creditsFor(customerIds);
+  const creditsByCustomer = new Map();
+  for (const c of credits) {
+    if (!creditsByCustomer.has(c.customerId)) creditsByCustomer.set(c.customerId, []);
+    creditsByCustomer.get(c.customerId).push(c);
+  }
+
+  /** Newest first until `target` is covered; `[]` if the wallet cannot cover it. */
+  const cover = (list, target, exact = false) => {
+    const taken = [];
+    let running = 0;
+    for (const c of list) {
+      taken.push(c);
+      running += Number(c.amount || 0);
+      // Fractions of a naira are rounding noise from decimal columns, not a
+      // real shortfall.
+      if (running >= target - 0.01) return exact && running > target + 0.01 ? [] : taken;
+    }
+    return [];
+  };
+
+  // ── Second hop: the source wallets behind any internal transfer ──────────
+  const TRANSFER = /wallet transfer from customer #(\d+)/i;
+  const picked = new Map();
+  const sourceIds = new Set();
+
+  for (const hold of holds) {
+    const customerId = customerByOrder.get(hold.orderId);
+    const list = creditsByCustomer.get(customerId) || [];
+    // Only what was already in the wallet when the hold was placed.
+    const available = list.filter((c) => new Date(c.createdAt) <= new Date(hold.createdAt ?? Date.now()));
+    const chosen = cover(available.length ? available : list, Number(hold.holdAmount || 0));
+    picked.set(hold.orderId, chosen);
+    for (const c of chosen) {
+      const match = TRANSFER.exec(c.description || "");
+      if (match) sourceIds.add(Number(match[1]));
+    }
+  }
+
+  const sourceCredits = await creditsFor([...sourceIds]);
+  const sourceByCustomer = new Map();
+  for (const c of sourceCredits) {
+    if (!sourceByCustomer.has(c.customerId)) sourceByCustomer.set(c.customerId, []);
+    sourceByCustomer.get(c.customerId).push(c);
+  }
+
+  const sourceNames = sourceIds.size
+    ? await db
+        .select({ id: customers.id, name: customers.name })
+        .from(customers)
+        .where(inArray(customers.id, [...sourceIds]))
+    : [];
+  const nameById = new Map(sourceNames.map((c) => [c.id, c.name]));
+
+  for (const hold of holds) {
+    const chosen = picked.get(hold.orderId) || [];
+    if (!chosen.length) continue;
+
+    byOrder.set(
+      hold.orderId,
+      chosen.map((c) => {
+        const match = TRANSFER.exec(c.description || "");
+        const fromId = match ? Number(match[1]) : null;
+        // Exact, or not at all — see the note above.
+        const behind = fromId
+          ? cover(sourceByCustomer.get(fromId) || [], Number(c.amount || 0), true)
+          : [];
+
+        return {
+          depositId: c.depositId,
+          amount: Number(c.amount || 0),
+          createdAt: c.createdAt,
+          description: c.description || "",
+          reference: c.reference || "",
+          statementDepositor: c.statementDepositor || "",
+          statementNarration: c.statementNarration || "",
+          statementTxnDate: c.statementTxnDate || null,
+          transferFromCustomerId: fromId,
+          transferFromCustomerName: fromId ? nameById.get(fromId) || "" : "",
+          // The bank credits behind an internal transfer, when they reconcile.
+          statementSources: behind.map((b) => ({
+            depositId: b.depositId,
+            amount: Number(b.amount || 0),
+            depositor: b.statementDepositor || "",
+            narration: b.statementNarration || "",
+            txnDate: b.statementTxnDate || b.createdAt,
+            reference: b.reference || "",
+          })),
+          reconciled: behind.length > 0,
+        };
+      }),
+    );
+  }
+
+  return byOrder;
+};
+
 const findFinanceReport = async ({
   search,
   paymentStatus = "Paid",
@@ -527,6 +696,9 @@ const findFinanceReport = async ({
             wh.order_id AS "orderId",
             wh.amount AS "holdAmount",
             wh.status AS "holdStatus",
+            -- The instant the money was taken: the wallet source trace only
+            -- counts credits that were already in the wallet by then.
+            wh.created_at AS "createdAt",
             (
               COALESCE((
                 SELECT SUM(d.amount) FROM deposits d
@@ -555,6 +727,8 @@ const findFinanceReport = async ({
   }
   const walletByOrder = new Map(walletRows.map((w) => [w.orderId, w]));
 
+  const walletSourceByOrder = await traceWalletSources(rows, walletRows, fundingByOrder);
+
   const decorated = rows.map((row) => {
     const orderFunding = fundingByOrder.get(row.id) || [];
     const allocated = orderFunding.reduce((sum, f) => sum + Number(f.amount || 0), 0);
@@ -567,10 +741,19 @@ const findFinanceReport = async ({
         ? walletBalanceAfter + Number(wallet.holdAmount)
         : null;
 
+    // Where the wallet money came from, for orders the allocation ledger has
+    // nothing for. Every line is inferred, never a recorded link — see
+    // traceWalletSources — so it travels under its own name rather than being
+    // mixed into `funding`, which the views present as fact.
+    const walletSource = walletSourceByOrder.get(row.id) || [];
+
     return {
       ...row,
       funding: orderFunding,
       fundingTracked,
+      walletSource,
+      /** A hold exists, so this was paid from wallet balance, tracked or not. */
+      walletFunded: wallet != null,
       unattributedAmount: fundingTracked ? Math.max(0, Number(row.totalAmount || 0) - allocated) : 0,
       walletBalanceBefore,
       walletBalanceAfter,
