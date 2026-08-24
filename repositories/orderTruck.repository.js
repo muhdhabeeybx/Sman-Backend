@@ -77,6 +77,15 @@ const deleteByOrder = async (orderId, tx = db) => {
   await tx.delete(orderTrucks).where(eq(orderTrucks.orderId, orderId));
 };
 
+/** Total quantity across every load on the order, ticketed or not. */
+const sumQuantityByOrder = async (orderId, tx = db) => {
+  const [row] = await tx
+    .select({ total: sql`COALESCE(SUM(${orderTrucks.quantity}), 0)` })
+    .from(orderTrucks)
+    .where(eq(orderTrucks.orderId, orderId));
+  return Number(row?.total || 0);
+};
+
 module.exports = {
   create,
   findById,
@@ -86,4 +95,5 @@ module.exports = {
   countByOrderAndStatus,
   countByOrder,
   countRemainingByOrder,
+  sumQuantityByOrder,
 };

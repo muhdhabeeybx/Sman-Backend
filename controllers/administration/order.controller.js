@@ -613,11 +613,16 @@ const gateOutTruck = asyncHandler(async (req, res) => {
       tx
     );
 
-    // Last truck out completes the order. "Last" = no load remains in a
-    // non-terminal state. Under the order lock this is race-free.
+    // Last truck out completes the order — but only once the order's full
+    // quantity has actually been ticketed. "No load remains in a non-terminal
+    // state" alone isn't enough: if trucks were added in batches and only the
+    // first batch has gated out so far, that also reads as "none remaining"
+    // even though real litres are still unticketed. Under the order lock this
+    // is race-free.
     let completed = false;
     const remaining = await orderTruckRepo.countRemainingByOrder(orderId, tx);
-    if (remaining === 0 && order.status === "Loading") {
+    const ticketedQty = await orderTruckRepo.sumQuantityByOrder(orderId, tx);
+    if (remaining === 0 && ticketedQty >= Number(order.quantity) && order.status === "Loading") {
       await orderStatus.transition(orderId, "Completed", {
         tx,
         actor,

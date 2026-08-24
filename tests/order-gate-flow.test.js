@@ -203,6 +203,81 @@ describe("truck gate flow — Released → Loading → Completed", () => {
     assert.ok(done.completedAt, "completedAt stamped");
   });
 
+  test("a truck batch short of the order's full quantity does not complete it — the order stays open for the remaining balance", async () => {
+    // The MA11089/CE11241 incident: an order for 62,000L where only a 50,000L
+    // truck ever gets created and gated out. "No load remains in a
+    // non-terminal state" was true the moment that one truck exited, but
+    // 12,000L of the order was never ticketed at all — the order must not
+    // complete until the full quantity actually has been.
+    const [order] = await db
+      .insert(orders)
+      .values({
+        orderNumber: `ORD-GATE-${RUN}-${seq++}`,
+        customerId,
+        state: "Lagos",
+        depotId,
+        productId,
+        quantity: 62000,
+        price: "100.00",
+        totalAmount: "1.00",
+        deliveryType: "delivery",
+        status: "Released",
+        paymentStatus: "Paid",
+      })
+      .returning();
+
+    const t1 = await orderTruckRepo.create({
+      orderId: order.id,
+      truckIndex: 1,
+      truckNumber: `PARTIAL-${RUN}-1`,
+      quantity: "50000",
+      status: "pending",
+    });
+
+    await request(app)
+      .post(`/api/orders/${order.id}/gate-in`)
+      .set("Authorization", `Bearer ${entry.accessToken}`)
+      .send({ loadId: t1.id });
+    await request(app)
+      .post(`/api/orders/${order.id}/trucks/${t1.id}/load`)
+      .set("Authorization", `Bearer ${ticketing.accessToken}`)
+      .send({});
+
+    let res = await request(app)
+      .post(`/api/orders/${order.id}/trucks/${t1.id}/gate-out`)
+      .set("Authorization", `Bearer ${exit.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.orderCompleted, false, "50,000 of 62,000 ticketed — must not complete yet");
+    assert.equal((await orderRepo.findById(order.id)).status, "Loading", "stays open for the remaining 12,000L");
+
+    // The remaining balance is ticketed in a second sitting, exactly as it
+    // would be once the shortfall is noticed.
+    res = await request(app)
+      .post(`/api/orders/${order.id}/generate-tickets`)
+      .set("Authorization", `Bearer ${ticketing.accessToken}`)
+      .send({
+        trucks: [
+          { quantity: 12000, truckNumber: `PARTIAL-${RUN}-2`, driverName: "Musa", driverPhone: "+2348010000099" },
+        ],
+      });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const t2 = res.body.data.trucks[0];
+
+    await request(app)
+      .post(`/api/orders/${order.id}/gate-in`)
+      .set("Authorization", `Bearer ${entry.accessToken}`)
+      .send({ loadId: t2.id });
+
+    res = await request(app)
+      .post(`/api/orders/${order.id}/trucks/${t2.id}/gate-out`)
+      .set("Authorization", `Bearer ${exit.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.orderCompleted, true, "full 62,000L now ticketed — completes");
+    assert.equal((await orderRepo.findById(order.id)).status, "Completed");
+  });
+
   test("a pickup lifecycle: security captures the customer's own truck at gate-in", async () => {
     const order = await releasedPickupOrder(customerId, depotId, productId, 40000);
 
