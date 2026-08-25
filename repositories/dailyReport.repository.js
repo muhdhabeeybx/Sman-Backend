@@ -1,6 +1,27 @@
 const { eq, and, ilike, asc, desc, count, gte, lte, inArray, or, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { dailyReports, depots, lpgStations, pfis } = require("../db/schema");
+const { dailyReports, depots, lpgStations, pfis, staff } = require("../db/schema");
+
+/**
+ * Who filed it, resolved against the staff table rather than trusted from the
+ * row.
+ *
+ * `submitted_by_name` is written at submission time, and for a long stretch
+ * that value was the filer's EMAIL — utils/actor.js used req.user.email as the
+ * display name because the name was not being carried onto req.user. 24 of the
+ * 416 reports on file still read as an address in the Staff column because of
+ * it.
+ *
+ * Reading through the join fixes every one of those without touching the
+ * stored data, and keeps the column current if someone's name is corrected
+ * later. The stored value remains the fallback: it is the only record of who
+ * filed a report whose staff row has since been deleted.
+ */
+const SUBMITTED_BY_NAME = sql`COALESCE(
+  NULLIF(TRIM(CONCAT_WS(' ', ${staff.firstName}, ${staff.surname})), ''),
+  NULLIF(${dailyReports.submittedByName}, ''),
+  ''
+)`.as("submittedByName");
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
 const SORTABLE = {
@@ -12,7 +33,12 @@ const SORTABLE = {
 };
 
 const findById = async (id) => {
-  const [row] = await db.select().from(dailyReports).where(eq(dailyReports.id, id)).limit(1);
+  const [row] = await db
+    .select({ ...dailyReports, submittedByName: SUBMITTED_BY_NAME })
+    .from(dailyReports)
+    .leftJoin(staff, eq(staff.id, dailyReports.submittedBy))
+    .where(eq(dailyReports.id, id))
+    .limit(1);
   return row || null;
 };
 
@@ -102,8 +128,9 @@ const findAll = async ({
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select()
+      .select({ ...dailyReports, submittedByName: SUBMITTED_BY_NAME })
       .from(dailyReports)
+      .leftJoin(staff, eq(staff.id, dailyReports.submittedBy))
       .where(whereClause)
       .orderBy(
         (order === "asc" ? asc : desc)(SORTABLE[sort] || dailyReports.reportDate),

@@ -54,6 +54,13 @@ const authenticateStaff = async (req, res, next) => {
   req.user = {
     id: active.principal.id,
     email: active.principal.email,
+    // The principal IS the staff row (see sessionRepo.findWithPrincipal), so
+    // the name is already loaded — it just was not being carried across, which
+    // left everything attributing actions to an email address.
+    name: [active.principal.firstName, active.principal.surname]
+      .filter(Boolean)
+      .join(" ")
+      .trim(),
     roles: active.principal.roles || [],
     canViewAllLocations: authContext.canViewAllLocations,
     scope: authContext.scope,
