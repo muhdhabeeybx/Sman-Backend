@@ -522,7 +522,21 @@ const updateExpense = asyncHandler(async (req, res) => {
 // Deletable up to "with CFO" — past that the chain has already spent effort
 // approving it, and a reject/send-back is the honest way to unwind it so the
 // paperwork remembers why, rather than the row just vanishing.
-const DELETABLE_STATUSES = new Set([chain.STATUS.PENDING, chain.STATUS.CHANGES_REQUESTED, chain.STATUS.VERIFIED]);
+/**
+ * Deletable until the money leaves.
+ *
+ * This was pending / changes_requested / verified, on the reasoning that past
+ * "With CFO" the chain has spent effort and a reject records why. In practice
+ * that left the officer who raised a request unable to withdraw their own
+ * mistake — a duplicate, a wrong payee — once anyone had approved it, and
+ * "reject" is the reviewer's verb, not the raiser's; it reads as a judgement
+ * on the request rather than as taking it back.
+ *
+ * A paid expense stays undeletable: once the bank has moved, the row is a
+ * record of what happened, not a proposal. Same line edit already draws, so
+ * the two rules now agree.
+ */
+const isDeletableStatus = (status) => status !== chain.STATUS.PAID;
 
 const deleteExpense = asyncHandler(async (req, res) => {
   const existing = await pfiExpenseRepo.findExpenseById(req.params.id);
@@ -537,10 +551,10 @@ const deleteExpense = asyncHandler(async (req, res) => {
   if (!isOwner && !chain.canOversee(req.user)) {
     throw httpErr(403, "You can only delete a request you raised");
   }
-  if (!DELETABLE_STATUSES.has(existing.status)) {
+  if (!isDeletableStatus(existing.status)) {
     throw httpErr(
       400,
-      `${chain.STATUS_LABELS[existing.status] || existing.status} requests can no longer be deleted — reject or send it back instead`,
+      "This expense is paid and closed — it can no longer be deleted.",
     );
   }
 
