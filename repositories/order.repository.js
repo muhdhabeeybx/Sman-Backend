@@ -677,6 +677,42 @@ const findFinanceReport = async ({
               SELECT c.name FROM customers c
               WHERE c.id = NULLIF(substring(${deposits.description} from 'customer #([0-9]+)'), '')::int
             )`,
+            /**
+             * When one bank credit paid for more than one order.
+             *
+             * The report shows a funding row per (order, deposit) pair, so a
+             * split credit printed the same bank reference under two different
+             * orders — which reads as the same statement row being spent
+             * twice. It is not: the slices sum to the credit exactly. But
+             * nothing on the row said so, and an auditor has no way to tell
+             * the difference by looking.
+             *
+             * These three say it. `sharedOrderCount` is how many orders the
+             * credit paid for, and `primaryOrderId` is the one that took the
+             * largest share — the order the statement line properly belongs
+             * to. Any other order is carrying a remainder off that one, and
+             * the report renders it as a transfer naming its source instead of
+             * repeating the bank reference.
+             *
+             * Deliberately derived here rather than stored: it is a fact about
+             * how the allocations happen to fall, and re-deriving it means it
+             * cannot go stale when one is added, removed or corrected.
+             */
+            sharedOrderCount: sql`(
+              SELECT COUNT(*)::int FROM order_deposit_allocations a
+              WHERE a.deposit_id = ${deposits.id}
+            )`,
+            primaryOrderId: sql`(
+              SELECT a.order_id FROM order_deposit_allocations a
+              WHERE a.deposit_id = ${deposits.id}
+              ORDER BY a.amount DESC, a.order_id ASC LIMIT 1
+            )`,
+            primaryOrderCompany: sql`(
+              SELECT o2.company_name FROM order_deposit_allocations a
+              JOIN orders o2 ON o2.id = a.order_id
+              WHERE a.deposit_id = ${deposits.id}
+              ORDER BY a.amount DESC, a.order_id ASC LIMIT 1
+            )`,
           })
           .from(orderDepositAllocations)
           .innerJoin(deposits, eq(orderDepositAllocations.depositId, deposits.id))
@@ -733,6 +769,12 @@ const findFinanceReport = async ({
 
   const fundingByOrder = new Map();
   for (const f of funding) {
+    // The reference of the order a shared credit properly belongs to, built
+    // with the same helper every other reference on the report comes from, so
+    // "TRF FROM KN11400" is the string the reader will find if they go and
+    // look that order up.
+    f.primaryOrderRef =
+      f.primaryOrderId != null ? generateOrderReference(f.primaryOrderCompany, f.primaryOrderId) : null;
     if (!fundingByOrder.has(f.orderId)) fundingByOrder.set(f.orderId, []);
     fundingByOrder.get(f.orderId).push(f);
   }
