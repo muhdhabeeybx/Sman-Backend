@@ -75,7 +75,16 @@ const reviewDailyReportSchema = z.object({
 const dailyReportQuerySchema = z.object({
   reportType: z.enum(REPORT_TYPES).optional(),
   page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(50),
+  // 1000, not 100 — the ceiling the repository itself clamps to, and the one
+  // schemas/fields.js#pagination gives every other list.
+  //
+  // This schema hand-rolls its pagination instead of extending that helper, so
+  // when the dashboard moved every list to 1000 rows a page it took this
+  // endpoint with it and nothing here followed. The page has been asking for
+  // limit=1000 and getting a flat 400 ever since: no reports, for anybody, on
+  // a screen whose whole job is showing you what you filed. It reads exactly
+  // like empty data, which is how it survived being looked at more than once.
+  limit: z.coerce.number().int().positive().max(1000).default(50),
   location: z.string().max(255).optional(),
   status: z.enum(["submitted", "approved", "rejected"]).optional(),
   pfiNumber: z.string().max(50).optional(),
