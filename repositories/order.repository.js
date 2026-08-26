@@ -654,6 +654,22 @@ const findFinanceReport = async ({
              */
             source: orderDepositAllocations.source,
             depositReference: deposits.reference,
+            /**
+             * What is left of this credit, or null if it predates the
+             * allocation ledger.
+             *
+             * The difference between `amount` and `appliedAmount` is money
+             * received against the order beyond its value — but that is not
+             * the same as money still sitting in the wallet, and the report
+             * was reporting one as the other. Where the remainder is tracked,
+             * it says how much of the surplus is genuinely unspent. Where it
+             * is null, nothing does: credit 31203434355 is ₦2.51bn matched to
+             * order 10649, of which ₦1.89bn covered that order and ₦621m
+             * evidently paid for others that never recorded an allocation.
+             * Calling that an overpayment would be a fiction, so the report
+             * separates the two rather than summing them.
+             */
+            depositRemaining: deposits.remainingAmount,
             depositCreatedAt: deposits.createdAt,
             // What actually landed, as distinct from `amount` above — which
             // is only the slice of this deposit that FIFO attributed to this
@@ -784,6 +800,47 @@ const findFinanceReport = async ({
       : [],
   ]);
 
+  /**
+   * The other half of an overpayment moved between orders.
+   *
+   * Moving a surplus already writes both legs to the wallet ledger — a debit
+   * off the order it leaves and a credit onto the order it lands on — but the
+   * report only ever read credits, because that is all order_deposit_
+   * allocations can point at. So the receiving order showed "+₦26,600,000
+   * from AG11212" and AG11212 itself showed nothing at all: it just sat there
+   * looking ₦26,600,000 overpaid, with no way to tell that the money had been
+   * deliberately moved rather than left lying about.
+   *
+   * The credit names its source order, so the outgoing leg is recoverable
+   * from it without a schema change, and it goes out as a NEGATIVE row on
+   * that source order. Both questions an auditor asks — "what did this order
+   * receive" and "where did the rest of it go" — then have an answer on the
+   * face of the report, and Amount Paid nets down to what the order really
+   * kept.
+   */
+  const transfersOut = orderIds.length
+    ? await db.execute(sql`
+        SELECT
+          (substring(d.description from 'received from order #([0-9]+)'))::int AS "orderId",
+          d.id AS "depositId",
+          d.amount,
+          d.created_at AS "createdAt",
+          d.description,
+          a.order_id AS "toOrderId",
+          o2.company_name AS "toOrderCompany",
+          st.first_name AS "recorderFirstName",
+          st.surname AS "recorderSurname"
+        FROM deposits d
+        LEFT JOIN order_deposit_allocations a ON a.deposit_id = d.id
+        LEFT JOIN orders o2 ON o2.id = a.order_id
+        LEFT JOIN staff st ON st.id = d.recorded_by
+        WHERE d.type = 'credit'
+          AND d.description ~ 'received from order #[0-9]+'
+          AND (substring(d.description from 'received from order #([0-9]+)'))::int
+              IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+      `)
+    : [];
+
   const fundingByOrder = new Map();
   for (const f of funding) {
     // The reference of the order a shared credit properly belongs to, built
@@ -794,6 +851,29 @@ const findFinanceReport = async ({
       f.primaryOrderId != null ? generateOrderReference(f.primaryOrderCompany, f.primaryOrderId) : null;
     if (!fundingByOrder.has(f.orderId)) fundingByOrder.set(f.orderId, []);
     fundingByOrder.get(f.orderId).push(f);
+  }
+
+  for (const t of transfersOut.rows ?? transfersOut) {
+    if (!fundingByOrder.has(t.orderId)) fundingByOrder.set(t.orderId, []);
+    fundingByOrder.get(t.orderId).push({
+      orderId: t.orderId,
+      depositId: t.depositId,
+      // Negative: this is money leaving the order, and the column it lands in
+      // is the same Amount Paid column the receiving order's +row lands in.
+      amount: `-${Number(t.amount || 0)}`,
+      appliedAmount: "0",
+      source: "transfer_out",
+      depositReference: null,
+      depositCreatedAt: t.createdAt,
+      depositRemaining: null,
+      paystackDetails: null,
+      depositDescription: t.description,
+      recorderFirstName: t.recorderFirstName,
+      recorderSurname: t.recorderSurname,
+      toOrderId: t.toOrderId,
+      toOrderRef:
+        t.toOrderId != null ? generateOrderReference(t.toOrderCompany, t.toOrderId) : null,
+    });
   }
   const walletByOrder = new Map(walletRows.map((w) => [w.orderId, w]));
 
@@ -806,7 +886,11 @@ const findFinanceReport = async ({
     // the order it paid for, and counting the surplus here would report an
     // order as over-covered when the shortfall it is looking for is real.
     const applied = orderFunding.reduce((sum, f) => sum + Number(f.appliedAmount ?? f.amount ?? 0), 0);
-    const fundingTracked = orderFunding.length > 0;
+    // An allocation is what makes an order tracked. A transfer-out leg is a
+    // note about money leaving, not a record of what paid for the order — an
+    // order carrying only that has still had nothing traced to it, and saying
+    // otherwise would hide it from the untracked count.
+    const fundingTracked = orderFunding.some((f) => f.source !== "transfer_out");
 
     const wallet = walletByOrder.get(row.id);
     const walletBalanceAfter = wallet?.balanceAfter != null ? Number(wallet.balanceAfter) : null;

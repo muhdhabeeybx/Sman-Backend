@@ -466,15 +466,35 @@ async function main() {
       ])
     ).rowCount;
 
-    for (const p of planned) {
+    // One statement per batch, not one per row. Row-at-a-time was fine against
+    // a local database and unusable against production: 2,645 inserts over
+    // Railway's public proxy is 2,645 network round-trips, which turned a
+    // sub-second write into several minutes of waiting on latency.
+    const CHUNK = 500;
+    for (let i = 0; i < planned.length; i += CHUNK) {
+      const batch = planned.slice(i, i + CHUNK);
+      const values = [];
+      const params = [];
+      batch.forEach((p, n) => {
+        const b = n * 5;
+        values.push(`($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5})`);
+        params.push(p.orderId, p.depositId, dec(p.received), dec(p.applied), p.source);
+      });
       await client.query(
         `INSERT INTO order_deposit_allocations (order_id, deposit_id, amount, applied_amount, source)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [p.orderId, p.depositId, dec(p.received), dec(p.applied), p.source]
+         VALUES ${values.join(", ")}`,
+        params
       );
     }
-    for (const r of remainderChanges) {
-      await client.query(`UPDATE deposits SET remaining_amount = $1 WHERE id = $2`, [dec(r.to), r.id]);
+
+    // Same again: one UPDATE driven by a values list, rather than 23 of them.
+    if (remainderChanges.length) {
+      await client.query(
+        `UPDATE deposits d SET remaining_amount = v.remaining::numeric
+           FROM (SELECT * FROM unnest($1::int[], $2::text[]) AS t(id, remaining)) v
+          WHERE d.id = v.id`,
+        [remainderChanges.map((r) => r.id), remainderChanges.map((r) => dec(r.to))]
+      );
     }
 
     // Same checks again, against what is actually in the table now.
