@@ -121,7 +121,7 @@ const pick = (body, snake, camel) => body[snake] ?? body[camel];
  */
 const buildGroups = (rows) =>
   gl.GL_GROUPS.map((group) => {
-    const accounts = rows.filter((r) => r.gl_group === group.code);
+    const accounts = rows.filter((r) => r.gl_group === group.code && r.is_active !== false);
     const subgroups = [];
     for (const account of accounts) {
       const label = account.gl_subgroup || "";
@@ -135,14 +135,18 @@ const buildGroups = (rows) =>
 const listCategories = asyncHandler(async (req, res) => {
   const rows = await pfiExpenseRepo.listCategories();
 
-  // `general` and `pfi` are the original split, kept as they were. `groups` is
-  // the chart, and what the picker actually reads.
-  const general = rows.filter((r) => !r.pfi_id);
-  const pfi = rows.filter((r) => r.pfi_id);
+  // `general` and `pfi` used to split on whether the category named a PFI,
+  // because "which cargo" WAS the category. Now the chart says what a cost is
+  // for and pfi_expenses.pfi_id says which cargo, so the split is by GL group
+  // — the same two lists the form offers, under the same two keys.
+  const active = rows.filter((r) => r.is_active !== false && r.gl_group);
+  const general = active.filter((r) => r.gl_group === "general");
+  const pfi = active.filter((r) => r.gl_group === "pfi_direct");
 
   res.json({
     success: true,
     data: {
+      /** Every row, retired ones included, so a historical line still names its category. */
       categories: rows,
       general,
       pfi,
@@ -150,7 +154,7 @@ const listCategories = asyncHandler(async (req, res) => {
       /** The withholding rates the form offers; see lib/glAccounts.js. */
       wht_rates: gl.WHT_RATES,
       /** Pre-chart categories still attached to historical rows. */
-      unmapped: rows.filter((r) => !r.pfi_id && !r.gl_group),
+      unmapped: rows.filter((r) => r.is_active === false),
       vat_rate: gl.VAT_RATE,
     },
   });
