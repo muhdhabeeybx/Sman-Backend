@@ -384,7 +384,11 @@ const listExpenses = async ({
   scopeUser = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 25));
+  // 500, because the register is read as a whole — someone scanning for one
+  // vendor across a quarter should not be paging. A cap that sits below what
+  // the page asks for does not error, it just silently returns less, which is
+  // the hardest kind of wrong to notice.
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit, 10) || 25));
   const offset = (pageNum - 1) * limitNum;
 
   // Scoping goes on first so every count, total, page and the bank list all
