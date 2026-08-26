@@ -1,6 +1,15 @@
-const { eq, and, asc, count, sql } = require("drizzle-orm");
+const { eq, and, asc, desc, count, gte, lte, sql, or, ilike, isNotNull } = require("drizzle-orm");
+const { alias } = require("drizzle-orm/pg-core");
 const { db } = require("../config/db");
-const { orderTrucks } = require("../db/schema");
+const { orderTrucks, orders, customers, depots, products, pfis, staff } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
+
+// The gate is two people: one signs a truck in, another signs it out. Both
+// come from `staff`, so the table is joined twice under its own aliases —
+// without them the second join silently overwrites the first and every truck
+// reports the same officer at both ends.
+const enteredByStaff = alias(staff, "entered_by_staff");
+const exitedByStaff = alias(staff, "exited_by_staff");
 
 /**
  * order_trucks — one row per truck LOAD on an order (distinct from the fleet
@@ -86,10 +95,120 @@ const sumQuantityByOrder = async (orderId, tx = db) => {
   return Number(row?.total || 0);
 };
 
+/**
+ * Every truck the gate handled in a period, with everything known about it.
+ *
+ * The security report used to assemble this in the browser: fetch every order,
+ * guess which ones might have a load in range, then issue one
+ * `/orders/:id/trucks` request per candidate — dozens of round-trips, which is
+ * the only reason that page ever needed a "Run report" button. One query does
+ * it, so the page can simply show today's gate on arrival.
+ *
+ * Anchored on entry: a truck appears if it was gated IN during the period,
+ * whether or not it has left again. One still on site is exactly what a
+ * security officer needs to see, and filtering on exit hid them entirely.
+ *
+ * Both officers are joined by name — `securityEnteredBy` / `securityExitedBy`
+ * are staff ids, and a report of who cleared what is not much use as numbers.
+ */
+const findGateMovements = async ({ dateFrom, dateTo, depotId, pfiId, search, scopeUser } = {}) => {
+  const conditions = [isNotNull(orderTrucks.securityEnteredAt)];
+  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  if (scope) conditions.push(scope);
+  if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
+  if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
+  // A bare yyyy-MM-dd is that day's UTC midnight; widened to the last instant
+  // so "today" includes a truck that came in this afternoon.
+  if (dateFrom) {
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? `${dateFrom}T00:00:00.000Z` : dateFrom;
+    conditions.push(gte(orderTrucks.securityEnteredAt, new Date(start)));
+  }
+  if (dateTo) {
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
+    conditions.push(lte(orderTrucks.securityEnteredAt, new Date(end)));
+  }
+  if (search) {
+    const term = `%${search}%`;
+    conditions.push(
+      or(
+        ilike(orderTrucks.truckNumber, term),
+        ilike(orderTrucks.driverName, term),
+        ilike(orderTrucks.entryDriverName, term),
+        ilike(orderTrucks.driverPhone, term),
+        ilike(orderTrucks.entryDriverPhone, term),
+        ilike(orderTrucks.loaderName, term),
+        ilike(orders.orderNumber, term),
+        ilike(orders.companyName, term),
+        ilike(customers.name, term),
+      ),
+    );
+  }
+
+  const rows = await db
+    .select({
+      id: orderTrucks.id,
+      orderId: orderTrucks.orderId,
+      truckIndex: orderTrucks.truckIndex,
+      truckNumber: orderTrucks.truckNumber,
+      quantity: orderTrucks.quantity,
+      compartments: orderTrucks.compartments,
+      gantry: orderTrucks.gantry,
+      status: orderTrucks.status,
+      // The driver recorded at the gate can differ from the one on the
+      // ticket — a swap between allocation and arrival is common, and the
+      // report shows both rather than picking one and being wrong sometimes.
+      driverName: orderTrucks.driverName,
+      driverPhone: orderTrucks.driverPhone,
+      entryDriverName: orderTrucks.entryDriverName,
+      entryDriverPhone: orderTrucks.entryDriverPhone,
+      loaderName: orderTrucks.loaderName,
+      loaderPhone: orderTrucks.loaderPhone,
+      enteredAt: orderTrucks.securityEnteredAt,
+      exitedAt: orderTrucks.securityExitedAt,
+      loadedAt: orderTrucks.loadedAt,
+      enteredByFirstName: enteredByStaff.firstName,
+      enteredBySurname: enteredByStaff.surname,
+      exitedByFirstName: exitedByStaff.firstName,
+      exitedBySurname: exitedByStaff.surname,
+      orderNumber: orders.orderNumber,
+      companyName: orders.companyName,
+      customerName: customers.name,
+      customerPhone: customers.phone,
+      depotName: depots.name,
+      productName: products.name,
+      pfiNumber: pfis.pfiNumber,
+    })
+    .from(orderTrucks)
+    .innerJoin(orders, eq(orderTrucks.orderId, orders.id))
+    .leftJoin(customers, eq(orders.customerId, customers.id))
+    .leftJoin(depots, eq(orders.depotId, depots.id))
+    .leftJoin(products, eq(orders.productId, products.id))
+    .leftJoin(pfis, eq(orders.pfiId, pfis.id))
+    .leftJoin(enteredByStaff, eq(orderTrucks.securityEnteredBy, enteredByStaff.id))
+    .leftJoin(exitedByStaff, eq(orderTrucks.securityExitedBy, exitedByStaff.id))
+    .where(and(...conditions))
+    .orderBy(desc(orderTrucks.securityEnteredAt), desc(orderTrucks.id));
+
+  const entered = rows.length;
+  const exited = rows.filter((r) => r.exitedAt).length;
+
+  return {
+    trucks: rows,
+    totals: {
+      entered,
+      exited,
+      onSite: entered - exited,
+      quantityEntered: rows.reduce((s, r) => s + Number(r.quantity || 0), 0),
+      quantityExited: rows.reduce((s, r) => s + (r.exitedAt ? Number(r.quantity || 0) : 0), 0),
+    },
+  };
+};
+
 module.exports = {
   create,
   findById,
   findByOrder,
+  findGateMovements,
   update,
   deleteByOrder,
   countByOrderAndStatus,

@@ -13,5 +13,6 @@ router.get("/outstanding", verifyStaff, reporting.outstandingPayments);
 router.get("/daily-reports", verifyStaff, reporting.dailyReportSummary);
 router.get("/revenue", verifyStaff, reporting.revenueSummary);
 router.get("/audit-trail", verifyStaff, reporting.auditTrail);
+router.get("/gate-movements", verifyStaff, reporting.gateMovements);
 
 module.exports = router;
