@@ -358,6 +358,13 @@ const listExpenses = async ({
   categoryId,
   /** One of GL_GROUPS — narrows to a whole section of the chart at once. */
   glGroup,
+  /**
+   * One heading inside the chart — "Cargo / Vessel Costs", "Insurance".
+   *
+   * Matched on the stored text rather than a code because the subgroup IS its
+   * label; there is no separate key for it on expense_categories.
+   */
+  glSubgroup,
   pfiId,
   vendorId,
   bank,
@@ -430,6 +437,7 @@ const listExpenses = async ({
   if (categoryId === "none") base.push(client`e.category_id IS NULL`);
   else if (categoryId && categoryId !== "all") base.push(client`e.category_id = ${Number(categoryId)}`);
   if (glGroup && glGroup !== "all") base.push(client`c.gl_group = ${glGroup}`);
+  if (glSubgroup && glSubgroup !== "all") base.push(client`c.gl_subgroup = ${glSubgroup}`);
   if (pfiId && pfiId !== "all") base.push(client`e.pfi_id = ${Number(pfiId)}`);
   if (vendorId && vendorId !== "all") base.push(client`e.vendor_id = ${Number(vendorId)}`);
   if (bank) base.push(client`LOWER(e.bank_paid_from) = LOWER(${bank})`);

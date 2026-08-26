@@ -287,6 +287,7 @@ const listExpenses = asyncHandler(async (req, res) => {
     search: req.query.search,
     categoryId: req.query.category,
     glGroup: req.query.group,
+    glSubgroup: req.query.subgroup,
     pfiId: req.query.pfi,
     vendorId: req.query.vendor,
     bank: req.query.bank,
