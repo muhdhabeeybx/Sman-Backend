@@ -57,6 +57,9 @@ async function ensureTableExists() {
     await client`
       ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS lpg_station_ids JSONB DEFAULT '[]'::jsonb NOT NULL;
     `;
+    await client`
+      ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS usage JSONB DEFAULT '[]'::jsonb NOT NULL;
+    `;
     tableInitialized = true;
   } catch (err) {
     console.error("Failed to initialize bank_accounts table:", err.message);
@@ -129,6 +132,12 @@ async function attachDepotsToAccount(account) {
     }
   }
 
+  const usage = Array.isArray(account.usage)
+    ? account.usage
+    : typeof account.usage === "string"
+    ? JSON.parse(account.usage)
+    : account.usage || [];
+
   return {
     id: account.id,
     bankName: account.bank_name || account.bankName,
@@ -143,6 +152,7 @@ async function attachDepotsToAccount(account) {
     depots,
     lpgStationIds: numericStationIds,
     lpgStations,
+    usage: usage.map((u) => String(u)).filter(Boolean),
     notes: account.notes || "",
     createdAt: account.created_at || account.createdAt,
     updatedAt: account.updated_at || account.updatedAt,
@@ -150,7 +160,7 @@ async function attachDepotsToAccount(account) {
 }
 
 const bankAccountRepo = {
-  async findAll({ search, status, depotId, lpgStationId } = {}) {
+  async findAll({ search, status, depotId, lpgStationId, usage } = {}) {
     await ensureTableExists();
 
     let rows = await client`
@@ -183,6 +193,15 @@ const bankAccountRepo = {
     if (depotId) {
       const targetId = Number(depotId);
       results = results.filter((acc) => acc.depotIds.includes(targetId));
+    }
+
+    // An area asking for its own accounts gets only the ones tagged for it.
+    // Untagged accounts are excluded on purpose: the point of the tag is that
+    // the truck sales and expense pickers stop offering the whole company's
+    // banking, so treating "untagged" as "allowed" would defeat it.
+    if (usage) {
+      const wanted = String(usage).trim();
+      results = results.filter((acc) => acc.usage.includes(wanted));
     }
 
     if (lpgStationId) {
@@ -222,8 +241,14 @@ const bankAccountRepo = {
       isDefault = false,
       depotIds = [],
       lpgStationIds = [],
+      usage = [],
       notes = "",
     } = data;
+
+    const cleanUsage = Array.isArray(usage)
+      ? [...new Set(usage.map((u) => String(u).trim()).filter(Boolean))]
+      : [];
+    const jsonUsage = JSON.stringify(cleanUsage);
 
     const numericDepotIds = Array.isArray(depotIds)
       ? depotIds.map((i) => Number(i)).filter((i) => !isNaN(i))
@@ -253,6 +278,7 @@ const bankAccountRepo = {
         is_default,
         depot_ids,
         lpg_station_ids,
+        usage,
         notes,
         created_at,
         updated_at
@@ -267,6 +293,7 @@ const bankAccountRepo = {
         ${isDefault},
         ${jsonDepotIds}::jsonb,
         ${jsonStationIds}::jsonb,
+        ${jsonUsage}::jsonb,
         ${notes},
         NOW(),
         NOW()
@@ -315,7 +342,13 @@ const bankAccountRepo = {
     const isDefault = data.isDefault !== undefined ? Boolean(data.isDefault) : existing.isDefault;
     const depotIds = data.depotIds !== undefined ? data.depotIds : existing.depotIds;
     const lpgStationIds = data.lpgStationIds !== undefined ? data.lpgStationIds : existing.lpgStationIds;
+    const usage = data.usage !== undefined ? data.usage : existing.usage;
     const notes = data.notes !== undefined ? data.notes : existing.notes;
+
+    const cleanUsage = Array.isArray(usage)
+      ? [...new Set(usage.map((u) => String(u).trim()).filter(Boolean))]
+      : [];
+    const jsonUsage = JSON.stringify(cleanUsage);
 
     const numericDepotIds = Array.isArray(depotIds)
       ? depotIds.map((i) => Number(i)).filter((i) => !isNaN(i))
@@ -347,6 +380,7 @@ const bankAccountRepo = {
         is_default = ${isDefault},
         depot_ids = ${jsonDepotIds}::jsonb,
         lpg_station_ids = ${jsonStationIds}::jsonb,
+        usage = ${jsonUsage}::jsonb,
         notes = ${notes},
         updated_at = NOW()
       WHERE id = ${numericId}

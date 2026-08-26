@@ -2,8 +2,8 @@ const asyncHandler = require("express-async-handler");
 const { bankAccountRepo } = require("../../repositories");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
-  const { search, status, depotId, lpgStationId } = req.query;
-  const accounts = await bankAccountRepo.findAll({ search, status, depotId, lpgStationId });
+  const { search, status, depotId, lpgStationId, usage } = req.query;
+  const accounts = await bankAccountRepo.findAll({ search, status, depotId, lpgStationId, usage });
 
   res.json({
     success: true,
@@ -25,7 +25,7 @@ const getBankAccountById = asyncHandler(async (req, res) => {
 });
 
 const createBankAccount = asyncHandler(async (req, res) => {
-  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, depotIds, lpgStationIds, notes } = req.body;
+  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, depotIds, lpgStationIds, usage, notes } = req.body;
 
   if (!bankName || !accountName || !accountNumber) {
     return res.status(400).json({
@@ -45,6 +45,7 @@ const createBankAccount = asyncHandler(async (req, res) => {
     isDefault: Boolean(isDefault),
     depotIds: Array.isArray(depotIds) ? depotIds : [],
     lpgStationIds: Array.isArray(lpgStationIds) ? lpgStationIds : [],
+    usage: Array.isArray(usage) ? usage : [],
     notes: notes || "",
   });
 
