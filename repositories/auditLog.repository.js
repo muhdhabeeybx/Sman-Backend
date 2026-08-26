@@ -60,6 +60,31 @@ const record = async (event, tx = db) => {
   return row;
 };
 
+/**
+ * Append many audit events in one round trip — the batched sibling of
+ * `record`, for a loop that would otherwise write one row per iteration
+ * (e.g. a ticket generated per truck in a multi-truck request).
+ */
+const recordMany = async (events, tx = db) => {
+  if (!events.length) return [];
+  return tx
+    .insert(auditLogs)
+    .values(
+      events.map((event) => ({
+        entityType: event.entityType,
+        entityId: event.entityId,
+        action: event.action,
+        prevState: event.prevState ?? null,
+        newState: event.newState ?? null,
+        ...actorColumns(event.actor),
+        metadata: event.metadata ?? null,
+        ipAddress: event.ipAddress ?? null,
+        userAgent: event.userAgent ?? null,
+      })),
+    )
+    .returning();
+};
+
 /** Every event for one entity, oldest first — the raw material for a timeline. */
 const findByEntity = async (entityType, entityId) => {
   return db
@@ -75,4 +100,4 @@ const findStateTimeline = async (entityType, entityId) => {
   return rows.filter((r) => r.newState !== null);
 };
 
-module.exports = { ACTOR_TYPES, actorColumns, record, findByEntity, findStateTimeline };
+module.exports = { ACTOR_TYPES, actorColumns, record, recordMany, findByEntity, findStateTimeline };

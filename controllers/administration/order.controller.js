@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const QRCode = require("qrcode");
 const {
   orderRepo,
   depotRepo,
@@ -6,6 +7,7 @@ const {
   truckRepo,
   orderTruckRepo,
   orderPfiAllocationRepo,
+  ticketRepo,
   auditLogRepo,
 } = require("../../repositories");
 const { isWithinScope } = require("../../lib/scopeFilter");
@@ -828,7 +830,17 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
     // fleet allocation looks like before its ticket is cut.
     const loadedNow = { status: "loaded", loadedAt: new Date(), loadedBy: req.user.id };
 
-    const created = [];
+    // Two paths through this batch. A dup — a resubmission of a plate+quantity
+    // already on the order — is rare and handled per-row exactly as before.
+    // A genuinely new truck is the common case, and every new truck used to
+    // cost ~5 sequential round trips (create, find-existing-ticket, create
+    // ticket, QR write-back, audit row); batched below, the whole request
+    // costs a small constant number of round trips regardless of how many
+    // trucks are in it. `created` is filled by original index so the response
+    // still lists trucks in the order they were submitted.
+    const created = new Array(trucks.length);
+    const newRows = [];
+
     for (let i = 0; i < trucks.length; i++) {
       const t = trucks[i];
       const plate = String(t.truckNumber).trim();
@@ -854,32 +866,69 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
           Object.assign(dup, await orderTruckRepo.update(dup.id, patch, tx));
         }
         const ticket = await generateTicketForTruck(order, dup, tx);
-        created.push({ load: dup, ticket, alreadyExisted: true });
+        created[i] = { load: dup, ticket, alreadyExisted: true };
         continue;
       }
 
-      const load = await orderTruckRepo.create(
-        {
+      newRows.push({
+        index: i,
+        quantity: String(t.quantity),
+        data: {
           orderId,
           truckIndex: startIndex + i + 1,
           truckId: t.truckId ?? null,
-          truckNumber: String(t.truckNumber).trim(),
+          truckNumber: plate,
           quantity: String(t.quantity),
           compartments: t.compartments ?? null,
-          driverName: String(t.driverName).trim(),
-          driverPhone: String(t.driverPhone).trim(),
+          driverName,
+          driverPhone,
           loaderName: t.loaderName ?? null,
           loaderPhone: t.loaderPhone ?? null,
           ...loadedNow,
         },
+      });
+    }
+
+    if (newRows.length) {
+      // One round trip for every new load, instead of one per truck.
+      const newLoads = await orderTruckRepo.createMany(newRows.map((r) => r.data), tx);
+
+      // One round trip for every placeholder ticket — skips the per-truck
+      // "does this load already have a ticket" check, which can only ever be
+      // false for a load this same call just created.
+      const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+      const placeholderTickets = await ticketRepo.createMany(
+        newLoads.map((load) => ({
+          ticketNumber: `TCK-${order.id}-${load.truckIndex}`,
+          orderId: order.id,
+          orderTruckId: load.id,
+          status: "Active",
+          qrCodeDataUrl: "placeholder",
+        })),
         tx,
       );
 
-      const ticket = await generateTicketForTruck(order, load, tx);
-      created.push({ load, ticket });
+      // QR encoding is CPU-only, not a database call — run every truck's
+      // concurrently rather than serialising them behind awaits.
+      const qrCodeDataUrls = await Promise.all(
+        placeholderTickets.map((tk) =>
+          QRCode.toDataURL(`${clientUrl}/ticket/details?id=${tk.id}`, { margin: 1, width: 300 }),
+        ),
+      );
 
-      await auditLogRepo.record(
-        {
+      // One round trip to write every ticket's QR code back.
+      await ticketRepo.updateManyQrCodes(
+        placeholderTickets.map((tk, idx) => ({ id: tk.id, qrCodeDataUrl: qrCodeDataUrls[idx] })),
+        tx,
+      );
+      const finishedTickets = placeholderTickets.map((tk, idx) => ({
+        ...tk,
+        qrCodeDataUrl: qrCodeDataUrls[idx],
+      }));
+
+      // One round trip for every audit row.
+      await auditLogRepo.recordMany(
+        newLoads.map((load, idx) => ({
           entityType: "order_truck",
           entityId: load.id,
           action: "order_truck.ticket_generated",
@@ -888,14 +937,18 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
             orderId,
             truckIndex: load.truckIndex,
             truckNumber: load.truckNumber,
-            quantity: String(t.quantity),
+            quantity: newRows[idx].quantity,
             via: "generate-tickets",
           },
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        },
+        })),
         tx,
       );
+
+      newRows.forEach((r, idx) => {
+        created[r.index] = { load: newLoads[idx], ticket: finishedTickets[idx] };
+      });
     }
 
     // First generation moves the order onto the loading floor. Routed through

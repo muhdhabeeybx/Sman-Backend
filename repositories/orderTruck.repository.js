@@ -3,6 +3,7 @@ const { alias } = require("drizzle-orm/pg-core");
 const { db } = require("../config/db");
 const { orderTrucks, orders, customers, depots, products, pfis, staff } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { generateOrderReference } = require("../utils/helpers");
 
 // The gate is two people: one signs a truck in, another signs it out. Both
 // come from `staff`, so the table is joined twice under its own aliases —
@@ -21,6 +22,12 @@ const exitedByStaff = alias(staff, "exited_by_staff");
 const create = async (data, tx = db) => {
   const [row] = await tx.insert(orderTrucks).values(data).returning();
   return row;
+};
+
+/** Bulk sibling of `create` — one round trip for a whole batch of loads. */
+const createMany = async (rows, tx = db) => {
+  if (!rows.length) return [];
+  return tx.insert(orderTrucks).values(rows).returning();
 };
 
 const findById = async (id, tx = db) => {
@@ -189,11 +196,20 @@ const findGateMovements = async ({ dateFrom, dateTo, depotId, pfiId, search, sco
     .where(and(...conditions))
     .orderBy(desc(orderTrucks.securityEnteredAt), desc(orderTrucks.id));
 
-  const entered = rows.length;
-  const exited = rows.filter((r) => r.exitedAt).length;
+  // The reference people actually use — "AA11214", built from the order's own
+  // company initials, not the internal ORD-768CF4D000B7. Same helper every
+  // other report and every printed ticket goes through, so a reference read
+  // off this page finds the order it names.
+  const trucks = rows.map((r) => ({
+    ...r,
+    reference: generateOrderReference(r.companyName, r.orderId),
+  }));
+
+  const entered = trucks.length;
+  const exited = trucks.filter((r) => r.exitedAt).length;
 
   return {
-    trucks: rows,
+    trucks,
     totals: {
       entered,
       exited,
@@ -206,6 +222,7 @@ const findGateMovements = async ({ dateFrom, dateTo, depotId, pfiId, search, sco
 
 module.exports = {
   create,
+  createMany,
   findById,
   findByOrder,
   findGateMovements,

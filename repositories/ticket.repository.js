@@ -321,6 +321,12 @@ const create = async (data, tx = db) => {
   return row;
 };
 
+/** Bulk sibling of `create` — one round trip for a whole batch of tickets. */
+const createMany = async (rows, tx = db) => {
+  if (!rows.length) return [];
+  return tx.insert(tickets).values(rows).returning();
+};
+
 const update = async (id, data, tx = db) => {
   const [row] = await tx
     .update(tickets)
@@ -328,6 +334,33 @@ const update = async (id, data, tx = db) => {
     .where(eq(tickets.id, id))
     .returning();
   return row || null;
+};
+
+/**
+ * Write a different qrCodeDataUrl to each of many tickets in one round trip —
+ * the batched sibling of `update`, for the write-back after generating a QR
+ * code per ticket. A plain multi-row UPDATE can't vary the value per row, so
+ * this joins against a VALUES list instead (`UPDATE … FROM (VALUES …)`).
+ *
+ * Raw SQL, so it returns raw (snake_case) rows rather than drizzle's mapped
+ * shape — callers that need the updated tickets back in the usual shape
+ * should build them in JS from what they already have rather than parse
+ * this call's return value.
+ *
+ * @param {Array<{id: number, qrCodeDataUrl: string}>} updates
+ */
+const updateManyQrCodes = async (updates, tx = db) => {
+  if (!updates.length) return;
+  const rows = sql.join(
+    updates.map((u) => sql`(${u.id}::integer, ${u.qrCodeDataUrl}::text)`),
+    sql`, `
+  );
+  await tx.execute(sql`
+    UPDATE tickets AS t
+    SET qr_code_data_url = v.qr, updated_at = now()
+    FROM (VALUES ${rows}) AS v(id, qr)
+    WHERE t.id = v.id
+  `);
 };
 
 module.exports = {
@@ -340,6 +373,8 @@ module.exports = {
   findByOrderTruck,
   findAll,
   create,
+  createMany,
   update,
+  updateManyQrCodes,
 };
 
