@@ -219,12 +219,19 @@ async function main() {
     // Every deposit's capacity, less what orders this script is NOT touching
     // already hold against it. Reserving first is what makes repairing one
     // order incapable of defunding another.
+    // Every credit belonging to a customer whose orders are being rewritten —
+    // not merely the ones already carrying an allocation. The last pass below
+    // draws on genuine leftovers, and a credit that has never been allocated
+    // to anything is exactly the kind it needs to see.
     const depositIds = [...new Set([...usable.map((e) => e.deposit_id), ...existing.map((a) => a.deposit_id)])];
     const depositRows = (
       await client.query(
-        `SELECT id, amount::numeric, remaining_amount::numeric AS remaining, customer_id, reference
-           FROM deposits WHERE id = ANY($1::int[])`,
-        [depositIds]
+        `SELECT id, amount::numeric, remaining_amount::numeric AS remaining, customer_id, reference, created_at
+           FROM deposits
+          WHERE type = 'credit'
+            AND (id = ANY($1::int[])
+                 OR customer_id IN (SELECT customer_id FROM orders WHERE id = ANY($2::int[])))`,
+        [depositIds, [...rewriting]]
       )
     ).rows;
     const depositById = new Map(depositRows.map((d) => [d.id, d]));
@@ -250,6 +257,9 @@ async function main() {
     /** { orderId, depositId, received, applied, source } */
     const planned = [];
     const report = [];
+    /** What each rewritten order still needs, carried between the passes below. */
+    const shortfallByOrder = new Map();
+    const pendingReport = new Map();
     let skippedWrongCustomer = 0;
 
     // Orders with evidence first: their bank rows have first claim on the
@@ -319,6 +329,70 @@ async function main() {
           lines.push(`      wallet ${naira(take)} drawn from balance · ${a.reference || "no ref"}`);
         }
       }
+
+      shortfallByOrder.set(orderId, need);
+      pendingReport.set(orderId, { before, beforeReceived, lines });
+    }
+
+    /**
+     * Last pass: the shortfall, from money genuinely left over in the wallet.
+     *
+     * Runs only after every evidence order has taken its bank rows, so this
+     * can only ever see what those orders did not need — a credit's surplus
+     * after it covered the order it was matched to. That ordering is what
+     * makes it safe; drawing from the same pool earlier is how order 11437
+     * ended up funding itself with other orders' payments.
+     *
+     * Without this, an order whose last few naira came off an earlier order's
+     * surplus printed "No recorded source", which is not true and does not
+     * read as true. GG11377 is the case: ₦3,505,000 short, and GG11360 — same
+     * customer, same week — sitting on exactly ₦3,505,000 of unclaimed
+     * credit. The reason it was not linked is that the earlier version of this
+     * script would only re-use allocations that already existed rather than
+     * draw on a leftover, which was over-cautious to the point of being wrong.
+     *
+     * Only credits with a tracked remainder are eligible. A null remainder
+     * means nothing is known about what is left of that credit, and offering
+     * it here would be inventing funds.
+     */
+    const byCustomer = new Map();
+    for (const d of depositRows) {
+      if (d.remaining === null) continue;
+      if (!byCustomer.has(d.customer_id)) byCustomer.set(d.customer_id, []);
+      byCustomer.get(d.customer_id).push(d);
+    }
+    for (const list of byCustomer.values()) {
+      list.sort((a, b) => new Date(a.created_at) - new Date(b.created_at) || a.id - b.id);
+    }
+
+    for (const orderId of rewriteOrder) {
+      const order = orderById.get(orderId);
+      if (!order) continue;
+      let need = shortfallByOrder.get(orderId) ?? 0;
+      if (need <= 0) continue;
+      const entry = pendingReport.get(orderId);
+
+      for (const d of byCustomer.get(order.customer_id) || []) {
+        if (need <= 0) break;
+        // `available` is the authority on how much is free — it is recomputed
+        // from scratch each run, where remaining_amount is the state a
+        // previous run left behind. The remainder is consulted only above, as
+        // an eligibility test: not-null means this credit is tracked at all.
+        const take = Math.max(0, Math.min(available.get(d.id) ?? 0, need));
+        if (take <= 0) continue;
+        available.set(d.id, (available.get(d.id) ?? 0) - take);
+        need -= take;
+        planned.push({ orderId, depositId: d.id, received: take, applied: take, source: "wallet", reference: d.reference });
+        entry.lines.push(`      wallet ${naira(take)} from leftover credit · ${d.reference || "no ref"}`);
+      }
+      shortfallByOrder.set(orderId, need);
+    }
+
+    for (const orderId of rewriteOrder) {
+      const order = orderById.get(orderId);
+      if (!order) continue;
+      const { before, beforeReceived, lines } = pendingReport.get(orderId);
+      const need = shortfallByOrder.get(orderId) ?? 0;
 
       const afterReceived = planned
         .filter((p) => p.orderId === orderId)
