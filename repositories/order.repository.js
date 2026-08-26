@@ -635,7 +635,24 @@ const findFinanceReport = async ({
           .select({
             orderId: orderDepositAllocations.orderId,
             depositId: orderDepositAllocations.depositId,
+            // What was RECEIVED against this order. On a bank row this is the
+            // statement line at face value — the figure the report is checked
+            // against — not a slice of it. See db/migrations/0011.
             amount: orderDepositAllocations.amount,
+            // What the order CONSUMED of it. Differs from `amount` only where
+            // a payment overshot the order it was made for; the difference is
+            // the surplus still sitting in the wallet under this reference.
+            appliedAmount: orderDepositAllocations.appliedAmount,
+            /**
+             * How the money reached this order — 'bank', 'wallet' or 'legacy'.
+             *
+             * This used to be inferred, badly: a row with no statement line
+             * was guessed at from its description, and a credit spread over
+             * two orders was labelled by whichever took the larger share.
+             * Both guesses are gone — the allocation now says which it is,
+             * recorded at the moment the payment was confirmed.
+             */
+            source: orderDepositAllocations.source,
             depositReference: deposits.reference,
             depositCreatedAt: deposits.createdAt,
             // What actually landed, as distinct from `amount` above — which
@@ -678,21 +695,21 @@ const findFinanceReport = async ({
               WHERE c.id = NULLIF(substring(${deposits.description} from 'customer #([0-9]+)'), '')::int
             )`,
             /**
-             * When one bank credit paid for more than one order.
+             * When one bank credit touched more than one order.
              *
              * The report shows a funding row per (order, deposit) pair, so a
-             * split credit printed the same bank reference under two different
-             * orders — which reads as the same statement row being spent
-             * twice. It is not: the slices sum to the credit exactly. But
-             * nothing on the row said so, and an auditor has no way to tell
-             * the difference by looking.
+             * credit reaching two orders printed the same bank reference under
+             * both — which reads as one statement row being spent twice. It
+             * never is, but nothing on the row said so, and an auditor has no
+             * way to tell the difference by looking.
              *
-             * These three say it. `sharedOrderCount` is how many orders the
-             * credit paid for, and `primaryOrderId` is the one that took the
-             * largest share — the order the statement line properly belongs
-             * to. Any other order is carrying a remainder off that one, and
-             * the report renders it as a transfer naming its source instead of
-             * repeating the bank reference.
+             * These three say it. `primaryOrderId` is the order the credit was
+             * BANK-matched to — the one the statement line properly belongs to
+             * — so a wallet draw elsewhere can name it. That used to be
+             * guessed at as "whichever order took the largest share", which is
+             * only right by luck; the `source = 'bank'` row records it as fact,
+             * and the largest-share ordering survives only as the tie-break for
+             * legacy rows, where nothing better was ever written down.
              *
              * Deliberately derived here rather than stored: it is a fact about
              * how the allocations happen to fall, and re-deriving it means it
@@ -705,13 +722,13 @@ const findFinanceReport = async ({
             primaryOrderId: sql`(
               SELECT a.order_id FROM order_deposit_allocations a
               WHERE a.deposit_id = ${deposits.id}
-              ORDER BY a.amount DESC, a.order_id ASC LIMIT 1
+              ORDER BY (a.source = 'bank') DESC, a.amount DESC, a.order_id ASC LIMIT 1
             )`,
             primaryOrderCompany: sql`(
               SELECT o2.company_name FROM order_deposit_allocations a
               JOIN orders o2 ON o2.id = a.order_id
               WHERE a.deposit_id = ${deposits.id}
-              ORDER BY a.amount DESC, a.order_id ASC LIMIT 1
+              ORDER BY (a.source = 'bank') DESC, a.amount DESC, a.order_id ASC LIMIT 1
             )`,
           })
           .from(orderDepositAllocations)
@@ -784,7 +801,11 @@ const findFinanceReport = async ({
 
   const decorated = rows.map((row) => {
     const orderFunding = fundingByOrder.get(row.id) || [];
-    const allocated = orderFunding.reduce((sum, f) => sum + Number(f.amount || 0), 0);
+    // What the order's VALUE was actually settled from — the applied figures,
+    // not the received ones. A bank credit recorded at face value can exceed
+    // the order it paid for, and counting the surplus here would report an
+    // order as over-covered when the shortfall it is looking for is real.
+    const applied = orderFunding.reduce((sum, f) => sum + Number(f.appliedAmount ?? f.amount ?? 0), 0);
     const fundingTracked = orderFunding.length > 0;
 
     const wallet = walletByOrder.get(row.id);
@@ -807,7 +828,7 @@ const findFinanceReport = async ({
       walletSource,
       /** A hold exists, so this was paid from wallet balance, tracked or not. */
       walletFunded: wallet != null,
-      unattributedAmount: fundingTracked ? Math.max(0, Number(row.totalAmount || 0) - allocated) : 0,
+      unattributedAmount: fundingTracked ? Math.max(0, Number(row.totalAmount || 0) - applied) : 0,
       walletBalanceBefore,
       walletBalanceAfter,
     };

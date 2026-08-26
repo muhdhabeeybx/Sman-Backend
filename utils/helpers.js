@@ -110,9 +110,20 @@ function generateOrderReference(companyName, orderId) {
  * free-text search ("Dangote Cement 50") is not mistaken for a reference and
  * does not pull an unrelated order into the results.
  *
+ * Anything too large to be an order id is also null — not because it is
+ * unparseable, but because it cannot be an order id and callers compare the
+ * result against an int4 column. Searching the finance report for a bank
+ * reference ("32923089257"), which is exactly how a payment gets checked
+ * against a statement, was reaching Postgres as `orders.id = 32923089257` and
+ * failing the whole query with "out of range for type integer" — so the one
+ * search a reconciler most needs returned an error instead of the order.
+ *
  * @param {string|number|null} value
  * @returns {number|null} the order id, or null
  */
+/** Postgres int4, which is what orders.id is. */
+const MAX_ORDER_ID = 2147483647;
+
 function parseOrderReference(value) {
   const s = String(value ?? "").trim();
   if (!s) return null;
@@ -122,7 +133,7 @@ function parseOrderReference(value) {
   if (!match) return null;
 
   const id = parseInt(match[1], 10);
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
+  return Number.isSafeInteger(id) && id > 0 && id <= MAX_ORDER_ID ? id : null;
 }
 
 module.exports = {

@@ -494,8 +494,78 @@ const reassignHold = async ({ orderId, toCustomerId }, tx) => {
 };
 
 /**
- * Which credit deposit(s) an order's payment drew from, FIFO — oldest
- * unclaimed money first.
+ * How money reached an order. Recorded per allocation row so the report never
+ * has to guess again — see db/migrations/0011.
+ *
+ *   BANK    a bank statement line matched to THIS order at confirm time
+ *   WALLET  a draw from balance already sitting in the wallet
+ *   LEGACY  written before any of this was recorded; unverifiable by design
+ */
+const ALLOCATION_SOURCE = { BANK: "bank", WALLET: "wallet", LEGACY: "legacy" };
+
+/**
+ * The deposits that were matched to THIS order, in the act of confirming it.
+ *
+ * Two records say so, and both are written at confirm time by
+ * creditFromStatementLines()/rematchOrderFunding():
+ *
+ *   bank_statement_lines.matched_order_id  the line was claimed FOR this order
+ *   deposits.paystack_details->>'orderId'  the deposit was recorded to confirm it
+ *
+ * The statement line is the stronger of the two — it is the row an auditor
+ * will be holding — but a deposit typed in by hand has no line at all, so
+ * both are consulted. Ordered oldest first so several tranches paid against
+ * one order read in the order the bank lists them.
+ */
+const findDepositsMatchedToOrder = async (customerId, orderId, tx) => {
+  const result = await tx.execute(sql`
+    SELECT d.id, d.amount, d.remaining_amount AS "remainingAmount"
+    FROM deposits d
+    WHERE d.customer_id = ${customerId}
+      AND d.type = 'credit'
+      AND (
+        EXISTS (
+          SELECT 1 FROM bank_statement_lines l
+          WHERE l.matched_deposit_id = d.id AND l.matched_order_id = ${orderId}
+        )
+        -- Guarded rather than cast outright: paystack_details is free-form
+        -- JSON going back to the gateway era, and one non-numeric orderId
+        -- anywhere in the table would abort the cast for every row.
+        OR (d.paystack_details->>'orderId' ~ '^[0-9]+$'
+            AND (d.paystack_details->>'orderId')::int = ${orderId})
+      )
+      -- Already written up against this order by an earlier attempt; a
+      -- retried hold must not allocate the same credit twice.
+      AND NOT EXISTS (
+        SELECT 1 FROM order_deposit_allocations a
+        WHERE a.deposit_id = d.id AND a.order_id = ${orderId}
+      )
+    ORDER BY d.created_at ASC, d.id ASC
+    FOR UPDATE OF d
+  `);
+  return result.rows ?? result;
+};
+
+/**
+ * Write up where an order's payment came from.
+ *
+ * Two passes, and the order of them is the whole point:
+ *
+ *   1. The statement lines that were matched to this order. Each is recorded
+ *      at its FACE value, because that is the figure on the bank statement
+ *      this report gets checked against. What the order consumes of it is
+ *      capped at the order's own value; any surplus stays in the wallet with
+ *      its reference still attached, so a later manual draw can name where
+ *      the balance came from.
+ *
+ *   2. Only whatever the order still needs after that, drawn from the rest of
+ *      the wallet oldest-credit-first, and marked as a wallet draw.
+ *
+ * Pass 1 did not exist. Everything went through pass 2, which meant an order
+ * confirmed against a specific bank credit was written up as slices of
+ * whatever unclaimed money happened to be oldest — reading, on the report, as
+ * a pile of small "transfers" from unrelated payers. The evidence for pass 1
+ * was being recorded all along (matched_order_id), just never read.
  *
  * Purely additive bookkeeping: called from placeHold()/releaseHold() wrapped
  * in try/catch that only logs. A bug here must never be able to fail or roll
@@ -509,6 +579,40 @@ const allocateOrderFunding = async (customerId, orderId, amount, tx) => {
   let remaining = money(amount);
   if (remaining <= 0) return;
 
+  /** Record one row and draw the deposit down by what the order consumed. */
+  const write = async (depositId, received, applied, source) => {
+    if (applied > 0) {
+      await tx
+        .update(deposits)
+        .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(applied)}` })
+        .where(eq(deposits.id, depositId));
+    }
+    await tx.insert(orderDepositAllocations).values({
+      orderId,
+      depositId,
+      amount: asDecimal(received),
+      appliedAmount: asDecimal(applied),
+      source,
+    });
+  };
+
+  // ── 1. What was actually matched to this order ──────────────────────────
+  const matched = await findDepositsMatchedToOrder(customerId, orderId, tx);
+  for (const d of matched) {
+    // Face value of the credit, whether or not this order needed all of it.
+    const received = money(d.amount);
+    if (received <= 0) continue;
+    // What it can still spend, against what the order still needs. A credit
+    // already partly spent elsewhere can only apply what is left of it.
+    const applied = Math.min(money(d.remainingAmount), remaining);
+    await write(d.id, received, Math.max(0, applied), ALLOCATION_SOURCE.BANK);
+    remaining -= Math.max(0, applied);
+  }
+
+  if (remaining <= 0) return;
+
+  // ── 2. The rest, from balance already in the wallet ─────────────────────
+  const matchedIds = new Set(matched.map((d) => Number(d.id)));
   const candidates = await tx
     .select({ id: deposits.id, remainingAmount: deposits.remainingAmount })
     .from(deposits)
@@ -518,20 +622,13 @@ const allocateOrderFunding = async (customerId, orderId, amount, tx) => {
 
   for (const d of candidates) {
     if (remaining <= 0) break;
+    // Pass 1 already wrote a row for these, and the unique index on
+    // (order_id, deposit_id) would reject a second one anyway.
+    if (matchedIds.has(Number(d.id))) continue;
     const take = Math.min(money(d.remainingAmount), remaining);
     if (take <= 0) continue;
 
-    await tx
-      .update(deposits)
-      .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(take)}` })
-      .where(eq(deposits.id, d.id));
-
-    await tx.insert(orderDepositAllocations).values({
-      orderId,
-      depositId: d.id,
-      amount: asDecimal(take),
-    });
-
+    await write(d.id, take, take, ALLOCATION_SOURCE.WALLET);
     remaining -= take;
   }
 };
@@ -654,11 +751,12 @@ const rematchOrderFunding = async (
     const customerId = hold ? hold.customerId : order.customerId;
     const holdAmount = hold ? money(hold.amount) : money(order.totalAmount);
 
-    // What is on the order now, and which deposits those were.
+    // What is on the order now, and which deposits those were. The applied
+    // figure is the one to give back — see deallocateOrderFunding.
     const current = await trx
       .select({
         depositId: orderDepositAllocations.depositId,
-        amount: orderDepositAllocations.amount,
+        appliedAmount: orderDepositAllocations.appliedAmount,
       })
       .from(orderDepositAllocations)
       .where(eq(orderDepositAllocations.orderId, orderId));
@@ -737,27 +835,36 @@ const rematchOrderFunding = async (
     for (const r of current) {
       await trx
         .update(deposits)
-        .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.amount}` })
+        .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.appliedAmount}` })
         .where(eq(deposits.id, r.depositId));
     }
     await trx.delete(orderDepositAllocations).where(eq(orderDepositAllocations.orderId, orderId));
 
-    // --- 3. Put it on the new ones, up to what the order actually took ----
+    // --- 3. Put it on the new ones ----------------------------------------
+    // Each replacement line is recorded at face value — it is a bank row, and
+    // a bank row is the statement line as the statement has it. Only what the
+    // order consumes is taken out of the credit, so picking a line larger
+    // than the order leaves the surplus in the wallet under its own reference
+    // rather than silently trimming the figure the auditor will look for.
     let remaining = holdAmount;
     for (const d of newDeposits) {
-      if (remaining <= 0) break;
-      const take = Math.min(money(d.amount), remaining);
-      if (take <= 0) continue;
-      await trx
-        .update(deposits)
-        .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(take)}` })
-        .where(eq(deposits.id, d.id));
+      const received = money(d.amount);
+      if (received <= 0) continue;
+      const applied = Math.max(0, Math.min(received, remaining));
+      if (applied > 0) {
+        await trx
+          .update(deposits)
+          .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(applied)}` })
+          .where(eq(deposits.id, d.id));
+      }
       await trx.insert(orderDepositAllocations).values({
         orderId,
         depositId: d.id,
-        amount: asDecimal(take),
+        amount: asDecimal(received),
+        appliedAmount: asDecimal(applied),
+        source: ALLOCATION_SOURCE.BANK,
       });
-      remaining -= take;
+      remaining -= applied;
     }
 
     // --- 4. Undo the mistake and free its line ----------------------------
@@ -803,17 +910,28 @@ const rematchOrderFunding = async (
   return tx ? run(tx) : db.transaction(run);
 };
 
-/** Reverses allocateOrderFunding() — an order's hold was released, so nothing was actually spent. */
+/**
+ * Reverses allocateOrderFunding() — an order's hold was released, so nothing
+ * was actually spent.
+ *
+ * Gives back `appliedAmount`, not `amount`: on a bank row those differ
+ * whenever the payment overshot the order, and only the applied part was ever
+ * taken out of the deposit's remainingAmount. Handing back the face value
+ * would credit the wallet with a surplus that never left it.
+ */
 const deallocateOrderFunding = async (orderId, tx) => {
   const rows = await tx
-    .select({ depositId: orderDepositAllocations.depositId, amount: orderDepositAllocations.amount })
+    .select({
+      depositId: orderDepositAllocations.depositId,
+      appliedAmount: orderDepositAllocations.appliedAmount,
+    })
     .from(orderDepositAllocations)
     .where(eq(orderDepositAllocations.orderId, orderId));
 
   for (const r of rows) {
     await tx
       .update(deposits)
-      .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.amount}` })
+      .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.appliedAmount}` })
       .where(eq(deposits.id, r.depositId));
   }
 
@@ -991,6 +1109,7 @@ const getLedgerBalance = async (customerId) => {
 };
 
 module.exports = {
+  ALLOCATION_SOURCE,
   credit,
   creditFromStatementLines,
   debit,
