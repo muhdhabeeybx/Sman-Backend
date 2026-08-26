@@ -112,6 +112,137 @@ const update = async (id, data) => {
   return row || null;
 };
 
+/**
+ * What one truck-cycle for one customer was worth, and what it has taken.
+ *
+ * Expected is read ONCE per cycle with MAX, not summed: delivery_sales holds
+ * one row per payment and repeats the cycle's sales_value on every one of
+ * them, so summing it multiplies what was owed by however many times the
+ * customer has paid. This is the same rule useLedgerGroups applies on the
+ * client and outstandingPayments applies on the dashboard — all three have to
+ * agree or a surplus computed here would not be the one shown on screen.
+ *
+ * The plate is normalised the way getCycleKey normalises it, so a loading
+ * written "BWR 809 XB" and a payment written "BWR809XB" stay one cycle.
+ */
+const cycleStanding = async ({ truckNumber, dateLoaded, customerId }) => {
+  const [row] = await db.execute(sql`
+    SELECT
+      COALESCE(MAX(${deliverySales.salesValue}::numeric), 0) AS sales_value,
+      COALESCE(MAX(${deliverySales.rate}::numeric), 0)       AS rate,
+      COALESCE(MAX(${deliverySales.quantity}::numeric), 0)   AS quantity,
+      COALESCE(SUM(${deliverySales.paymentAmount}::numeric), 0) AS paid
+    FROM ${deliverySales}
+    WHERE regexp_replace(UPPER(COALESCE(${deliverySales.truckNumber}, '')), '\\s', '', 'g')
+        = regexp_replace(UPPER(${truckNumber || ""}), '\\s', '', 'g')
+      AND COALESCE(LEFT(${deliverySales.dateLoaded}, 10), '') = ${String(dateLoaded || "").slice(0, 10)}
+      AND ${customerId == null
+        ? sql`${deliverySales.customerId} IS NULL`
+        : sql`${deliverySales.customerId} = ${Number(customerId)}`}
+  `);
+
+  const salesValue = Number(row?.sales_value ?? 0);
+  const rate = Number(row?.rate ?? 0);
+  const quantity = Number(row?.quantity ?? 0);
+  const paid = Number(row?.paid ?? 0);
+  const expected = salesValue > 0 ? salesValue : rate * quantity;
+
+  return { expected, paid, surplus: Math.round((paid - expected) * 100) / 100 };
+};
+
+/**
+ * Move a truck's overpayment onto one or more other trucks.
+ *
+ * Written as two rows per destination — a negative payment on the source and
+ * a positive one on the destination — rather than as an edit to the original
+ * payment. delivery_sales IS the payment history, and the two questions asked
+ * of it are "what did this truck receive" and "where did that come from"; one
+ * row can only answer one of them.
+ *
+ * The surplus is recomputed here from the table, never taken from the
+ * request. A client that believes a truck is ₦2m over when it is ₦200k over
+ * would otherwise invent ₦1.8m, and the ledger has no way to tell afterwards
+ * that it was invented.
+ *
+ * All legs go in one transaction: a credit that lands without its matching
+ * debit is money created out of nothing.
+ */
+const transferOverpayment = async ({ from, to, actor = "" }) => {
+  const destinations = (to || []).filter((d) => Number(d.amount) > 0);
+  if (destinations.length === 0) {
+    throw Object.assign(new Error("Nothing to transfer"), { status: 400 });
+  }
+
+  const standing = await cycleStanding(from);
+  if (standing.surplus <= 0) {
+    throw Object.assign(
+      new Error("This truck has no overpayment to move"),
+      { status: 400 },
+    );
+  }
+
+  const total = destinations.reduce((s, d) => s + Number(d.amount), 0);
+  // Half a kobo of slack: the client works in naira with two decimals and
+  // "transfer all of it" must not fail on a rounding tail.
+  if (total > standing.surplus + 0.005) {
+    throw Object.assign(
+      new Error(
+        `Only ${standing.surplus.toFixed(2)} is available to move; ${total.toFixed(2)} was requested`,
+      ),
+      { status: 400 },
+    );
+  }
+
+  const groupId = `TRF-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
+  const today = new Date().toISOString().slice(0, 10);
+  const label = (t) => [t.truckNumber, t.customerName].filter(Boolean).join(" · ");
+  const fromLabel = label(from);
+
+  // A leg is an ordinary delivery_sale in every respect except its amount and
+  // its transfer columns. sales_value, quantity and rate are left at zero on
+  // purpose: the group reads those with MAX, so a leg carrying them would
+  // either restate or overwrite what the truck was actually worth.
+  const leg = (cycle, amount, counterparty, payer) => ({
+    truckNumber: cycle.truckNumber || "",
+    dateLoaded: cycle.dateLoaded || "",
+    depotLoaded: cycle.depotLoaded || "",
+    customerId: cycle.customerId ? Number(cycle.customerId) : null,
+    customerName: cycle.customerName || "",
+    location: cycle.location || "",
+    allocationCode: cycle.allocationCode || null,
+    quantity: 0,
+    rate: "0",
+    salesValue: "0",
+    paymentAmount: String(amount),
+    payerName: payer,
+    bank: "",
+    dateOfPayment: today,
+    // Not a bank deposit, so there is nothing to confirm against a statement.
+    depositStatus: "paid",
+    transferGroupId: groupId,
+    transferCounterparty: counterparty,
+    enteredBy: actor,
+    remarks: payer,
+  });
+
+  const rows = [];
+  for (const dest of destinations) {
+    const amount = Math.round(Number(dest.amount) * 100) / 100;
+    const destLabel = label(dest);
+    rows.push(leg(from, -amount, destLabel, `Transferred to ${destLabel}`));
+    rows.push(leg(dest, amount, fromLabel, `Transfer from ${fromLabel}`));
+  }
+
+  const inserted = await db.transaction(async (tx) => tx.insert(deliverySales).values(rows).returning());
+
+  return {
+    transferGroupId: groupId,
+    moved: Math.round(total * 100) / 100,
+    remaining: Math.round((standing.surplus - total) * 100) / 100,
+    sales: inserted,
+  };
+};
+
 const deleteById = async (id) => {
   const [row] = await db
     .delete(deliverySales)
@@ -128,4 +259,6 @@ module.exports = {
   create,
   update,
   deleteById,
+  cycleStanding,
+  transferOverpayment,
 };

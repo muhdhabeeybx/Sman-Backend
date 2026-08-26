@@ -79,10 +79,48 @@ const listDeliverySales = pagination.extend({
 
 const idParam = z.object({ id: id("Sale id") });
 
+/**
+ * One end of a transfer — enough to place a leg in the right truck-cycle.
+ *
+ * Deliberately identified by truck, load date and customer rather than by a
+ * sale id: a cycle is a group of payment rows, not a row, and naming one of
+ * them would tie the transfer to whichever payment happened to be first.
+ */
+const transferCycle = z.object({
+  truckNumber: requiredString("Truck number", 100),
+  dateLoaded: optionalString("Date loaded", 40),
+  depotLoaded: optionalString("Depot loaded", 255),
+  customerId: id("Customer").optional().nullable(),
+  customerName: optionalString("Customer name", 255),
+  location: optionalString("Location", 255),
+  allocationCode: optionalString("Allocation code", 100),
+});
+
+/**
+ * The amount is validated here for shape only. Whether it is actually
+ * available is decided in the repository against the table, because the
+ * surplus is a fact about the ledger and not something a request can assert.
+ */
+const transferOverpayment = z.object({
+  from: transferCycle,
+  to: z
+    .array(transferCycle.extend({ amount: money("Amount") }))
+    .min(1, "Choose at least one truck to move it to")
+    .max(20, "Too many destinations in one transfer"),
+})
+
+const cycleStandingQuery = z.object({
+  truckNumber: z.string().trim().max(100, "Truck number is too long"),
+  dateLoaded: z.string().trim().max(40, "Date loaded is too long").optional(),
+  customerId: z.coerce.number().int().positive().optional(),
+});
+
 module.exports = {
   createDeliverySale,
   updateDeliverySale,
   setDepositStatus,
   listDeliverySales,
   idParam,
+  transferOverpayment,
+  cycleStandingQuery,
 };

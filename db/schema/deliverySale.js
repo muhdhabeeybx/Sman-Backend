@@ -43,6 +43,11 @@ const deliverySales = pgTable(
     // are not remittances at all (a pump sale, an expense). See
     // depositChannelEnum for why it is not defaulted.
     depositChannel: depositChannelEnum("deposit_channel"),
+    // The two legs of an overpayment moved between trucks share this id, so
+    // the pair can be found from either end. Null on an ordinary payment.
+    transferGroupId: varchar("transfer_group_id", { length: 64 }),
+    /** The other truck and customer, as a label — "BWR810XB · Musa Damaturu". */
+    transferCounterparty: varchar("transfer_counterparty", { length: 255 }),
     dateOfPayment: varchar("date_of_payment", { length: 20 }),
     depositStatus: depositStatusEnum("deposit_status").default("pending").notNull(),
     phoneNumber: varchar("phone_number", { length: 30 }).default(""),

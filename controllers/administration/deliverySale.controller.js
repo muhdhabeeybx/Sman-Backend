@@ -60,6 +60,43 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Move a truck's overpayment onto other trucks.
+ *
+ * Its own route rather than two calls to the create endpoint: the debit and
+ * the credit have to land together, and a client that managed the second
+ * without the first would have created money. The repository also recomputes
+ * the available surplus from the table, so the amount is never taken on the
+ * caller's word.
+ */
+const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
+  const actor = req.user?.name || req.user?.email || "";
+  const result = await deliverySaleRepo.transferOverpayment({
+    from: req.body.from,
+    to: req.body.to,
+    actor,
+  });
+
+  res.status(201).json({
+    success: true,
+    message:
+      result.remaining > 0
+        ? `Transferred — ${result.remaining.toFixed(2)} of the overpayment is still unallocated`
+        : "Overpayment transferred",
+    data: result,
+  });
+});
+
+/** What one truck-cycle is owed and has taken, so the dialog can offer a cap. */
+const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
+  const standing = await deliverySaleRepo.cycleStanding({
+    truckNumber: req.query.truckNumber,
+    dateLoaded: req.query.dateLoaded,
+    customerId: req.query.customerId || null,
+  });
+  res.json({ success: true, data: standing });
+});
+
 const updateDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
   if (!sale) {
@@ -115,4 +152,6 @@ module.exports = {
   updateDeliverySale,
   setDeliverySaleDepositStatus,
   deleteDeliverySale,
+  transferDeliveryOverpayment,
+  getDeliveryCycleStanding,
 };

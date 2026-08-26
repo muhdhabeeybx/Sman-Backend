@@ -10,9 +10,15 @@ const {
   updateDeliverySale,
   setDeliverySaleDepositStatus,
   deleteDeliverySale,
+  transferDeliveryOverpayment,
+  getDeliveryCycleStanding,
 } = require("../../controllers/administration/deliverySale.controller");
 
 router.get("/", verifyStaff, validate({ query: saleSchemas.listDeliverySales }), getDeliverySales);
+// Both of these sit above "/:id" — Express matches in order, and a literal
+// path declared after a parameter route is swallowed by it.
+router.get("/cycle-standing", verifyStaff, validate({ query: saleSchemas.cycleStandingQuery }), getDeliveryCycleStanding);
+router.post("/transfer", verifyStaff, validate({ body: saleSchemas.transferOverpayment }), transferDeliveryOverpayment);
 router.get("/:id", verifyStaff, validate({ params: saleSchemas.idParam }), getDeliverySaleById);
 router.post("/", verifyStaff, validate({ body: saleSchemas.createDeliverySale }), createDeliverySale);
 router.patch("/:id", verifyStaff, validate({ params: saleSchemas.idParam, body: saleSchemas.updateDeliverySale }), updateDeliverySale);
