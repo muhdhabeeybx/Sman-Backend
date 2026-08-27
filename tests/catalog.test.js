@@ -91,6 +91,22 @@ describe("public catalog — what anyone may see before signing in", () => {
     }
   });
 
+  test("returns null hours when expiry is switched off", async () => {
+    const original = process.env.ORDER_EXPIRY_DISABLED;
+    try {
+      process.env.ORDER_EXPIRY_DISABLED = "true";
+      const res = await request(app).get(CATALOG);
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      // null, not a number: the portal and legal copy read this as "no fixed
+      // window" and drop the deadline promise rather than stating one nothing
+      // enforces.
+      assert.equal(res.body.data.orderExpiryHours, null);
+    } finally {
+      if (original === undefined) delete process.env.ORDER_EXPIRY_DISABLED;
+      else process.env.ORDER_EXPIRY_DISABLED = original;
+    }
+  });
+
   test("an in-stock priced depot is listed with its products and prices", async () => {
     const res = await request(app).get(CATALOG);
     const depot = res.body.data.depots.find((d) => d.id === stockedDepotId);

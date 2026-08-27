@@ -1,6 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const { publicCatalog } = require("../../services/catalog.service");
-const { orderExpiryHours } = require("../../config/orderExpiry");
+const { orderExpiryHours, orderExpiryDisabled } = require("../../config/orderExpiry");
 
 /**
  * GET /api/catalog — the orderable depots with priced products, public.
@@ -11,13 +11,16 @@ const { orderExpiryHours } = require("../../config/orderExpiry");
  * litres before anything leaves the process.
  *
  * Also returns `orderExpiryHours` (from ORDER_EXPIRY_HOURS) so the portal can
- * promise the same payment window the sweep enforces, without hardcoding it.
+ * promise the same payment window the sweep enforces, without hardcoding it —
+ * or `null` when expiry is switched off (ORDER_EXPIRY_DISABLED), so the portal
+ * and the legal copy drop the payment-window promise instead of stating a
+ * deadline nothing enforces.
  */
 const getCatalog = asyncHandler(async (req, res) => {
   const depots = await publicCatalog();
   res.json({
     success: true,
-    data: { depots, orderExpiryHours: orderExpiryHours() },
+    data: { depots, orderExpiryHours: orderExpiryDisabled() ? null : orderExpiryHours() },
   });
 });
 
