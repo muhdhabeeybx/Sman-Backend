@@ -65,14 +65,27 @@ const dailyReports = pgTable(
     //
     // Nullable with no default, unlike the money columns above: 0 and "not
     // filled in" are different answers on a report somebody may file in
-    // stages, and the derived figures below should not read as settled when
+    // stages, and the two figures below should not read as settled when
     // nothing has been entered.
-    //   commission outstanding = commissionDue - amountPaid
-    //   funds remaining        = fundsReceived - amountPaid
-    // Both are computed at render, never stored — a stored total drifts the
-    // moment one of its inputs is corrected.
     fundsReceived: decimal("funds_received", { precision: 15, scale: 2 }),
     commissionDue: decimal("commission_due", { precision: 15, scale: 2 }),
+    // What is still owed, and what is left of the money taken in.
+    //
+    //   commission outstanding ≈ commissionDue - amountPaid
+    //   funds remaining        ≈ fundsReceived - amountPaid
+    //
+    // Approximately: the form starts both at the subtraction and keeps them
+    // there while the figures behind them move, but the filer can state
+    // something else — what is still owed can carry an earlier period's
+    // arrears, which today's two numbers cannot see. That is why these are
+    // columns rather than a render-time subtraction, which is what they were:
+    // the form offered no way to say anything but the subtraction, and the
+    // Hub's own columns for them were permanently blank.
+    //
+    // Nullable, so a row filed before they existed keeps working out its own
+    // (see reportValue in the dashboard's -report-config.ts).
+    commissionOutstanding: decimal("commission_outstanding", { precision: 15, scale: 2 }),
+    fundsRemaining: decimal("funds_remaining", { precision: 15, scale: 2 }),
     // Trucks that entered today — security_gate's mirror of truckCount, which
     // this role uses for "trucks exited" instead.
     trucksEntered: integer("trucks_entered"),

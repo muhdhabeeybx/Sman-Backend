@@ -5,8 +5,9 @@ const UNIQUE_VIOLATION = "23505";
 const isUniqueViolation = (err) =>
   err?.code === UNIQUE_VIOLATION || err?.cause?.code === UNIQUE_VIOLATION;
 
-// price_bands is the source of truth when present; the scalar avgPrice and
-// litresSold are derived from it so both representations always agree.
+// price_bands is where the scalars come from when present; the scalar
+// avgPrice and litresSold are derived from it so both representations agree
+// unless the filer says otherwise (see resolveTotals).
 const deriveFromBands = (priceBands, fallbackLitres, fallbackPrice) => {
   if (!Array.isArray(priceBands) || priceBands.length === 0) {
     return {
@@ -30,8 +31,50 @@ const deriveFromBands = (priceBands, fallbackLitres, fallbackPrice) => {
   };
 };
 
+const stated = (v) => v !== undefined && v !== null && v !== "";
+
+/**
+ * The volume, value and price a report ends up recording.
+ *
+ * The price table answers all three when there is one: a day sold at several
+ * prices is described by its rows, and letting a hand-typed total sit next to
+ * rows that add up to something else is how the two came to disagree.
+ *
+ * A figure the filer actually sends still wins, though. The paper sheet is the
+ * record: a dip that reads short of what the bands say is a fact about the
+ * day, not an error to be arithmetic-ed away, and the form now offers all
+ * three as editable boxes on that basis. Anything the caller leaves out falls
+ * back to the rows exactly as before, so a client that posts bands alone is
+ * unaffected — which is every client that existed before this.
+ */
+const resolveTotals = (data, existing = null) => {
+  // A PATCH that changes the rows is asking for the totals to follow them.
+  // One that says nothing about either keeps what is already filed — an
+  // amendment to the truck count must not quietly undo a correction made to
+  // the litres last week.
+  const rowsChanged = stated(data.priceBands);
+  const priceBands = rowsChanged ? data.priceBands : existing?.priceBands;
+  const derived = deriveFromBands(
+    priceBands,
+    stated(data.litresSold) ? data.litresSold : existing?.litresSold,
+    stated(data.avgPrice) ? data.avgPrice : existing?.avgPrice
+  );
+
+  const pick = (key) => {
+    if (stated(data[key])) return Number(data[key]);
+    if (existing && !rowsChanged && stated(existing[key])) return Number(existing[key]);
+    return derived[key];
+  };
+
+  return {
+    litresSold: pick("litresSold"),
+    avgPrice: pick("avgPrice"),
+    totalSalesAmount: pick("totalSalesAmount"),
+  };
+};
+
 const submitReport = async (data, { actor }) => {
-  const derived = deriveFromBands(data.priceBands, data.litresSold, data.avgPrice);
+  const derived = resolveTotals(data);
 
   try {
     const report = await dailyReportRepo.create({
@@ -82,8 +125,9 @@ const amendReport = async (id, data, { actor }) => {
     return { success: false, forbidden: true, message: "Only the submitter can amend this report" };
   }
 
-  const merged = { ...report, ...data };
-  const derived = deriveFromBands(merged.priceBands, merged.litresSold, merged.avgPrice);
+  // The amendment against what is already filed: a partial PATCH keeps every
+  // figure it does not mention.
+  const derived = resolveTotals(data, report);
 
   const updated = await dailyReportRepo.update(id, {
     ...data,
@@ -138,4 +182,4 @@ const reviewReport = async (id, { approve, comment = "" }, { actor }) => {
   return { success: true, report: updated };
 };
 
-module.exports = { submitReport, amendReport, reviewReport, deriveFromBands };
+module.exports = { submitReport, amendReport, reviewReport, deriveFromBands, resolveTotals };

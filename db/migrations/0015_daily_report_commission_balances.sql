@@ -1,0 +1,31 @@
+-- The commission report's two closing figures, as columns.
+--
+--   commission outstanding ≈ commission_due  - amount_paid
+--   funds remaining        ≈ funds_received  - amount_paid
+--
+-- They were worked out at render and never stored, on the reasoning that a
+-- stored total drifts the moment one of its inputs is corrected. In practice
+-- that made them the only two figures on any of the five reports that nobody
+-- could state: the form printed the subtraction in a locked grey box, and the
+-- Reports Hub — which reads each row by field key — had two columns for them
+-- that were blank on every row it ever showed.
+--
+-- Both are more than a subtraction. What is still owed can carry an earlier
+-- period's arrears, which today's two numbers cannot see. So the form now
+-- starts them at the subtraction, keeps them there while the figures behind
+-- them move, and lets the filer type something else — which needs somewhere
+-- to be written down.
+--
+-- Signed, unlike the money columns above them: paying more than was due
+-- leaves a negative outstanding, and that is a real answer.
+--
+-- Nullable with no default, matching funds_received/commission_due in
+-- 0002 and for the same reason — 0 and "not filled in" are different answers
+-- on a report filed in stages. A row filed before this migration keeps its
+-- NULLs and goes on working the figures out from what it does carry
+-- (reportValue, dashboard-side).
+--
+-- Additive and nullable, so Postgres does this as a catalog-only change with
+-- no table rewrite. IF NOT EXISTS keeps re-running it a no-op.
+ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS commission_outstanding numeric(15,2);
+ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS funds_remaining numeric(15,2);

@@ -52,6 +52,12 @@ const submitDailyReportSchema = z.object({
   // to stay distinguishable here.
   fundsReceived: z.coerce.number().nonnegative().nullish(),
   commissionDue: z.coerce.number().nonnegative().nullish(),
+  // Both start life as a subtraction of the two above and stay editable —
+  // what is still owed can carry arrears today's figures cannot see. Signed:
+  // paying more than was due leaves a negative outstanding, which is a real
+  // answer and not one to reject.
+  commissionOutstanding: z.coerce.number().nullish(),
+  fundsRemaining: z.coerce.number().nullish(),
   // security_gate's other truck count — truckCount above is "exited" for
   // this role, this is "entered".
   trucksEntered: z.coerce.number().int().nonnegative().optional(),
