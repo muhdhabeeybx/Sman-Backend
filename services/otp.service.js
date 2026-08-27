@@ -236,17 +236,21 @@ async function issueAndSend(customer, { action, requestIp }) {
     return { sent: true, reason: "demo_account" };
   }
 
-  // sendSMSWithFallback, not sendSMSTermii, for two reasons that both showed up
-  // as "the customer never got their code":
-  //
-  //  1. A bare sendSMSTermii() call takes the default `generic` channel. Much
-  //     of Nigeria is on the Do-Not-Disturb register, and those numbers are
-  //     reachable ONLY via `dnd` — so sign-in failed for exactly the customers
-  //     whose order confirmations (which already fall back) arrived fine.
-  //  2. sendSMSTermii resolves with { success: false } for a soft provider
-  //     rejection rather than throwing, so a try/catch alone saw a rejected
-  //     message as a delivered one. The return value has to be checked.
-  const result = await sendSMSWithFallback(customer.phone, smsBody(action, code));
+  // sendSMSWithFallback (OTP-only helper): tries Termii `dnd` first, then
+  // `generic`. Termii docs say OTP/verification traffic belongs on dnd —
+  // `generic` is promotional, skips DND-registered numbers, and is blocked
+  // 8PM–8AM WAT on MTN Nigeria, so a bare sendSMSTermii() (which defaults to
+  // generic) silently dropped codes for exactly those customers. It also
+  // soft-fails as { success: false } without throwing, so the return value
+  // must be checked rather than relying on a try/catch alone.
+  // OTPs go out under a DND-whitelisted sender ID. The branded "Soroman" is
+  // approved for general sending but not for the DND route, so a DND OTP under
+  // it is rejected by the carrier (delivered "Successfully Sent" but a rejected
+  // DLR). Termii's shared "N-Alert" is DND-approved; override per env once
+  // "Soroman" itself is whitelisted for DND.
+  const result = await sendSMSWithFallback(customer.phone, smsBody(action, code), {
+    from: process.env.TERMII_OTP_SENDER_ID || "N-Alert",
+  });
 
   if (!result.success) {
     // The row is already written, so the code stays valid and the customer can

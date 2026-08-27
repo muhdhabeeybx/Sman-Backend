@@ -16,7 +16,12 @@ const CHANNELS = {
   DND: "dnd",
 };
 
-const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
+const sendSMSTermii = async (
+  phone,
+  sms,
+  channel = CHANNELS.GENERIC,
+  from = process.env.TERMII_SENDER_ID || "Soroman"
+) => {
   if (process.env.SMS_ENABLED === "false") {
     // Reported as a distinct outcome, NOT as success. Returning { success: true }
     // here made a disabled sender indistinguishable from a delivered message:
@@ -38,10 +43,17 @@ const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
   const response = await axios.post(
     // Termii's send endpoint is /api/sms/send. The bare /sms/send path 404s,
     // which is what surfaced as "Termii ... channel error ... status code 404".
-    `${process.env.TERMII_BASE_URL || "https://v3.api.termii.com"}/api/sms/send`,
+    //
+    // Base URL defaults to v4 — Termii assigns each account its own regional
+    // base URL, and this account is on v4. An account whose deployment forgot
+    // to set TERMII_BASE_URL was silently posting to the stale v3 host and
+    // getting 401 Unauthorized (auth, not the key), so real OTPs never sent.
+    // Set TERMII_BASE_URL explicitly per environment; this default is the
+    // safety net, not the source of truth.
+    `${process.env.TERMII_BASE_URL || "https://v4.api.termii.com"}/api/sms/send`,
     {
       to: formatPhoneForTermii(phone),
-      from: process.env.TERMII_SENDER_ID || "Soroman",
+      from,
       sms,
       type: "plain",
       channel,
@@ -58,27 +70,28 @@ const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
 };
 
 /**
- * Send one message, trying the transactional route first and falling back to
- * the DND route.
+ * OTP-only sender: try Termii's DND (transactional) route first, then generic.
  *
- * Nigeria's Do-Not-Disturb register is the reason this exists: `generic` is the
- * cheaper transactional route, but a number registered on DND is reachable ONLY
- * via `dnd`. Trying generic first keeps the cheap route as the default while
- * still reaching a DND-registered customer instead of silently dropping their
- * message.
+ * Per Termii docs, OTP/transactional traffic belongs on `dnd` — `generic` is
+ * promotional, skips DND-registered numbers, and on MTN Nigeria is blocked
+ * 8PM–8AM WAT. Preferring `dnd` avoids "Successfully Sent" on generic with no
+ * actual delivery. Order/notification senders below keep generic → dnd so this
+ * can be tested in isolation.
  *
- * Every bespoke sender below already inlines this loop; this is the same
- * behaviour extracted so callers that need plain text — the OTP path — get it
- * too, rather than quietly sending on `generic` only.
+ * `from` overrides the sender ID. The DND route additionally requires the
+ * sender ID to be DND-whitelisted: our branded "Soroman" is approved for
+ * general sending but NOT for DND, so a DND send under it gets a "rejected"
+ * DLR despite "Successfully Sent". OTPs therefore go out under a DND-approved
+ * sender (Termii's shared "N-Alert" by default), which the OTP caller passes.
  *
  * Never throws: returns { success, message } so a caller can branch on the
  * outcome instead of relying on an exception that a soft failure won't raise.
  */
-const sendSMSWithFallback = async (phone, sms) => {
+const sendSMSWithFallback = async (phone, sms, { from } = {}) => {
   const attempts = [];
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
+  for (const channel of [CHANNELS.DND, CHANNELS.GENERIC]) {
     try {
-      const result = await sendSMSTermii(phone, sms, channel);
+      const result = await sendSMSTermii(phone, sms, channel, from);
       if (result.success) return { success: true, channel };
       attempts.push(`${channel}: ${result.message || "failed"}`);
     } catch (error) {
