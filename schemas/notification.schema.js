@@ -154,6 +154,10 @@ const broadcast = z
     priority: z.enum(["low", "normal", "high", "urgent"]).optional().default("normal"),
     actionUrl: z.string().trim().url("Action URL must be a valid URL").max(2000).optional(),
     imageUrl: z.string().trim().url("Image URL must be a valid URL").max(2000).optional(),
+    // Which depots a {{prices}} shortcode in the body quotes. Only consulted
+    // when the body still holds shortcodes — a composer that already resolved
+    // them sends finished text and this is ignored.
+    depotIds: z.array(id("Depot id")).max(100, "Too many depots").optional(),
   })
   .refine(
     (v) => v.audience !== "roles" || (v.roles?.length ?? 0) > 0,

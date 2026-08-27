@@ -85,6 +85,8 @@ app.use("/api/uploads", require("./routes/administration/upload.route"));
 // and push devices, plus the admin-only broadcast and delivery-log endpoints.
 app.use("/api/notifications", require("./routes/administration/notification.route"));
 app.use("/api/message-templates", require("./routes/administration/messageTemplate.route"));
+// The price advisory the messaging composer's {{prices}} shortcode renders.
+app.use("/api/price-list", require("./routes/administration/priceList.route"));
 
 // Dangote orders
 app.use("/api", require("./routes/administration/dangoteOrder.route"));

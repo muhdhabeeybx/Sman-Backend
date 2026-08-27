@@ -13,6 +13,12 @@
  * Action can all call it, and none of them need a broker. If pg-boss ever grows
  * a schedule, it calls exactly the same two functions.
  *
+ * The two reports are shaped differently on purpose:
+ *   "daily"        the combined HTML report (staff entries / PFI stock / orders
+ *                   per depot) — matches Django's _build_combined_html_report(),
+ *                   sent as the email body itself, no attachment.
+ *   "staff-sales"  the staff sales workbook, unchanged — an .xlsx attachment.
+ *
  * Recipients come from REPORT_RECIPIENTS (comma-separated) unless --to is given.
  * With neither set the script refuses rather than silently mailing nobody —
  * Django's equivalent read a ReportRecipient table that was empty on a fresh
@@ -23,7 +29,9 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const { notifyAndWait } = require("../notifications");
-const { buildDailyReport, buildStaffSalesReport } = require("../services/reportWorkbook.service");
+const { buildStaffSalesReport } = require("../services/reportWorkbook.service");
+const { buildCombinedDailyReportData } = require("../services/dailyCombinedReport.service");
+const { renderDailyReportEmail } = require("../notifications/templates/dailyReportEmail");
 const { client } = require("../db");
 
 const arg = (name) => {
@@ -56,34 +64,49 @@ const flag = (name) => process.argv.includes(`--${name}`);
   }
 
   const reportDate = date.toISOString().slice(0, 10);
-  const jobs = [];
-  if (only !== "staff-sales") jobs.push(["reports.daily", buildDailyReport]);
-  if (only !== "daily") jobs.push(["reports.daily_staff_sales", buildStaffSalesReport]);
 
-  for (const [type, build] of jobs) {
-    const result = await build(date);
-    const counts = Object.fromEntries(
-      Object.entries(result).filter(([k]) => k.endsWith("Count"))
+  if (only !== "staff-sales") {
+    const data = await buildCombinedDailyReportData(date);
+    console.log(
+      `→ reports.daily  ${data.locations.length} location(s), ${data.totals.orderCount} order(s), ` +
+        `${data.totals.qtyLitres.toLocaleString()} L, ₦${data.totals.amountNaira.toLocaleString()}`
     );
-    console.log(`→ ${result.filename}  (${result.buffer.length.toLocaleString()} bytes)`, counts);
+
+    if (dry) {
+      const { html, text, subject } = renderDailyReportEmail(data);
+      const out = path.join(process.cwd(), `daily-report-${reportDate}.html`);
+      fs.writeFileSync(out, html);
+      console.log(`  subject: ${subject}`);
+      console.log(`  text part:\n${text.split("\n").map((l) => `    ${l}`).join("\n")}`);
+      console.log(`  html written to ${out} — nothing sent (--dry)`);
+    } else {
+      const res = await notifyAndWait("reports.daily", {
+        to: recipients.map((email) => ({ email })),
+        data,
+      });
+      console.log(`  sent to ${recipients.join(", ")}`, res?.skipped ? res : "");
+    }
+  }
+
+  if (only !== "daily") {
+    const result = await buildStaffSalesReport(date);
+    console.log(`→ ${result.filename}  (${result.buffer.length.toLocaleString()} bytes)`);
 
     if (dry) {
       const out = path.join(process.cwd(), result.filename);
       fs.writeFileSync(out, result.buffer);
       console.log(`  written to ${out} — nothing sent (--dry)`);
-      continue;
+    } else {
+      const res = await notifyAndWait("reports.daily_staff_sales", {
+        to: recipients.map((email) => ({ email })),
+        data: {
+          reportDate,
+          filename: result.filename,
+          attachmentBase64: result.buffer.toString("base64"),
+        },
+      });
+      console.log(`  sent to ${recipients.join(", ")}`, res?.skipped ? res : "");
     }
-
-    const res = await notifyAndWait(type, {
-      to: recipients.map((email) => ({ email })),
-      data: {
-        reportDate,
-        filename: result.filename,
-        attachmentBase64: result.buffer.toString("base64"),
-        ...counts,
-      },
-    });
-    console.log(`  sent to ${recipients.join(", ")}`, res?.skipped ? res : "");
   }
 
   await client.end({ timeout: 5 });

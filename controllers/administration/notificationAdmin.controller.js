@@ -7,6 +7,7 @@ const catalog = require("../../notifications/catalog");
 const fcm = require("../../notifications/fcm");
 const sse = require("../../notifications/sse");
 const { runMaintenance } = require("../../notifications/worker");
+const priceList = require("../../services/priceList.service");
 
 /**
  * Admin-only notification operations: broadcasting, and seeing what the engine
@@ -23,8 +24,15 @@ const { runMaintenance } = require("../../notifications/worker");
  * the same trail as every other business action, with the actor attached.
  */
 const broadcast = asyncHandler(async (req, res) => {
-  const { title, body, audience, roles, customerIds, staffIds, contacts, channels, priority, actionUrl, imageUrl } =
+  const { title, audience, roles, customerIds, staffIds, contacts, channels, priority, actionUrl, imageUrl, depotIds } =
     req.body;
+
+  // Shortcodes resolve HERE, at send time, not when the template was written.
+  // That is the whole point of a saved price template: "{{prices}}" typed once
+  // in June has to carry August's prices, and a composer that resolved them on
+  // save would send June's forever. A body with no "{{" is returned untouched,
+  // so a message someone already resolved in the composer is not re-processed.
+  const body = await priceList.render(req.body.body, { depotIds });
 
   // The closed set the schema validated. `customers` has no "all customers"
   // form on purpose — an unbounded blast to every customer on the platform is

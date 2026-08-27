@@ -8,6 +8,7 @@ const {
   callout,
   layout,
 } = require("./templates/email");
+const { renderDailyReportEmail } = require("./templates/dailyReportEmail");
 const {
   companyName,
   companyLongName,
@@ -1584,13 +1585,18 @@ const CATALOG = {
   // notification_deliveries and gated by each officer's preferences.
   ...expenseStages(),
 
-  // ═══ Scheduled reports (email + xlsx attachment) ══════════════════════════
-  // Django sent these from Celery Beat. There is no scheduler here yet, so they
-  // are triggered by `npm run report:daily` (or an admin endpoint); the copy and
-  // the attachment contract live here either way, so wiring a scheduler later
-  // changes only the trigger.
+  // ═══ Scheduled reports (email) ═════════════════════════════════════════════
+  // Django sent these from Celery Beat as a bare, unbranded HTML email — staff
+  // entries, PFI stock and orders, one section per depot — built by
+  // _build_combined_html_report()/send_report_email() (administration/tasks.py).
+  // There is no scheduler here yet, so it is triggered by `npm run report:daily`
+  // (or an admin endpoint); wiring a scheduler later changes only the trigger.
   //
-  // data: reportDate, filename, attachmentBase64, orderCount, pfiCount, rowCount
+  // Deliberately NOT run through reportEmail()/layout(): the source format has
+  // no wrapper, no CSS classes, no branding — every style is inline, matched to
+  // the letter (see notifications/templates/dailyReportEmail.js). data comes
+  // straight from services/dailyCombinedReport.service.js's
+  // buildCombinedDailyReportData(): { reportDate, totals, locations }.
 
   "reports.daily": {
     audience: "staff",
@@ -1599,22 +1605,9 @@ const CATALOG = {
     channels: EMAIL_ONLY,
     title: (d) => `Daily Report - ${formatDate(d.reportDate)}`,
     body: (d) =>
-      `${d.orderCount ?? 0} order(s) and ${d.pfiCount ?? 0} PFI movement(s) recorded.`,
+      `${d.totals?.orderCount ?? 0} order(s) across ${d.locations?.length ?? 0} location(s).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
-    email: (d) =>
-      reportEmail({
-        subject: `Daily Report - ${formatDate(d.reportDate)}`,
-        heading: `Daily Report — ${formatDate(d.reportDate)}`,
-        rows: [
-          { label: "Orders", value: String(d.orderCount ?? 0) },
-          { label: "PFI movements", value: String(d.pfiCount ?? 0) },
-        ],
-        emptyNote:
-          !d.orderCount && !d.pfiCount
-            ? "No orders today. No PFI activity today."
-            : null,
-        d,
-      }),
+    email: (d) => renderDailyReportEmail(d),
   },
 
   "reports.daily_staff_sales": {

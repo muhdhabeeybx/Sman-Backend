@@ -65,6 +65,7 @@ const API_PERMISSIONS = {
 
   "/api/admin": { read: null },
   "/api/message-templates": { read: null },
+  "/api/price-list": { read: null },
 };
 
 /**
