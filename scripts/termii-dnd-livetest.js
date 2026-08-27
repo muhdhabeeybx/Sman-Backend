@@ -32,6 +32,33 @@ const arg = (name, def = null) => {
     arg("base") || process.env.TERMII_BASE_URL || "https://v4.api.termii.com";
   const apiKeyEarly = process.env.TERMII_API_KEY;
 
+  // --balance: read the account's REAL wallet balance (GET /api/get-balance).
+  // The `balance` echoed in a send response is unreliable (returns 0 on some
+  // routes); this is the authoritative figure. A read, no SMS billed.
+  if (process.argv.includes("--balance")) {
+    if (!apiKeyEarly || /^plac/i.test(apiKeyEarly)) {
+      console.error("Set a real TERMII_API_KEY to check the balance.");
+      process.exit(1);
+    }
+    try {
+      const r = await axios.get(`${base}/api/get-balance?api_key=${encodeURIComponent(apiKeyEarly)}`);
+      const d = r.data || {};
+      console.log(`Termii balance on ${base}:`);
+      console.log(`  ${d.balance} ${d.currency || ""}  (account: ${d.user || d.application || "?"})`);
+      process.exit(0);
+    } catch (err) {
+      const b = err.response?.data;
+      console.error("HTTP", err.response?.status || "(no response)");
+      console.error(b ? JSON.stringify(b, null, 2) : err.message);
+      if (err.response?.status === 401) {
+        console.error(
+          "\n401 = wrong base URL for this key, or wrong key. Pass --base=<url> or set TERMII_BASE_URL."
+        );
+      }
+      process.exit(1);
+    }
+  }
+
   // --check-senders: list the account's registered sender IDs and their status,
   // so you can confirm "Soroman" is approved on THIS base URL / account.
   if (process.argv.includes("--check-senders")) {
