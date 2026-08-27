@@ -143,6 +143,56 @@ const bankStatementRepo = {
     `;
   },
 
+  /**
+   * The rows of one uploaded statement, and what became of each.
+   *
+   * The upload list could say how many rows were matched but never which, so
+   * "I uploaded this statement and cannot find some rows" had no answer short
+   * of querying the database. Every row now carries its outcome: the order it
+   * was matched to, the person who matched it, and when.
+   *
+   * The order reference is assembled here from the company name and id, the
+   * same way every other screen builds it, so a reference read off this page
+   * is the one to search for elsewhere. A matched line whose order has since
+   * been deleted keeps its deposit but resolves to no order — that state is
+   * real (see the PU11486 deletion) and showing it blank would hide it.
+   */
+  async listStatementLines({ statementId, page = 1, limit = 25, status = null }) {
+    const offset = (Math.max(1, Number(page)) - 1) * Number(limit);
+    const rows = await client`
+      SELECT l.id, l.txn_date, l.amount, l.depositor, l.narration, l.bank_ref, l.status,
+             l.matched_deposit_id, l.matched_order_id, l.matched_at,
+             d.reference AS deposit_reference,
+             o.id AS order_id, o.company_name AS order_company,
+             c.name AS customer_name,
+             s.first_name AS matched_by_first_name, s.surname AS matched_by_surname
+        FROM bank_statement_lines l
+        LEFT JOIN deposits d ON d.id = l.matched_deposit_id
+        LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN customers c ON c.id = d.customer_id
+        LEFT JOIN staff s ON s.id = l.matched_by
+       WHERE l.statement_id = ${statementId}
+         AND (${status}::text IS NULL OR l.status::text = ${status}::text)
+       ORDER BY l.txn_date ASC, l.id ASC
+       LIMIT ${Number(limit)} OFFSET ${offset}
+    `;
+
+    const [{ total, matched, unmatched }] = await client`
+      SELECT count(*)::int AS total,
+             count(*) FILTER (WHERE status = 'MATCHED')::int AS matched,
+             count(*) FILTER (WHERE status <> 'MATCHED')::int AS unmatched
+        FROM bank_statement_lines
+       WHERE statement_id = ${statementId}
+         AND (${status}::text IS NULL OR status::text = ${status}::text)
+    `;
+
+    return {
+      lines: rows,
+      pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) },
+      totals: { total, matched, unmatched },
+    };
+  },
+
   /** Refuses to delete once any line has been matched — that is audit trail. */
   async deleteStatement(id) {
     const [{ matched }] = await client`
