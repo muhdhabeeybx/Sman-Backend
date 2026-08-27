@@ -244,6 +244,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.sent, true);
       assert.equal(result.reason, null);
       assert.equal(body.channel, "dnd", "OTP prefers Termii dnd over generic");
+      assert.equal(body.from, "N-Alert", "OTP goes out under the DND-approved sender ID");
 
       const sentCode = body.sms.match(/\b(\d{6})\b/)?.[1];
       assert.ok(sentCode, `no 6-digit code found in: ${body.sms}`);

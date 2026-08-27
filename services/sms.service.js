@@ -16,7 +16,12 @@ const CHANNELS = {
   DND: "dnd",
 };
 
-const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
+const sendSMSTermii = async (
+  phone,
+  sms,
+  channel = CHANNELS.GENERIC,
+  from = process.env.TERMII_SENDER_ID || "Soroman"
+) => {
   if (process.env.SMS_ENABLED === "false") {
     // Reported as a distinct outcome, NOT as success. Returning { success: true }
     // here made a disabled sender indistinguishable from a delivered message:
@@ -48,7 +53,7 @@ const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
     `${process.env.TERMII_BASE_URL || "https://v4.api.termii.com"}/api/sms/send`,
     {
       to: formatPhoneForTermii(phone),
-      from: process.env.TERMII_SENDER_ID || "Soroman",
+      from,
       sms,
       type: "plain",
       channel,
@@ -73,14 +78,20 @@ const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
  * actual delivery. Order/notification senders below keep generic → dnd so this
  * can be tested in isolation.
  *
+ * `from` overrides the sender ID. The DND route additionally requires the
+ * sender ID to be DND-whitelisted: our branded "Soroman" is approved for
+ * general sending but NOT for DND, so a DND send under it gets a "rejected"
+ * DLR despite "Successfully Sent". OTPs therefore go out under a DND-approved
+ * sender (Termii's shared "N-Alert" by default), which the OTP caller passes.
+ *
  * Never throws: returns { success, message } so a caller can branch on the
  * outcome instead of relying on an exception that a soft failure won't raise.
  */
-const sendSMSWithFallback = async (phone, sms) => {
+const sendSMSWithFallback = async (phone, sms, { from } = {}) => {
   const attempts = [];
   for (const channel of [CHANNELS.DND, CHANNELS.GENERIC]) {
     try {
-      const result = await sendSMSTermii(phone, sms, channel);
+      const result = await sendSMSTermii(phone, sms, channel, from);
       if (result.success) return { success: true, channel };
       attempts.push(`${channel}: ${result.message || "failed"}`);
     } catch (error) {
