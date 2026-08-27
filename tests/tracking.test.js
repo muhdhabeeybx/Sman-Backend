@@ -9,7 +9,7 @@ const app = require("../app");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis, orders, orderTrucks } = require("../db/schema");
 const { eq } = require("drizzle-orm");
-const { customerRepo } = require("../repositories");
+const { customerRepo, bankAccountRepo } = require("../repositories");
 const { NATIVE_TRANSPORT, closeDb } = require("./helpers");
 
 const PORTAL_AUTH = "/api/customer/auth";
@@ -55,6 +55,18 @@ describe("public order tracking", () => {
       })
       .returning();
     depotId = depot.id;
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Track Depot Account",
+      accountNumber: `TRKACC${String(RUN).slice(-6)}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
+
     const [product] = await db
       .insert(products)
       .values({ name: "Track PMS", sku: `TRK-PMS-${String(RUN).slice(-5)}`, category: "PMS" })
@@ -155,8 +167,11 @@ describe("public order tracking", () => {
         loadingStartedAt: new Date(),
       })
       .where(eq(orders.id, order.id));
+    // One truck loaded and away, one still on the yard. Progress is counted off
+    // the exit gate, not off the ticket — a ticketed truck (`loaded`) may not
+    // have reached the depot yet.
     await db.insert(orderTrucks).values([
-      { orderId: order.id, truckIndex: 1, truckNumber: "LAG-T1", quantity: "15000", status: "loaded", driverName: "Ada Private", driverPhone: "+2348010000001" },
+      { orderId: order.id, truckIndex: 1, truckNumber: "LAG-T1", quantity: "15000", status: "gated_out", driverName: "Ada Private", driverPhone: "+2348010000001" },
       { orderId: order.id, truckIndex: 2, truckNumber: "LAG-T2", quantity: "15000", status: "gated_in", driverName: "Uche Private", driverPhone: "+2348010000002" },
     ]);
 
@@ -167,7 +182,7 @@ describe("public order tracking", () => {
     assert.deepEqual(
       t.trucks.map((x) => [x.index, x.plate, x.status]),
       [
-        [1, "LAG-T1", "loaded"],
+        [1, "LAG-T1", "gated_out"],
         [2, "LAG-T2", "gated_in"],
       ],
       "in index order, plate + status each",

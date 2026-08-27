@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
 const { eq } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { orders } = require("../db/schema");
+const { orders, commissions, pfiMovements } = require("../db/schema");
 const {
   orderRepo,
   customerRepo,
@@ -11,16 +11,21 @@ const {
   orderTruckRepo,
   orderPfiAllocationRepo,
   auditLogRepo,
+  bankAccountRepo,
+  commissionRepo,
 } = require("../repositories");
+const { isWithinScope } = require("../lib/scopeFilter");
 const walletService = require("./wallet.service");
-const { createDedicatedAccount, transferToDepotSubaccount, switchCustomerDvaToSubaccount } = require("./payment.service");
+// Paystack DVA creation/subaccount-switch and the auto-split transfer are
+// disabled — see the "Paystack DVA funding (disabled...)" block below and
+// runPostPaymentEffects(). Re-add this import if reinstating either:
+// const { createDedicatedAccount, transferToDepotSubaccount, switchCustomerDvaToSubaccount } = require("./payment.service");
 const { sendOrderInvoiceEmail } = require("./email.service");
 const { sendOrderSummarySMS, sendOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
-const { virtualAccountName: formatVirtualAccountName } = require("../utils/helpers");
 const commissionService = require("./commission.service");
 const { QUEUES, enqueue } = require("../config/queue");
 
@@ -31,7 +36,7 @@ const notifyWhatsAppPaymentConfirmed = (orderId) => {
   );
 };
 
-const { orderExpiryHours, orderExpiryMs } = require("../config/orderExpiry");
+const { orderExpiryHours, orderExpiryMs, orderExpiryDisabled } = require("../config/orderExpiry");
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -43,6 +48,7 @@ function httpError(status, message) {
  */
 function isOrderExpired(order, now = Date.now()) {
   return (
+    !orderExpiryDisabled() &&
     order.status === "Pending" &&
     order.paymentStatus !== "Paid" &&
     now - new Date(order.createdAt).getTime() >= orderExpiryMs()
@@ -52,9 +58,12 @@ function isOrderExpired(order, now = Date.now()) {
 /**
  * Compute the expiration deadline for an order. Returns an ISO string if the
  * order is Pending and unpaid; null otherwise (Paid/Released/Completed orders
- * never expire, Expired/Cancelled orders already have expiredAt).
+ * never expire, Expired/Cancelled orders already have expiredAt) — and null
+ * whenever the expiry mechanism itself is switched off, so the frontend stops
+ * showing a countdown that will never actually lapse anything.
  */
 function computeExpiresAt(order) {
+  if (orderExpiryDisabled()) return null;
   if (order.status !== "Pending" || order.paymentStatus === "Paid") return null;
   const created = new Date(order.createdAt).getTime();
   return new Date(created + orderExpiryMs()).toISOString();
@@ -85,7 +94,7 @@ async function withExpiresAt(orderOrOrders) {
  */
 async function expireAndAttach(order) {
   // If pending and unpaid, check if deadline has passed
-  if (order.status === "Pending" && order.paymentStatus !== "Paid") {
+  if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus !== "Paid") {
     const deadline = new Date(order.createdAt).getTime() + orderExpiryMs();
     if (Date.now() >= deadline) {
       try {
@@ -105,15 +114,15 @@ async function expireAndAttach(order) {
  *
  * The only thing that differs between the two callers is WHO the customer is:
  * the desk passes a body customer id, the portal passes the authenticated
- * customer's own id. Everything else — server-side pricing, the dedicated
- * virtual account, the single atomic reserve→debit→create→ledger
+ * customer's own id. Everything else — server-side pricing, the depot's
+ * payment account, the single atomic reserve→debit→create→ledger
  * transaction, the wallet-pays Pending→Paid transition, and the best-effort
  * invoice email/SMS — is identical, so it lives here once.
  *
  * Throws httpError(4xx) for a bad request (unknown depot, no price, no stock,
  * no payment account); the caller's asyncHandler renders it. External work
- * (DVA creation, email, SMS) stays OUTSIDE the DB transaction — a transaction
- * must never be held open across an HTTP call to Paystack/Termii.
+ * (email, SMS) stays OUTSIDE the DB transaction — a transaction must never be
+ * held open across an HTTP call to a third party.
  *
  * @param {object} input
  * @param {number} input.customerId
@@ -187,52 +196,77 @@ async function placeOrder({
     throw httpError(404, "Customer not found");
   }
 
-  // Ensure the customer has a dedicated virtual account to be paid into.
-  let virtualAccountNumber = customer.virtualAccountNumber || "";
-  let virtualAccountBank = customer.virtualAccountBank || "";
-  let virtualAccountName = customer.virtualAccountName || "";
-
-  if (!virtualAccountNumber) {
-    const accountResult = await createDedicatedAccount(customer);
-    if (accountResult.success) {
-      virtualAccountNumber = accountResult.data.accountNumber;
-      virtualAccountBank = accountResult.data.bankName;
-      virtualAccountName =
-        accountResult.data.accountName || formatVirtualAccountName(customer.name);
-      const updateData = { virtualAccountNumber, virtualAccountBank, virtualAccountName };
-      if (accountResult.data.paystackCustomerId) {
-        updateData.paystackCustomerId = accountResult.data.paystackCustomerId;
-      }
-      await customerRepo.update(customerId, updateData);
-    } else {
-      throw httpError(
-        400,
-        "Customer has no dedicated payment account and one could not be generated. Please try again or contact support."
-      );
-    }
-  } else if (!virtualAccountName) {
-    virtualAccountName = formatVirtualAccountName(customer.name);
-    await customerRepo.update(customerId, { virtualAccountName });
-  }
-
   const depot = await depotRepo.findById(depotId);
   if (!depot) {
     throw httpError(404, "Depot not found");
   }
 
-  // Automatically switch customer DVA to depot Paystack Subaccount
-  const depotSubaccountCode = depot.paystackSubaccountCode || depot.paystack_subaccount_code;
-  if (virtualAccountNumber && depotSubaccountCode) {
-    try {
-      await switchCustomerDvaToSubaccount({
-        accountNumber: virtualAccountNumber,
-        subaccountCode: depotSubaccountCode,
-      });
-      await customerRepo.update(customerId, { dvaSubaccountCode: depotSubaccountCode });
-    } catch (dvaErr) {
-      console.error(`[placeOrder] Failed to switch DVA to subaccount for depot ${depotId}:`, dvaErr.message);
-    }
+  /* --- Paystack DVA funding (disabled — manual deposit only) ---------------
+   * Every customer used to get a personal Dedicated Virtual Account (DVA) on
+   * first order, immediately split to the depot's Paystack subaccount so
+   * funds settled straight there. Wallet funding is manual-deposit-only now
+   * (staff record deposits from the admin dashboard against the depot's own
+   * bank account, looked up below) — this whole path is parked, not deleted.
+   * To reinstate: restore this block, drop the depot-bank-account lookup
+   * beneath it, and uncomment the payment.service.js import above.
+   *
+   * let virtualAccountNumber = customer.virtualAccountNumber || "";
+   * let virtualAccountBank = customer.virtualAccountBank || "";
+   * let virtualAccountName = customer.virtualAccountName || "";
+   *
+   * if (!virtualAccountNumber) {
+   *   const accountResult = await createDedicatedAccount(customer);
+   *   if (accountResult.success) {
+   *     virtualAccountNumber = accountResult.data.accountNumber;
+   *     virtualAccountBank = accountResult.data.bankName;
+   *     virtualAccountName =
+   *       accountResult.data.accountName || formatVirtualAccountName(customer.name);
+   *     const updateData = { virtualAccountNumber, virtualAccountBank, virtualAccountName };
+   *     if (accountResult.data.paystackCustomerId) {
+   *       updateData.paystackCustomerId = accountResult.data.paystackCustomerId;
+   *     }
+   *     await customerRepo.update(customerId, updateData);
+   *   } else {
+   *     throw httpError(
+   *       400,
+   *       "Customer has no dedicated payment account and one could not be generated. Please try again or contact support."
+   *     );
+   *   }
+   * } else if (!virtualAccountName) {
+   *   virtualAccountName = formatVirtualAccountName(customer.name);
+   *   await customerRepo.update(customerId, { virtualAccountName });
+   * }
+   *
+   * // Automatically switch customer DVA to depot Paystack Subaccount
+   * const depotSubaccountCode = depot.paystackSubaccountCode || depot.paystack_subaccount_code;
+   * if (virtualAccountNumber && depotSubaccountCode) {
+   *   try {
+   *     await switchCustomerDvaToSubaccount({
+   *       accountNumber: virtualAccountNumber,
+   *       subaccountCode: depotSubaccountCode,
+   *     });
+   *     await customerRepo.update(customerId, { dvaSubaccountCode: depotSubaccountCode });
+   *   } catch (dvaErr) {
+   *     console.error(`[placeOrder] Failed to switch DVA to subaccount for depot ${depotId}:`, dvaErr.message);
+   *   }
+   * }
+   * --------------------------------------------------------------------- */
+
+  // The account the customer pays into is the depot's own bank account, set
+  // up by an admin on the dashboard (Bank Accounts, linked to this depot) —
+  // not a per-customer virtual account. Every order at this depot shows the
+  // same account; the default one wins when more than one is linked.
+  const depotBankAccounts = await bankAccountRepo.findAll({ depotId: depot.id, status: "Active" });
+  const depotBankAccount = depotBankAccounts.find((a) => a.isDefault) || depotBankAccounts[0];
+  if (!depotBankAccount) {
+    throw httpError(
+      400,
+      "No payment account has been set up for this depot yet. Please contact support."
+    );
   }
+  const virtualAccountNumber = depotBankAccount.accountNumber;
+  const virtualAccountBank = depotBankAccount.bankName;
+  const virtualAccountName = depotBankAccount.accountName;
 
   const product = await productRepo.findById(productId);
   if (!product) {
@@ -403,7 +437,17 @@ async function placeOrder({
     throw err;
   }
 
-  const fullOrder = await orderRepo.findByIdFull(order.id);
+  // CRITICAL: the order is already committed above. Nothing from here on may
+  // throw, or the caller sees a failure for an order that actually exists —
+  // and the WhatsApp flow, told "no charge", lets the customer re-tap into a
+  // SECOND real order (a fresh wamid = a fresh idempotency key). So the
+  // post-commit read falls back to the committed row, and the notifications
+  // below are each isolated. Everything the caller needs (reference, totals,
+  // the deposit account) is present on `order` itself.
+  const fullOrder = (await orderRepo.findByIdFull(order.id).catch((err) => {
+    console.error("[placeOrder] post-commit findByIdFull failed (order IS created):", err.message);
+    return null;
+  })) || order;
 
   // The reference every surface shows — "SO600", not the raw ORD-… column.
   //
@@ -466,37 +510,44 @@ async function placeOrder({
   // adds the inbox row and the push that were missing, so the order also shows
   // up in the app. The catalog entry is APP_ONLY for precisely that reason: it
   // must not re-send what the two calls above already sent.
-  notify("order.created", {
-    to: { customer },
-    data: {
-      orderId: order.id,
-      orderNumber: reference,
-      reference,
-      customerName: customer.name,
-      product: fullOrder.productName || "",
-      quantity: order.quantity,
-      unit: fullOrder.productUnit || "Liters",
-      totalAmount: order.totalAmount,
-      depotName: depot.name,
-      deliveryType: order.deliveryType,
-    },
-  });
+  //
+  // Wrapped: a notify() failure (queue hiccup) must not throw out of a
+  // committed placeOrder — see the post-commit note above.
+  try {
+    notify("order.created", {
+      to: { customer },
+      data: {
+        orderId: order.id,
+        orderNumber: reference,
+        reference,
+        customerName: customer.name,
+        product: fullOrder.productName || "",
+        quantity: order.quantity,
+        unit: fullOrder.productUnit || "Liters",
+        totalAmount: order.totalAmount,
+        depotName: depot.name,
+        deliveryType: order.deliveryType,
+      },
+    });
 
-  // Sales and finance want to see the order land without watching the list.
-  notify("staff.order_placed", {
-    to: { roles: ["admin", "super_admin", "sales_manager", "finance_manager"] },
-    data: {
-      orderId: order.id,
-      orderNumber: reference,
-      reference,
-      customerName: customer.name,
-      product: fullOrder.productName || "",
-      quantity: order.quantity,
-      unit: fullOrder.productUnit || "Liters",
-      totalAmount: order.totalAmount,
-      depotName: depot.name,
-    },
-  });
+    // Sales and finance want to see the order land without watching the list.
+    notify("staff.order_placed", {
+      to: { roles: ["admin", "super_admin", "sales_manager", "finance_manager"] },
+      data: {
+        orderId: order.id,
+        orderNumber: reference,
+        reference,
+        customerName: customer.name,
+        product: fullOrder.productName || "",
+        quantity: order.quantity,
+        unit: fullOrder.productUnit || "Liters",
+        totalAmount: order.totalAmount,
+        depotName: depot.name,
+      },
+    });
+  } catch (notifyErr) {
+    console.error("[placeOrder] post-commit notify failed (order IS created):", notifyErr.message);
+  }
 
   return {
     order: fullOrder,
@@ -531,6 +582,153 @@ async function releaseOrderResources(order, tx) {
   }
   await orderTruckRepo.deleteByOrder(order.id, tx);
   await walletService.releaseHold(order.id, tx);
+}
+
+// Once an order is finished or dead there is nothing left to correct.
+const EDIT_LOCKED_STATUSES = new Set(["Completed", "Cancelled", "Expired"]);
+// Quantity and PFI both back a physical stock reservation; once release has
+// captured a truck allocation against that reservation, changing either
+// would desync a ticket that already names a real gate action. Everything
+// else about the order (customer, date, price, logistics text) stays
+// editable right up to Completed.
+const STOCK_EDITABLE_STATUSES = new Set(["Pending", "Paid"]);
+
+/**
+ * Edit an order's own fields — reassign it to another customer, move it to a
+ * different PFI, correct its date, quantity, price or logistics text. One
+ * transaction, one audit row, and every place that denormalizes something
+ * about the order (the wallet hold, a commission snapshot, a PFI's stock
+ * ledger) is kept in step rather than left to drift.
+ *
+ * Deliberately excludes `status`/`paymentStatus` — those only ever move
+ * through orderStatus.transition (AUDIT H1). This function is for everything
+ * else a mistake can leave wrong on an order.
+ */
+async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent = null, scopeUser = null } = {}) {
+  return db.transaction(async (tx) => {
+    const order = await orderRepo.lockById(orderId, tx);
+    if (!order) throw httpError(404, "Order not found");
+    if (EDIT_LOCKED_STATUSES.has(order.status)) {
+      throw httpError(409, `A ${order.status.toLowerCase()} order can no longer be edited`);
+    }
+
+    const changes = {};
+    const set = {};
+
+    // ── Customer reassignment ──────────────────────────────────────────
+    if (patch.customerId !== undefined && Number(patch.customerId) !== order.customerId) {
+      const newCustomerId = Number(patch.customerId);
+      const newCustomer = await customerRepo.findById(newCustomerId, tx);
+      if (!newCustomer) throw httpError(404, "Destination customer not found");
+
+      const result = await walletService.reassignHold({ orderId, toCustomerId: newCustomerId }, tx);
+      if (!result.success) throw httpError(result.insufficient ? 400 : 409, result.message);
+
+      const commission = await commissionRepo.findByOrderId(orderId);
+      if (commission) {
+        await tx
+          .update(commissions)
+          .set({ customerId: newCustomerId, updatedAt: new Date() })
+          .where(eq(commissions.id, commission.id));
+      }
+
+      changes.customerId = [order.customerId, newCustomerId];
+      set.customerId = newCustomerId;
+    }
+
+    // ── Quantity / PFI reassignment — share the same release/reserve path ──
+    const wantsPfiChange = patch.pfiId !== undefined && (patch.pfiId ?? null) !== order.pfiId;
+    const wantsQtyChange = patch.quantity !== undefined && Number(patch.quantity) !== order.quantity;
+    if (wantsPfiChange || wantsQtyChange) {
+      if (!STOCK_EDITABLE_STATUSES.has(order.status)) {
+        throw httpError(409, "Quantity and PFI can only be changed before an order is released for loading");
+      }
+
+      const newPfiId = patch.pfiId !== undefined ? patch.pfiId : order.pfiId;
+      const newQuantity = patch.quantity !== undefined ? Number(patch.quantity) : order.quantity;
+
+      if (newPfiId != null && !isWithinScope(scopeUser, "pfiIds", newPfiId)) {
+        throw httpError(403, "You cannot assign orders to this PFI");
+      }
+
+      // Give back whatever is currently reserved...
+      if (order.pfiId) {
+        const allocations = await orderPfiAllocationRepo.findByOrderId(orderId, tx);
+        if (allocations.length > 0) {
+          for (const alloc of allocations) await pfiRepo.releaseStock(alloc.pfiId, alloc.quantity, tx);
+          await orderPfiAllocationRepo.deleteByOrderId(orderId, tx);
+        } else {
+          // Fallback for orders created before multi-PFI allocations existed.
+          await pfiRepo.releaseStock(order.pfiId, order.quantity, tx);
+        }
+      }
+
+      // ...then reserve the new amount, at the (possibly new) PFI.
+      if (newPfiId != null) {
+        const reserved = await pfiRepo.reserveStock(newPfiId, newQuantity, tx);
+        if (!reserved) {
+          throw httpError(400, "That PFI doesn't have enough remaining stock for this quantity, or is not active");
+        }
+        await orderPfiAllocationRepo.create([{ pfiId: newPfiId, quantity: newQuantity }], orderId, tx);
+      }
+
+      // A ticket already cut for this order recorded stock against whichever
+      // PFI was current at that moment — repoint it too, or the sold-litres
+      // figure stays with a PFI this order no longer credits revenue to.
+      if (wantsPfiChange) {
+        await tx.update(pfiMovements).set({ pfiId: newPfiId }).where(eq(pfiMovements.orderId, orderId));
+      }
+
+      if (wantsPfiChange) { changes.pfiId = [order.pfiId, newPfiId]; set.pfiId = newPfiId; }
+      if (wantsQtyChange) { changes.quantity = [order.quantity, newQuantity]; set.quantity = newQuantity; }
+
+      if (wantsQtyChange) {
+        const commission = await commissionRepo.findByOrderId(orderId);
+        if (commission) {
+          const rate = Number(commission.commissionRate);
+          await tx
+            .update(commissions)
+            .set({
+              quantity: newQuantity,
+              commissionAmount: String((newQuantity * rate).toFixed(2)),
+              updatedAt: new Date(),
+            })
+            .where(eq(commissions.id, commission.id));
+        }
+      }
+    }
+
+    // ── Simple field overrides — nothing else references these directly ──
+    // price/totalAmount arrive already normalised to a "X.XX" string by the
+    // money() schema, matching the numeric(15,2) column's own driver
+    // representation, so a plain string compare is enough — no float
+    // round-tripping either side of it.
+    for (const field of ["price", "totalAmount", "companyName", "deliveryAddress"]) {
+      if (patch[field] === undefined) continue;
+      if (String(order[field]) !== String(patch[field])) {
+        changes[field] = [order[field], patch[field]];
+        set[field] = patch[field];
+      }
+    }
+    if (patch.createdAt !== undefined) {
+      const nextDate = new Date(patch.createdAt);
+      if (nextDate.getTime() !== new Date(order.createdAt).getTime()) {
+        changes.createdAt = [order.createdAt, nextDate];
+        set.createdAt = nextDate;
+      }
+    }
+
+    if (!Object.keys(set).length) return order;
+
+    const updated = await orderRepo.update(orderId, set, tx);
+
+    await auditLogRepo.record(
+      { entityType: "order", entityId: orderId, action: "order.updated", actor, metadata: { changes }, ipAddress, userAgent },
+      tx
+    );
+
+    return updated;
+  });
 }
 
 /**
@@ -601,6 +799,7 @@ async function expireOrder(orderId, { tx } = {}) {
  * @returns {number} how many orders were expired
  */
 async function expireStaleOrders() {
+  if (orderExpiryDisabled()) return 0;
   const cutoff = new Date(Date.now() - orderExpiryMs());
   const stale = await orderRepo.findStalePending(cutoff);
 
@@ -657,8 +856,8 @@ async function notifyOrderExpired(order) {
  * never touched here.
  *
  * Editable while the order is Pending / Paid / Released and every existing
- * load is still `pending`. Once a truck has gated in, the customer can no
- * longer change the declaration (staff corrects at the gate / ticketing).
+ * load is still `pending`. Once a load has been ticketed or gated, the customer
+ * can no longer change the declaration (staff corrects at the gate/ticketing).
  *
  * @param {object} input
  * @param {number} input.orderId
@@ -695,12 +894,15 @@ async function updatePickupTrucks({
       );
     }
 
+    // Anything past `pending` has been ticketed or gated, and the declaration
+    // is no longer the customer's to rewrite — the ticket already names a plate,
+    // and deleting the load below would take that ticket with it.
     const existing = await orderTruckRepo.findByOrder(order.id, tx);
     const locked = existing.find((l) => l.status !== "pending");
     if (locked) {
       throw httpError(
         409,
-        "A truck has already arrived at the depot — truck details can no longer be changed here"
+        "A ticket has already been issued for this order — truck details can no longer be changed here"
       );
     }
 
@@ -831,15 +1033,18 @@ async function runPostPaymentEffects(orderId, { notifyWhatsApp = true } = {}) {
     console.error(`[post-payment] commission failed for order ${orderId}:`, err.message);
   }
 
-  // Transfer depot share to subaccount (best-effort)
-  try {
-    const orderForTransfer = await orderRepo.findByIdFull(orderId);
-    if (orderForTransfer) {
-      subaccountTransfer = await transferToDepotSubaccount(orderForTransfer);
-    }
-  } catch (err) {
-    console.error(`[post-payment] subaccount transfer failed for order ${orderId}:`, err.message);
-  }
+  // Paystack auto-split transfer (disabled — manual deposit only): the
+  // customer now pays straight into the depot's own bank account, so there
+  // is no merchant-balance share left to push out. Re-add the import at the
+  // top of this file to reinstate:
+  // try {
+  //   const orderForTransfer = await orderRepo.findByIdFull(orderId);
+  //   if (orderForTransfer) {
+  //     subaccountTransfer = await transferToDepotSubaccount(orderForTransfer);
+  //   }
+  // } catch (err) {
+  //   console.error(`[post-payment] subaccount transfer failed for order ${orderId}:`, err.message);
+  // }
 
   // Skipped when the caller already delivers the confirmation itself — the
   // WhatsApp engine replies "Payment received" synchronously in the same turn,
@@ -924,6 +1129,11 @@ async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = tr
       metadata: { via: "wallet", amount: String(orderTotal) },
     });
 
+    // Payment IS the release: the order goes straight onto the ticketing desk
+    // rather than waiting for someone to click a button that has no other
+    // condition attached to it.
+    await orderStatus.releaseOnPayment(order.id, { tx, actor, metadata: { via: "wallet" } });
+
     return order;
   }).then(async (order) => {
     await runPostPaymentEffects(order.id, { notifyWhatsApp });
@@ -935,6 +1145,7 @@ async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = tr
 
 module.exports = {
   placeOrder,
+  updateOrder,
   cancelOrder,
   updatePickupTrucks,
   payOrder,

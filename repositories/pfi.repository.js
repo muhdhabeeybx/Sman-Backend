@@ -1,12 +1,46 @@
 const { eq, and, or, ilike, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { pfis, depots, products, staff } = require("../db/schema");
+const { lpgStations } = require("../db/schema/lpgStation");
+const { scopeCondition } = require("../lib/scopeFilter");
+
+/**
+ * A batch's location, resolved rather than trusted.
+ *
+ * `pfis.location_name` is a denormalised copy written when a PFI is created,
+ * and it is not reliably maintained — five active batches carry a blank one
+ * against a perfectly good location_id, which left every consumer showing no
+ * location at all (the daily-report form's "pick a PFI and the location
+ * fills in" did nothing on exactly those batches).
+ *
+ * The foreign key is the truth, so this prefers the joined name and only
+ * falls back to the stored copy for a row whose location was recorded as
+ * free text with no id behind it.
+ */
+const LOCATION_NAME = sql`
+  COALESCE(
+    NULLIF(${depots.name}, ''),
+    NULLIF(${lpgStations.name}, ''),
+    NULLIF(${pfis.locationName}, ''),
+    ''
+  )
+`;
 
 const findById = async (id) => {
   const numericId = parseInt(id, 10) || id;
-  const [row] = await db.select().from(pfis).where(eq(pfis.id, numericId)).limit(1);
+  const [row] = await db
+    .select({ pfi: pfis, resolvedLocationName: LOCATION_NAME })
+    .from(pfis)
+    .leftJoin(depots, eq(pfis.locationId, depots.id))
+    .leftJoin(lpgStations, eq(pfis.lpgStationId, lpgStations.id))
+    .where(eq(pfis.id, numericId))
+    .limit(1);
   if (!row) return null;
-  return { ...row, _id: String(row.id) };
+  return {
+    ...row.pfi,
+    locationName: row.resolvedLocationName || row.pfi.locationName || "",
+    _id: String(row.pfi.id),
+  };
 };
 
 const findByNumber = async (pfiNumber) => {
@@ -19,12 +53,19 @@ const findByNumber = async (pfiNumber) => {
   return { ...row, _id: String(row.id) };
 };
 
-const findAll = async ({ search, status, location, page = 1, limit = 100 } = {}) => {
+const findAll = async ({ search, status, location, scopeUser, page = 1, limit = 100 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(200, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+
+  const scope = scopeCondition(scopeUser, {
+    depotColumn: pfis.locationId,
+    lpgStationColumn: pfis.lpgStationId,
+    pfiColumn: pfis.id,
+  });
+  if (scope) conditions.push(scope);
 
   if (search) {
     const pattern = `%${search}%`;
@@ -51,8 +92,10 @@ const findAll = async ({ search, status, location, page = 1, limit = 100 } = {})
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select()
+      .select({ pfi: pfis, resolvedLocationName: LOCATION_NAME })
       .from(pfis)
+      .leftJoin(depots, eq(pfis.locationId, depots.id))
+      .leftJoin(lpgStations, eq(pfis.lpgStationId, lpgStations.id))
       .where(whereClause)
       .orderBy(asc(pfis.status), desc(pfis.createdAt))
       .limit(limitNum)
@@ -63,7 +106,11 @@ const findAll = async ({ search, status, location, page = 1, limit = 100 } = {})
       .where(whereClause),
   ]);
 
-  const enrichedRows = rows.map((r) => ({ ...r, _id: String(r.id) }));
+  const enrichedRows = rows.map(({ pfi, resolvedLocationName }) => ({
+    ...pfi,
+    locationName: resolvedLocationName || pfi.locationName || "",
+    _id: String(pfi.id),
+  }));
 
   return {
     pfis: enrichedRows,

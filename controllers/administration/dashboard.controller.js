@@ -16,8 +16,22 @@ const {
   dangoteOrderRequests,
   lpgOrderRequests,
   lpgStations,
+  orderTrucks,
 } = require("../../db/schema");
-const { eq, and, not, count, sql, gte, lte, desc } = require("drizzle-orm");
+const {
+  eq,
+  and,
+  or,
+  not,
+  inArray,
+  notInArray,
+  count,
+  countDistinct,
+  sql,
+  gte,
+  lte,
+  desc,
+} = require("drizzle-orm");
 const {
   revenueSummary,
   salesSummary,
@@ -27,6 +41,35 @@ const {
 } = require("../../services/reporting.service");
 
 const NEEDS_ATTENTION = sql`(${trucks.truckStatus} ILIKE 'Fair%' OR ${trucks.truckStatus} ILIKE 'Bad%')`;
+
+/**
+ * A truck counts as working when it is standing on a load that has not
+ * finished: gated in, loaded, or gated out and on the road. `pending` is
+ * excluded — an allocation nobody has acted on yet leaves the vehicle in the
+ * yard.
+ */
+const TRUCK_WORKING_STATUSES = ["gated_in", "loaded", "gated_out"];
+
+/** Orders whose loads no longer put a truck on the road. */
+const ORDER_FINISHED_STATUSES = ["Completed", "Cancelled", "Expired"];
+
+/**
+ * A Released order is never moved to Completed in practice, so "not finished"
+ * on its own would count a load gated out months ago as still on the road and
+ * the figure would only ever climb. A load is treated as live for this long
+ * after its last gate stamp.
+ */
+const TRUCK_IN_TRANSIT_DAYS = 7;
+
+/**
+ * Plates are compared with punctuation and case stripped: the load ledger
+ * writes them as the gate officer types them ("EN 46 XM") while the fleet
+ * registry stores them closed up ("BWR800XB"), so a literal comparison
+ * matches nothing at all. Normalised, 61 of the 65 registered vehicles are
+ * recognisable in the ledger.
+ */
+const normalisedPlate = (col) =>
+  sql`UPPER(REGEXP_REPLACE(${col}, '[^A-Za-z0-9]', '', 'g'))`;
 
 const num = (v) => Number(v || 0);
 
@@ -223,22 +266,51 @@ const getOverview = asyncHandler(async (req, res) => {
     pfiSummary(),
     outstandingPayments({ limit: 5 }),
     (async () => {
-      const [total, idle, maintenance] = await Promise.all([
+      // inTransit used to be hardcoded to 0, which made the dashboard's
+      // utilisation card — inTransit / total — permanently read 0%. It is
+      // counted off the load ledger: distinct vehicles standing on a live
+      // load that is neither finished nor still an untouched allocation.
+      //
+      // The join is on the normalised plate, not order_trucks.truck_id: that
+      // soft FK is null on every one of the 7,519 rows in the ledger, so a
+      // join through it counts nothing. countDistinct matters because one
+      // truck can carry several loads across concurrent orders.
+      const lastGateStamp = sql`COALESCE(${orderTrucks.securityExitedAt}, ${orderTrucks.loadedAt}, ${orderTrucks.securityEnteredAt}, ${orderTrucks.createdAt})`;
+      const [total, maintenance, inTransit] = await Promise.all([
         db.select({ c: count() }).from(trucks).where(eq(trucks.isActive, true)),
         db
           .select({ c: count() })
           .from(trucks)
-          .where(and(eq(trucks.isActive, true), not(NEEDS_ATTENTION))),
-        db
-          .select({ c: count() })
-          .from(trucks)
           .where(and(eq(trucks.isActive, true), NEEDS_ATTENTION)),
+        db
+          .select({ c: countDistinct(trucks.id) })
+          .from(orderTrucks)
+          .innerJoin(orders, eq(orderTrucks.orderId, orders.id))
+          .innerJoin(
+            trucks,
+            sql`${normalisedPlate(trucks.plateNumber)} = ${normalisedPlate(orderTrucks.truckNumber)}`
+          )
+          .where(
+            and(
+              eq(trucks.isActive, true),
+              inArray(orderTrucks.status, TRUCK_WORKING_STATUSES),
+              notInArray(orders.status, ORDER_FINISHED_STATUSES),
+              sql`${lastGateStamp} > now() - (${TRUCK_IN_TRANSIT_DAYS} * interval '1 day')`
+            )
+          ),
       ]);
+
+      const totalCount = total[0].c;
+      const maintenanceCount = maintenance[0].c;
+      const inTransitCount = inTransit[0].c;
       return {
-        total: total[0].c,
-        idle: idle[0].c,
-        maintenance: maintenance[0].c,
-        inTransit: 0,
+        total: totalCount,
+        maintenance: maintenanceCount,
+        inTransit: inTransitCount,
+        // Whatever is left over: on the books, not under repair, not on a
+        // load. Derived rather than queried so the three always add to total
+        // instead of overlapping the way a separate count would.
+        idle: Math.max(0, totalCount - maintenanceCount - inTransitCount),
       };
     })(),
     (async () => {

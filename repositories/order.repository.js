@@ -1,7 +1,11 @@
 const { eq, and, or, ilike, inArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { orders, customers, depots, products, pfis, orderTrucks } = require("../db/schema");
+const {
+  orders, customers, depots, products, pfis, orderTrucks,
+  deposits, orderDepositAllocations, staff, walletHolds,
+} = require("../db/schema");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 const formatOrderRow = (row) => {
   if (!row) return null;
@@ -187,14 +191,19 @@ const findAll = async ({
   dateTo,
   /** Same rule findPayableOrders uses — see the condition below. */
   payable,
+  /** The authenticated caller, for location/PFI scoping. Omitted = unfiltered (internal callers). */
+  scopeUser,
   page = 1,
   limit = 50,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+
+  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  if (scope) conditions.push(scope);
 
   if (search) {
     // A reference-shaped search ("SO600", or the legacy "SO/600") also matches
@@ -239,7 +248,14 @@ const findAll = async ({
   }
 
   if (dateTo) {
-    conditions.push(lte(orders.createdAt, new Date(dateTo)));
+    // Inclusive of the whole day: a bare "2026-08-06" parses as that date's
+    // UTC midnight, so comparing createdAt against it as-is excluded every
+    // order placed later that same day — a caller asking for "today" got
+    // nothing. Built as an explicit UTC string, same as dateFrom above, so
+    // the two boundaries don't drift against each other by the server's
+    // local timezone.
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
+    conditions.push(lte(orders.createdAt, new Date(end)));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -303,6 +319,658 @@ const findAll = async ({
       page: pageNum,
       limit: limitNum,
       pages: Math.ceil(total / limitNum),
+    },
+  };
+};
+
+/**
+ * Every confirmed payment, order by order, with exactly where the money for
+ * each one is understood to have come from — and, since the wallet is how
+ * every order is actually paid for, the customer's wallet balance immediately
+ * before and after that payment was taken.
+ *
+ * Unbounded and newest-first by design: this report is read a day at a time
+ * (see the default date filter the frontend applies), so there is no
+ * pagination to reconcile against the stat cards — one filtered set, fetched
+ * whole, drives both.
+ *
+ * `funding` is built from a second, batched query rather than a join on the
+ * main select — a LEFT JOIN against order_deposit_allocations would multiply
+ * order rows by however many deposits funded them. An order with zero funding
+ * rows genuinely predates the allocation ledger (see wallet.service.js) —
+ * that's surfaced as fundingTracked: false, not an error.
+ */
+/**
+ * Where a wallet-funded order's money came from, when the allocation ledger
+ * has nothing to say.
+ *
+ * An order paid out of wallet balance writes a wallet_holds row and no
+ * order_deposit_allocations row, so the finance report had no payment source
+ * for it at all — the dialog fell through to "paid before detailed payment
+ * tracking began" on orders raised last week, and the table and the export
+ * printed empty depositor and reference columns.
+ *
+ * The money is recoverable, just one hop further back: the credits sitting in
+ * the wallet when the hold was placed. This walks them newest-first until the
+ * hold is covered, which is what the wallet ledger itself did — deposit 4558,
+ * the one case in the data, is marked remaining_amount = 0 by exactly that
+ * consumption.
+ *
+ * ── Why every line is flagged `traced` ────────────────────────────────────
+ *
+ * None of this is a recorded link. An allocation row says "this deposit paid
+ * this order" as a fact; this says "these are the credits that must have
+ * covered it, by amount and date". The two must never look alike on screen,
+ * so the flag rides along with the data and the views mark it.
+ *
+ * ── The transfer hop ──────────────────────────────────────────────────────
+ *
+ * A wallet credit can itself be an internal transfer ("Wallet transfer from
+ * customer #1533"), which has no statement line of its own because no bank
+ * payment happened — the bank detail is on the SOURCE customer's credits.
+ * Those are pulled in too, but only when they sum to the transfer amount
+ * exactly. An inexact set is a guess, so it is dropped and the trail stops at
+ * the source customer's name, which is recorded fact.
+ */
+const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
+  const byOrder = new Map();
+
+  // Only orders the allocation ledger has nothing for: where it does, that is
+  // the answer and this must not compete with it.
+  const holds = walletRows.filter((w) => !(fundingByOrder.get(w.orderId) || []).length);
+  if (!holds.length) return byOrder;
+
+  const customerByOrder = new Map(rows.map((r) => [r.id, r.customerId]));
+  const customerIds = [...new Set(holds.map((w) => customerByOrder.get(w.orderId)).filter(Boolean))];
+  if (!customerIds.length) return byOrder;
+
+  /** Every credit on these wallets, newest first, with its statement line. */
+  const creditsFor = async (ids) => {
+    if (!ids.length) return [];
+    const result = await db.execute(sql`
+      SELECT
+        d.id AS "depositId",
+        d.customer_id AS "customerId",
+        d.amount,
+        d.created_at AS "createdAt",
+        d.description,
+        d.reference,
+        st.first_name AS "recorderFirstName",
+        st.surname AS "recorderSurname",
+        l.depositor AS "statementDepositor",
+        l.narration AS "statementNarration",
+        l.txn_date AS "statementTxnDate"
+      FROM deposits d
+      -- Who keyed the credit in. The allocation path has carried this from
+      -- the start; without it here the report's Recorded By column had
+      -- nothing to put in a wallet-funded order's rows and fell back to
+      -- printing the bank narration, which named the payer, not the staff.
+      LEFT JOIN staff st ON st.id = d.recorded_by
+      LEFT JOIN LATERAL (
+        SELECT depositor, narration, txn_date
+        FROM bank_statement_lines
+        WHERE matched_deposit_id = d.id
+        ORDER BY id LIMIT 1
+      ) l ON TRUE
+      WHERE d.type = 'credit'
+        AND d.customer_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY d.created_at DESC, d.id DESC
+    `);
+    return result.rows ?? result;
+  };
+
+  const credits = await creditsFor(customerIds);
+  const creditsByCustomer = new Map();
+  for (const c of credits) {
+    if (!creditsByCustomer.has(c.customerId)) creditsByCustomer.set(c.customerId, []);
+    creditsByCustomer.get(c.customerId).push(c);
+  }
+
+  /**
+   * Newest first until `target` is covered; `[]` if the wallet cannot cover it.
+   *
+   * Each entry carries a `take` — how much of that credit the target actually
+   * needed. The last one is almost always partial, and returning it whole is
+   * how ME11489 came to report ₦100,000,000 received against a ₦54,450,000
+   * order: it drew on a ₦100m credit, and the trace printed the credit rather
+   * than the draw. The credit was already fully attributed to another order,
+   * so the same ₦100m appeared twice on one report.
+   */
+  const cover = (list, target, exact = false) => {
+    const taken = [];
+    let running = 0;
+    for (const c of list) {
+      const remaining = target - running;
+      const take = exact ? Number(c.amount || 0) : Math.min(Number(c.amount || 0), Math.max(0, remaining));
+      taken.push({ ...c, take });
+      running += Number(c.amount || 0);
+      // Fractions of a naira are rounding noise from decimal columns, not a
+      // real shortfall.
+      if (running >= target - 0.01) return exact && running > target + 0.01 ? [] : taken;
+    }
+    return [];
+  };
+
+  // ── Second hop: the source wallets behind any internal transfer ──────────
+  const TRANSFER = /wallet transfer from customer #(\d+)/i;
+  const picked = new Map();
+  const sourceIds = new Set();
+
+  for (const hold of holds) {
+    const customerId = customerByOrder.get(hold.orderId);
+    const list = creditsByCustomer.get(customerId) || [];
+    // Only what was already in the wallet when the hold was placed.
+    const available = list.filter((c) => new Date(c.createdAt) <= new Date(hold.createdAt ?? Date.now()));
+    const chosen = cover(available.length ? available : list, Number(hold.holdAmount || 0));
+    picked.set(hold.orderId, chosen);
+    for (const c of chosen) {
+      const match = TRANSFER.exec(c.description || "");
+      if (match) sourceIds.add(Number(match[1]));
+    }
+  }
+
+  const sourceCredits = await creditsFor([...sourceIds]);
+  const sourceByCustomer = new Map();
+  for (const c of sourceCredits) {
+    if (!sourceByCustomer.has(c.customerId)) sourceByCustomer.set(c.customerId, []);
+    sourceByCustomer.get(c.customerId).push(c);
+  }
+
+  const sourceNames = sourceIds.size
+    ? await db
+        .select({ id: customers.id, name: customers.name })
+        .from(customers)
+        .where(inArray(customers.id, [...sourceIds]))
+    : [];
+  const nameById = new Map(sourceNames.map((c) => [c.id, c.name]));
+
+  for (const hold of holds) {
+    const chosen = picked.get(hold.orderId) || [];
+    if (!chosen.length) continue;
+
+    byOrder.set(
+      hold.orderId,
+      chosen.map((c) => {
+        const match = TRANSFER.exec(c.description || "");
+        const fromId = match ? Number(match[1]) : null;
+        // Exact, or not at all — see the note above.
+        const behind = fromId
+          ? cover(sourceByCustomer.get(fromId) || [], Number(c.amount || 0), true)
+          : [];
+
+        return {
+          depositId: c.depositId,
+          // What this order drew, not what the credit was worth — see cover().
+          amount: Number(c.take ?? c.amount ?? 0),
+          createdAt: c.createdAt,
+          description: c.description || "",
+          reference: c.reference || "",
+          statementDepositor: c.statementDepositor || "",
+          statementNarration: c.statementNarration || "",
+          statementTxnDate: c.statementTxnDate || null,
+          recorderFirstName: c.recorderFirstName || null,
+          recorderSurname: c.recorderSurname || null,
+          transferFromCustomerId: fromId,
+          transferFromCustomerName: fromId ? nameById.get(fromId) || "" : "",
+          // The bank credits behind an internal transfer, when they reconcile.
+          statementSources: behind.map((b) => ({
+            depositId: b.depositId,
+            amount: Number(b.amount || 0),
+            depositor: b.statementDepositor || "",
+            narration: b.statementNarration || "",
+            txnDate: b.statementTxnDate || b.createdAt,
+            reference: b.reference || "",
+            recorderFirstName: b.recorderFirstName || null,
+            recorderSurname: b.recorderSurname || null,
+          })),
+          reconciled: behind.length > 0,
+        };
+      }),
+    );
+  }
+
+  return byOrder;
+};
+
+const findFinanceReport = async ({
+  search,
+  paymentStatus = "Paid",
+  dateFrom,
+  dateTo,
+  depotId,
+  pfiId,
+  productId,
+  scopeUser,
+} = {}) => {
+  const conditions = [];
+  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  if (scope) conditions.push(scope);
+  if (paymentStatus && paymentStatus !== "all") {
+    conditions.push(eq(orders.paymentStatus, paymentStatus));
+  }
+  if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
+  if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
+  if (productId) conditions.push(eq(orders.productId, Number(productId)));
+  if (search) {
+    const possibleId = parseOrderReference(search);
+    const term = `%${search}%`;
+    // Reference, customer, company (either side — an order can carry its
+    // own companyName distinct from the customer's), location, PFI, and the
+    // payment reference on whichever deposit(s) actually funded this order
+    // — the same field the finance report's own funding sub-rows show, so a
+    // teller reference typed here finds the order it paid for.
+    const textMatch = or(
+      ilike(orders.orderNumber, term),
+      ilike(customers.name, term),
+      ilike(customers.phone, term),
+      ilike(orders.companyName, term),
+      ilike(customers.companyName, term),
+      ilike(depots.name, term),
+      ilike(pfis.pfiNumber, term),
+      sql`EXISTS (
+        SELECT 1 FROM order_deposit_allocations oda
+        JOIN deposits d ON d.id = oda.deposit_id
+        WHERE oda.order_id = ${orders.id} AND d.reference ILIKE ${term}
+      )`,
+    );
+    conditions.push(possibleId ? or(eq(orders.id, possibleId), textMatch) : textMatch);
+  }
+  // A bare "2026-08-20" from a date input parses as that day's UTC midnight —
+  // compared as-is, dateTo would exclude every order confirmed later that
+  // same day. Widened to the last instant of the day so "today" means today.
+  if (dateFrom) {
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? `${dateFrom}T00:00:00.000Z` : dateFrom;
+    conditions.push(gte(orders.paymentConfirmedAt, new Date(start)));
+  }
+  if (dateTo) {
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
+    conditions.push(lte(orders.paymentConfirmedAt, new Date(end)));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+  const columns = {
+    ...FULL_ORDER_COLUMNS,
+    customerVirtualAccountNumber: customers.virtualAccountNumber,
+    customerVirtualAccountBank: customers.virtualAccountBank,
+    pfiLocationName: pfis.locationName,
+  };
+
+  const [rows, [{ total, totalAmount, totalQuantity }], [{ trackedCount }]] = await Promise.all([
+    db
+      .select(columns)
+      .from(orders)
+      .leftJoin(customers, eq(orders.customerId, customers.id))
+      .leftJoin(depots, eq(orders.depotId, depots.id))
+      .leftJoin(products, eq(orders.productId, products.id))
+      .leftJoin(pfis, eq(orders.pfiId, pfis.id))
+      .where(whereClause)
+      // Newest first, by when the money was actually confirmed. COALESCE'd to
+      // the order date so an unpaid order (null paymentConfirmedAt, included
+      // when the status filter is Unpaid/All) sorts by its own date instead
+      // of being dumped at the very top — Postgres sorts NULLs first on DESC.
+      .orderBy(
+        desc(sql`COALESCE(${orders.paymentConfirmedAt}, ${orders.createdAt})`),
+        desc(orders.id),
+      ),
+    // Over the same filtered set as the rows above, so the stat cards can
+    // never disagree with what a filter/search actually shows. Joined the
+    // same way as the rows query — the search condition above can reference
+    // depots/pfis columns, so every query sharing whereClause needs them in
+    // scope too, or a search hits a missing-FROM-clause error.
+    db
+      .select({
+        total: count(),
+        totalAmount: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
+        totalQuantity: sql`COALESCE(SUM(${orders.quantity}), 0)`,
+      })
+      .from(orders)
+      .leftJoin(customers, eq(orders.customerId, customers.id))
+      .leftJoin(depots, eq(orders.depotId, depots.id))
+      .leftJoin(pfis, eq(orders.pfiId, pfis.id))
+      .where(whereClause),
+    db
+      .select({ trackedCount: sql`COUNT(DISTINCT ${orders.id})` })
+      .from(orders)
+      .innerJoin(orderDepositAllocations, eq(orders.id, orderDepositAllocations.orderId))
+      .leftJoin(customers, eq(orders.customerId, customers.id))
+      .leftJoin(depots, eq(orders.depotId, depots.id))
+      .leftJoin(pfis, eq(orders.pfiId, pfis.id))
+      .where(whereClause),
+  ]);
+
+  const orderIds = rows.map((r) => r.id);
+
+  const [funding, walletRows] = await Promise.all([
+    orderIds.length
+      ? db
+          .select({
+            orderId: orderDepositAllocations.orderId,
+            depositId: orderDepositAllocations.depositId,
+            // What was RECEIVED against this order. On a bank row this is the
+            // statement line at face value — the figure the report is checked
+            // against — not a slice of it. See db/migrations/0011.
+            amount: orderDepositAllocations.amount,
+            // What the order CONSUMED of it. Differs from `amount` only where
+            // a payment overshot the order it was made for; the difference is
+            // the surplus still sitting in the wallet under this reference.
+            appliedAmount: orderDepositAllocations.appliedAmount,
+            /**
+             * How the money reached this order — 'bank', 'wallet' or 'legacy'.
+             *
+             * This used to be inferred, badly: a row with no statement line
+             * was guessed at from its description, and a credit spread over
+             * two orders was labelled by whichever took the larger share.
+             * Both guesses are gone — the allocation now says which it is,
+             * recorded at the moment the payment was confirmed.
+             */
+            source: orderDepositAllocations.source,
+            depositReference: deposits.reference,
+            /**
+             * What is left of this credit, or null if it predates the
+             * allocation ledger.
+             *
+             * The difference between `amount` and `appliedAmount` is money
+             * received against the order beyond its value — but that is not
+             * the same as money still sitting in the wallet, and the report
+             * was reporting one as the other. Where the remainder is tracked,
+             * it says how much of the surplus is genuinely unspent. Where it
+             * is null, nothing does: credit 31203434355 is ₦2.51bn matched to
+             * order 10649, of which ₦1.89bn covered that order and ₦621m
+             * evidently paid for others that never recorded an allocation.
+             * Calling that an overpayment would be a fiction, so the report
+             * separates the two rather than summing them.
+             */
+            depositRemaining: deposits.remainingAmount,
+            depositCreatedAt: deposits.createdAt,
+            // What actually landed, as distinct from `amount` above — which
+            // is only the slice of this deposit that FIFO attributed to this
+            // order. Where a payment covered more than one order, or a
+            // surplus went to the wallet, the two differ, and the report
+            // wants the real figure so the differential against sales value
+            // is visible rather than pre-netted away.
+            depositAmount: deposits.amount,
+            paystackDetails: deposits.paystackDetails,
+            recorderFirstName: staff.firstName,
+            recorderSurname: staff.surname,
+            // Who paid and when, taken from the bank statement line itself
+            // rather than the deposit's paystackDetails JSON. The JSON only
+            // started carrying senderName/paidAt recently, so 2,351 of the
+            // 2,434 statement-backed deposits have neither — while the line
+            // they were matched from has had the depositor and txn date all
+            // along. Reading the line makes every historical match show its
+            // payer and date, with no backfill of the JSON needed.
+            statementDepositor: sql`(
+              SELECT l.depositor FROM bank_statement_lines l
+              WHERE l.matched_deposit_id = ${deposits.id}
+              ORDER BY l.id LIMIT 1
+            )`,
+            statementTxnDate: sql`(
+              SELECT l.txn_date FROM bank_statement_lines l
+              WHERE l.matched_deposit_id = ${deposits.id}
+              ORDER BY l.id LIMIT 1
+            )`,
+            // Internal wallet movements — a transfer between customers, or an
+            // overpayment carried over from another order — have no statement
+            // line and no reference, because no bank payment happened. Their
+            // source lives only in the description ("Wallet transfer from
+            // customer #1533"), so it goes out with the row and the customer
+            // id in it is resolved to a name here rather than leaving the
+            // report showing a bare dash for where the money came from.
+            depositDescription: deposits.description,
+            transferFromCustomerName: sql`(
+              SELECT c.name FROM customers c
+              WHERE c.id = NULLIF(substring(${deposits.description} from 'customer #([0-9]+)'), '')::int
+            )`,
+            /**
+             * When one bank credit touched more than one order.
+             *
+             * The report shows a funding row per (order, deposit) pair, so a
+             * credit reaching two orders printed the same bank reference under
+             * both — which reads as one statement row being spent twice. It
+             * never is, but nothing on the row said so, and an auditor has no
+             * way to tell the difference by looking.
+             *
+             * These three say it. `primaryOrderId` is the order the credit was
+             * BANK-matched to — the one the statement line properly belongs to
+             * — so a wallet draw elsewhere can name it. That used to be
+             * guessed at as "whichever order took the largest share", which is
+             * only right by luck; the `source = 'bank'` row records it as fact,
+             * and the largest-share ordering survives only as the tie-break for
+             * legacy rows, where nothing better was ever written down.
+             *
+             * Deliberately derived here rather than stored: it is a fact about
+             * how the allocations happen to fall, and re-deriving it means it
+             * cannot go stale when one is added, removed or corrected.
+             */
+            sharedOrderCount: sql`(
+              SELECT COUNT(*)::int FROM order_deposit_allocations a
+              WHERE a.deposit_id = ${deposits.id}
+            )`,
+            primaryOrderId: sql`(
+              SELECT a.order_id FROM order_deposit_allocations a
+              WHERE a.deposit_id = ${deposits.id}
+              ORDER BY (a.source = 'bank') DESC, a.amount DESC, a.order_id ASC LIMIT 1
+            )`,
+            primaryOrderCompany: sql`(
+              SELECT o2.company_name FROM order_deposit_allocations a
+              JOIN orders o2 ON o2.id = a.order_id
+              WHERE a.deposit_id = ${deposits.id}
+              ORDER BY (a.source = 'bank') DESC, a.amount DESC, a.order_id ASC LIMIT 1
+            )`,
+          })
+          .from(orderDepositAllocations)
+          .innerJoin(deposits, eq(orderDepositAllocations.depositId, deposits.id))
+          .leftJoin(staff, eq(deposits.recordedBy, staff.id))
+          .where(inArray(orderDepositAllocations.orderId, orderIds))
+          .orderBy(asc(orderDepositAllocations.createdAt))
+      : [],
+    // The wallet hold placed for each order — this is the payment, since a
+    // wallet-funded order is only ever placed once placeHold() has already
+    // taken the money. Its own balanceAfter is only booked once the hold
+    // *converts* (order fully completed, see order.controller.js), which
+    // most just-paid orders haven't reached yet — so instead of reading a
+    // number that mostly isn't there, this replays the customer's own
+    // ledger up to the instant the hold was placed:
+    //
+    //   balance(t) = credits(t) - debits(t) - holds still active at t
+    //
+    // A debit deposit row only exists once its hold has converted, and an
+    // active-hold row only counts while unresolved as of t — so a hold that
+    // converted before t is counted exactly once, via the debit sum, and one
+    // still open at t is counted exactly once, via the active-holds sum.
+    // `t` is this hold's own createdAt, so the sum already includes its own
+    // −amount effect; adding the hold amount back recovers the balance the
+    // instant before it was placed.
+    orderIds.length
+      ? db.execute(sql`
+          SELECT
+            wh.order_id AS "orderId",
+            wh.amount AS "holdAmount",
+            wh.status AS "holdStatus",
+            -- The instant the money was taken: the wallet source trace only
+            -- counts credits that were already in the wallet by then.
+            wh.created_at AS "createdAt",
+            (
+              COALESCE((
+                SELECT SUM(d.amount) FROM deposits d
+                WHERE d.customer_id = wh.customer_id AND d.type = 'credit' AND d.created_at <= wh.created_at
+              ), 0)
+              - COALESCE((
+                SELECT SUM(d.amount) FROM deposits d
+                WHERE d.customer_id = wh.customer_id AND d.type = 'debit' AND d.created_at <= wh.created_at
+              ), 0)
+              - COALESCE((
+                SELECT SUM(wh2.amount) FROM wallet_holds wh2
+                WHERE wh2.customer_id = wh.customer_id AND wh2.created_at <= wh.created_at
+                  AND (wh2.resolved_at IS NULL OR wh2.resolved_at > wh.created_at)
+              ), 0)
+            ) AS "balanceAfter"
+          FROM wallet_holds wh
+          WHERE wh.order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+        `)
+      : [],
+  ]);
+
+  /**
+   * The other half of an overpayment moved between orders.
+   *
+   * Moving a surplus already writes both legs to the wallet ledger — a debit
+   * off the order it leaves and a credit onto the order it lands on — but the
+   * report only ever read credits, because that is all order_deposit_
+   * allocations can point at. So the receiving order showed "+₦26,600,000
+   * from AG11212" and AG11212 itself showed nothing at all: it just sat there
+   * looking ₦26,600,000 overpaid, with no way to tell that the money had been
+   * deliberately moved rather than left lying about.
+   *
+   * The credit names its source order, so the outgoing leg is recoverable
+   * from it without a schema change, and it goes out as a NEGATIVE row on
+   * that source order. Both questions an auditor asks — "what did this order
+   * receive" and "where did the rest of it go" — then have an answer on the
+   * face of the report, and Amount Paid nets down to what the order really
+   * kept.
+   */
+  const transfersOut = orderIds.length
+    ? await db.execute(sql`
+        -- A recorded overpayment transfer: the credit names the order the
+        -- surplus came off, so the outgoing leg is recoverable from it.
+        SELECT
+          (substring(d.description from 'received from order #([0-9]+)'))::int AS "orderId",
+          d.id AS "depositId",
+          d.amount,
+          d.created_at AS "createdAt",
+          d.description,
+          a.order_id AS "toOrderId",
+          o2.company_name AS "toOrderCompany",
+          st.first_name AS "recorderFirstName",
+          st.surname AS "recorderSurname"
+        FROM deposits d
+        LEFT JOIN order_deposit_allocations a ON a.deposit_id = d.id
+        LEFT JOIN orders o2 ON o2.id = a.order_id
+        LEFT JOIN staff st ON st.id = d.recorded_by
+        WHERE d.type = 'credit'
+          AND d.description ~ 'received from order #[0-9]+'
+          AND (substring(d.description from 'received from order #([0-9]+)'))::int
+              IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+
+        UNION ALL
+
+        -- And a later order drawing on the surplus of a credit that, by bank
+        -- match, belongs to an earlier one. No description records this — the
+        -- allocations themselves do: a wallet draw on a deposit whose bank row
+        -- sits on a different order IS money moving between those two orders.
+        --
+        -- ME11448 is the case. It received ₦163,350,000 of bank credit against
+        -- a ₦108,900,000 order, and ME11489 later drew the ₦54,450,000
+        -- difference. Without this leg the surplus showed as an overpayment on
+        -- one order and as money from nowhere on the other, and the same
+        -- ₦54,450,000 was counted twice across the report.
+        SELECT
+          b.order_id AS "orderId",
+          d.id AS "depositId",
+          w.applied_amount AS amount,
+          d.created_at AS "createdAt",
+          d.description,
+          w.order_id AS "toOrderId",
+          o3.company_name AS "toOrderCompany",
+          st2.first_name AS "recorderFirstName",
+          st2.surname AS "recorderSurname"
+        FROM order_deposit_allocations w
+        JOIN order_deposit_allocations b
+          ON b.deposit_id = w.deposit_id AND b.source = 'bank' AND b.order_id <> w.order_id
+        JOIN deposits d ON d.id = w.deposit_id
+        JOIN orders o3 ON o3.id = w.order_id
+        LEFT JOIN staff st2 ON st2.id = d.recorded_by
+        WHERE w.source = 'wallet'
+          AND b.order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+      `)
+    : [];
+
+  const fundingByOrder = new Map();
+  for (const f of funding) {
+    // The reference of the order a shared credit properly belongs to, built
+    // with the same helper every other reference on the report comes from, so
+    // "TRF FROM KN11400" is the string the reader will find if they go and
+    // look that order up.
+    f.primaryOrderRef =
+      f.primaryOrderId != null ? generateOrderReference(f.primaryOrderCompany, f.primaryOrderId) : null;
+    if (!fundingByOrder.has(f.orderId)) fundingByOrder.set(f.orderId, []);
+    fundingByOrder.get(f.orderId).push(f);
+  }
+
+  for (const t of transfersOut.rows ?? transfersOut) {
+    if (!fundingByOrder.has(t.orderId)) fundingByOrder.set(t.orderId, []);
+    fundingByOrder.get(t.orderId).push({
+      orderId: t.orderId,
+      depositId: t.depositId,
+      // Negative: this is money leaving the order, and the column it lands in
+      // is the same Amount Paid column the receiving order's +row lands in.
+      amount: `-${Number(t.amount || 0)}`,
+      appliedAmount: "0",
+      source: "transfer_out",
+      depositReference: null,
+      depositCreatedAt: t.createdAt,
+      depositRemaining: null,
+      paystackDetails: null,
+      depositDescription: t.description,
+      recorderFirstName: t.recorderFirstName,
+      recorderSurname: t.recorderSurname,
+      toOrderId: t.toOrderId,
+      toOrderRef:
+        t.toOrderId != null ? generateOrderReference(t.toOrderCompany, t.toOrderId) : null,
+    });
+  }
+  const walletByOrder = new Map(walletRows.map((w) => [w.orderId, w]));
+
+  const walletSourceByOrder = await traceWalletSources(rows, walletRows, fundingByOrder);
+
+  const decorated = rows.map((row) => {
+    const orderFunding = fundingByOrder.get(row.id) || [];
+    // What the order's VALUE was actually settled from — the applied figures,
+    // not the received ones. A bank credit recorded at face value can exceed
+    // the order it paid for, and counting the surplus here would report an
+    // order as over-covered when the shortfall it is looking for is real.
+    const applied = orderFunding.reduce((sum, f) => sum + Number(f.appliedAmount ?? f.amount ?? 0), 0);
+    // An allocation is what makes an order tracked. A transfer-out leg is a
+    // note about money leaving, not a record of what paid for the order — an
+    // order carrying only that has still had nothing traced to it, and saying
+    // otherwise would hide it from the untracked count.
+    const fundingTracked = orderFunding.some((f) => f.source !== "transfer_out");
+
+    const wallet = walletByOrder.get(row.id);
+    const walletBalanceAfter = wallet?.balanceAfter != null ? Number(wallet.balanceAfter) : null;
+    const walletBalanceBefore =
+      walletBalanceAfter != null && wallet?.holdAmount != null
+        ? walletBalanceAfter + Number(wallet.holdAmount)
+        : null;
+
+    // Where the wallet money came from, for orders the allocation ledger has
+    // nothing for. Every line is inferred, never a recorded link — see
+    // traceWalletSources — so it travels under its own name rather than being
+    // mixed into `funding`, which the views present as fact.
+    const walletSource = walletSourceByOrder.get(row.id) || [];
+
+    return {
+      ...row,
+      funding: orderFunding,
+      fundingTracked,
+      walletSource,
+      /** A hold exists, so this was paid from wallet balance, tracked or not. */
+      walletFunded: wallet != null,
+      unattributedAmount: fundingTracked ? Math.max(0, Number(row.totalAmount || 0) - applied) : 0,
+      walletBalanceBefore,
+      walletBalanceAfter,
+    };
+  });
+
+  return {
+    orders: decorated.map(formatOrderRow),
+    totals: {
+      count: total,
+      totalAmount: Number(totalAmount),
+      totalQuantity: Number(totalQuantity),
+      trackedCount: Number(trackedCount),
+      notTrackedCount: total - Number(trackedCount),
     },
   };
 };
@@ -380,7 +1048,15 @@ const countByPfi = async (pfiId) => {
   return total;
 };
 
-const findPayableOrders = async () => {
+const findPayableOrders = async (scopeUser) => {
+  const conditions = [
+    eq(orders.paymentStatus, "Unpaid"),
+    eq(orders.status, "Pending"),
+    sql`${customers.balance} >= ${orders.totalAmount}`,
+  ];
+  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  if (scope) conditions.push(scope);
+
   const rows = await db
     .select({
       id: orders.id,
@@ -403,13 +1079,7 @@ const findPayableOrders = async () => {
     .innerJoin(customers, eq(orders.customerId, customers.id))
     .leftJoin(depots, eq(orders.depotId, depots.id))
     .leftJoin(products, eq(orders.productId, products.id))
-    .where(
-      and(
-        eq(orders.paymentStatus, "Unpaid"),
-        eq(orders.status, "Pending"),
-        sql`${customers.balance} >= ${orders.totalAmount}`
-      )
-    )
+    .where(and(...conditions))
     .orderBy(asc(orders.createdAt));
   return rows.map(formatOrderRow);
 };
@@ -441,6 +1111,7 @@ module.exports = {
   findByNumberFull,
   findTrucksByOrderId,
   findAll,
+  findFinanceReport,
   create,
   update,
   findUnpaidByCustomer,

@@ -45,6 +45,7 @@ const sessions = pgTable(
     replacedById: integer("replaced_by_id"),
     // rotated | logout | logout_all | reuse_detected
     // | password_change | principal_deactivated | phone_changed
+    // | account_deleted
     revokedReason: varchar("revoked_reason", { length: 32 }),
 
     deviceName: varchar("device_name", { length: 255 }).default(""),

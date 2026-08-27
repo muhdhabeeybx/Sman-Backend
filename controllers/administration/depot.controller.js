@@ -5,7 +5,7 @@ const { getMultiDepotCapacities, getDepotCapacities } = require("../../services/
 const getDepots = asyncHandler(async (req, res) => {
   const { search, page = 1, limit = 50 } = req.query;
 
-  const result = await depotRepo.findAll({ search, page, limit });
+  const result = await depotRepo.findAll({ search, page, limit, scopeUser: req.user });
 
   // Enrich with product capacities and prices
   const enrichedDepots = await Promise.all(

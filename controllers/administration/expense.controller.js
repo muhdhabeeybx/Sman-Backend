@@ -1,9 +1,12 @@
 const asyncHandler = require("express-async-handler");
-const { pfiExpenseRepo, staffRepo, notificationRepo } = require("../../repositories");
+const { pfiExpenseRepo, pfiRepo, staffRepo, notificationRepo, vendorRepo } = require("../../repositories");
 const { client } = require("../../db");
 const chain = require("../../lib/expenseChain");
-const { notifyExpenseStage } = require("../../services/expenseNotifications.service");
-const { deleteFile } = require("../../services/upload.service");
+const gl = require("../../lib/glAccounts");
+const {
+  notifyExpenseStage, notifyExpenseComment,
+} = require("../../services/expenseNotifications.service");
+const { deleteFile, generateSignature } = require("../../services/upload.service");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -31,34 +34,129 @@ const actorFor = async (req) => {
 /**
  * The whole PFI linkage, in one function.
  *
- * An expense never names a PFI. It names a category, and the category is what
- * carries the link — so this mirrors the category's PFI onto the expense on
- * every write. Move a line to a general category and its PFI clears itself;
- * move it onto a PFI category and it is stamped. Either way the affected PFI
- * totals move on the next read, because nothing is cached.
+ * An expense names a GL account, and — when that account is a direct product
+ * cost — the cargo the cost belongs to. Those are two independent choices, so
+ * both are checked here and nowhere else:
  *
- * `pfi_id` is deliberately never read from the request body. Accepting it
- * would let a caller book a line against one PFI while it displays under
- * another.
+ *   · a `pfi_direct` account must name a PFI, or the cost lands nowhere;
+ *   · every other account must not, so a general overhead can never quietly
+ *     inflate one batch's cost;
+ *   · an `income` account is refused outright — it is not an expense.
+ *
+ * Legacy per-PFI categories predate the chart and have no GL group. They keep
+ * their old behaviour exactly: the category carries the link and the body's
+ * `pfi_id` is ignored, so historical rows still edit cleanly.
  */
-const applyCategoryPfi = async (categoryId) => {
+const resolveBooking = async (categoryId, rawPfiId) => {
   const category = await pfiExpenseRepo.findCategoryById(categoryId);
   if (!category) throw httpErr(400, "Category not found");
-  return { category, pfiId: category.pfi_id || null };
+
+  const group = gl.groupFor(category.gl_group);
+  if (group?.isIncome) {
+    throw httpErr(400, `${category.name} is an income account — it cannot carry an expense`);
+  }
+  if (!group) return { category, pfiId: category.pfi_id || null };
+  if (!group.requiresPfi) return { category, pfiId: null };
+
+  const pfiId = Number(rawPfiId);
+  if (!Number.isFinite(pfiId) || pfiId <= 0) {
+    throw httpErr(400, `${category.name} must name the PFI the cost belongs to`);
+  }
+  const pfi = await pfiRepo.findById(pfiId);
+  if (!pfi) throw httpErr(400, "PFI not found");
+
+  return { category, pfiId };
 };
 
+/**
+ * The invoice arithmetic, filled in where the caller left it out.
+ *
+ * Nothing here is forced: a figure that arrives is trusted, because an invoice
+ * can carry a VAT that is not exactly 7.5% and refusing it would just mean the
+ * line never gets recorded. Only the blanks are computed.
+ *
+ * `null` is preserved rather than zeroed — a payment with no invoice behind it
+ * must not read as an invoice worth ₦0.
+ */
+const money = (val) => {
+  if (val === undefined || val === null || val === "") return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+};
+
+const invoiceFigures = (body) => {
+  const exVat = money(body.amount_ex_vat ?? body.amountExVat);
+  let vat = money(body.vat_amount ?? body.vatAmount);
+  let invoice = money(body.invoice_amount ?? body.invoiceAmount);
+  const rate = money(body.wht_rate ?? body.whtRate);
+  let wht = money(body.wht_deduction ?? body.whtDeduction);
+
+  if (exVat !== null && vat === null) vat = Math.round(exVat * gl.VAT_RATE * 100) / 100;
+  if (exVat !== null && invoice === null) invoice = Math.round((exVat + (vat || 0)) * 100) / 100;
+  // A rate with no amount is resolved here so the two can never disagree.
+  // Withholding is computed on the ex-VAT value, never the gross.
+  if (rate !== null && wht === null && exVat !== null) {
+    wht = Math.round(exVat * (rate / 100) * 100) / 100;
+  }
+
+  return {
+    amount_ex_vat: exVat === null ? null : String(exVat),
+    vat_amount: vat === null ? null : String(vat),
+    invoice_amount: invoice === null ? null : String(invoice),
+    wht_deduction: String(wht ?? 0),
+    wht_rate: rate === null ? null : String(rate),
+  };
+};
+
+/** The plain text fields, read in either casing. */
+const pick = (body, snake, camel) => body[snake] ?? body[camel];
+
 // ─── Categories ─────────────────────────────────────────────────────────────
+
+/**
+ * The chart, shaped for the two-step picker: group first, then the account.
+ *
+ * Subgroups come out in GL-code order rather than as a lookup, so the headings
+ * a group shows are exactly the runs its codes already form.
+ */
+const buildGroups = (rows) =>
+  gl.GL_GROUPS.map((group) => {
+    const accounts = rows.filter((r) => r.gl_group === group.code && r.is_active !== false);
+    const subgroups = [];
+    for (const account of accounts) {
+      const label = account.gl_subgroup || "";
+      const last = subgroups[subgroups.length - 1];
+      if (last && last.label === label) last.accounts.push(account);
+      else subgroups.push({ label, accounts: [account] });
+    }
+    return { ...group, accounts, subgroups };
+  }).filter((g) => g.accounts.length > 0);
 
 const listCategories = asyncHandler(async (req, res) => {
   const rows = await pfiExpenseRepo.listCategories();
 
-  // Split for the grouped picker: general categories, then PFIs.
-  const general = rows.filter((r) => !r.pfi_id);
-  const pfi = rows.filter((r) => r.pfi_id);
+  // `general` and `pfi` used to split on whether the category named a PFI,
+  // because "which cargo" WAS the category. Now the chart says what a cost is
+  // for and pfi_expenses.pfi_id says which cargo, so the split is by GL group
+  // — the same two lists the form offers, under the same two keys.
+  const active = rows.filter((r) => r.is_active !== false && r.gl_group);
+  const general = active.filter((r) => r.gl_group === "general");
+  const pfi = active.filter((r) => r.gl_group === "pfi_direct");
 
   res.json({
     success: true,
-    data: { categories: rows, general, pfi },
+    data: {
+      /** Every row, retired ones included, so a historical line still names its category. */
+      categories: rows,
+      general,
+      pfi,
+      groups: buildGroups(rows),
+      /** The withholding rates the form offers; see lib/glAccounts.js. */
+      wht_rates: gl.WHT_RATES,
+      /** Pre-chart categories still attached to historical rows. */
+      unmapped: rows.filter((r) => r.is_active === false),
+      vat_rate: gl.VAT_RATE,
+    },
   });
 });
 
@@ -66,12 +164,23 @@ const createCategory = asyncHandler(async (req, res) => {
   const name = String(req.body.name || "").trim();
   if (!name) throw httpErr(400, "Category name is required");
 
-  const existing = (await pfiExpenseRepo.listCategories()).find(
-    (c) => c.name.toLowerCase() === name.toLowerCase()
-  );
-  if (existing) throw httpErr(409, "A category with this name already exists");
+  const rows = await pfiExpenseRepo.listCategories();
+  if (rows.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+    throw httpErr(409, "A category with this name already exists");
+  }
 
-  const category = await pfiExpenseRepo.createCategory(name);
+  const glCode = String(pick(req.body, "gl_code", "glCode") || "").trim();
+  const glGroup = String(pick(req.body, "gl_group", "glGroup") || "").trim();
+  if (glGroup && !gl.groupFor(glGroup)) throw httpErr(400, "Unknown GL group");
+  if (glCode && rows.some((c) => c.gl_code === glCode)) {
+    throw httpErr(409, `GL code ${glCode} is already in use`);
+  }
+
+  const category = await pfiExpenseRepo.createCategory(name, {
+    glCode,
+    glGroup,
+    glSubgroup: String(pick(req.body, "gl_subgroup", "glSubgroup") || "").trim(),
+  });
   res.status(201).json({ success: true, message: "Category created", data: { category } });
 });
 
@@ -84,11 +193,54 @@ const updateCategory = asyncHandler(async (req, res) => {
     throw httpErr(400, "This category belongs to a PFI — rename the PFI instead");
   }
 
-  const name = String(req.body.name || "").trim();
+  // Omitted means "leave it alone", not "clear it".
+  const name = req.body.name !== undefined ? String(req.body.name).trim() : category.name;
   if (!name) throw httpErr(400, "Category name is required");
 
-  const updated = await pfiExpenseRepo.updateCategory(category.id, name);
-  res.json({ success: true, message: "Category updated", data: { category: updated } });
+  const rows = await pfiExpenseRepo.listCategories();
+  if (rows.some((c) => c.id !== category.id && c.name.toLowerCase() === name.toLowerCase())) {
+    throw httpErr(409, "A category with this name already exists");
+  }
+
+  const patch = { name };
+
+  // The code is a label on the account and can be corrected freely — expense
+  // lines reference the account by id, so renumbering re-files nothing.
+  const glCode = pick(req.body, "gl_code", "glCode");
+  if (glCode !== undefined) {
+    const code = String(glCode).trim();
+    if (code && rows.some((c) => c.id !== category.id && c.gl_code === code)) {
+      throw httpErr(409, `GL code ${code} is already in use`);
+    }
+    patch.gl_code = code || null;
+  }
+
+  const glSubgroup = pick(req.body, "gl_subgroup", "glSubgroup");
+  if (glSubgroup !== undefined) patch.gl_subgroup = String(glSubgroup).trim();
+
+  // The group is different. It decides whether the account takes a PFI, so
+  // moving a live account between groups would leave every line already posted
+  // to it on the wrong side of that rule — a cargo cost with no cargo, or an
+  // overhead sitting inside a batch. Allowed only while the account is unused.
+  const glGroup = pick(req.body, "gl_group", "glGroup");
+  if (glGroup !== undefined) {
+    const next = String(glGroup).trim() || null;
+    if (next && !gl.groupFor(next)) throw httpErr(400, "Unknown GL group");
+    if (next !== (category.gl_group || null)) {
+      const inUse = await pfiExpenseRepo.countExpensesInCategory(category.id);
+      if (inUse > 0) {
+        throw httpErr(
+          400,
+          `${inUse} expense line(s) are already posted to this account — ` +
+            "create a new account instead of moving this one",
+        );
+      }
+      patch.gl_group = next;
+    }
+  }
+
+  const updated = await pfiExpenseRepo.updateCategory(category.id, patch);
+  res.json({ success: true, message: "Account updated", data: { category: updated } });
 });
 
 const deleteCategory = asyncHandler(async (req, res) => {
@@ -97,7 +249,9 @@ const deleteCategory = asyncHandler(async (req, res) => {
   if (category.is_system_category) {
     throw httpErr(400, "This category belongs to a PFI and cannot be deleted");
   }
-
+  // A used account is never deleted, GL or not: the lines posted to it would
+  // lose the only record of where they were booked. The in-use check below is
+  // the whole rule — an unused account created by mistake is just a mistake.
   const inUse = await pfiExpenseRepo.countExpensesInCategory(category.id);
   if (inUse > 0) {
     throw httpErr(400, `Cannot delete: ${inUse} expense line(s) still use this category`);
@@ -122,15 +276,22 @@ const autoPopulateCategories = asyncHandler(async (req, res) => {
 // ─── Expenses ───────────────────────────────────────────────────────────────
 
 const listExpenses = asyncHandler(async (req, res) => {
-  // Outside the oversight roles you see only what you raised. Applied here so
+  // Outside the visibility roles you see only what you raised. Applied here so
   // every count, total, page and the bank list all inherit it.
-  const oversight = chain.canOversee(req.user);
+  const oversight = chain.canSeeAllExpenses(req.user);
+  // The "My Requests" page asks for this explicitly, so even an oversight
+  // role — who can otherwise see everyone's spend — gets just their own.
+  const mine = req.query.mine === "true" || req.query.mine === "1";
 
   const result = await pfiExpenseRepo.listExpenses({
     search: req.query.search,
     categoryId: req.query.category,
+    glGroup: req.query.group,
+    glSubgroup: req.query.subgroup,
     pfiId: req.query.pfi,
+    vendorId: req.query.vendor,
     bank: req.query.bank,
+    submitterId: req.query.submitter,
     type: req.query.type,
     status: req.query.status,
     month: req.query.month,
@@ -138,7 +299,8 @@ const listExpenses = asyncHandler(async (req, res) => {
     dateTo: parseDate(req.query.dateTo),
     page: req.query.page,
     limit: req.query.limit,
-    onlySubmitterId: oversight ? null : req.user?.id ?? -1,
+    onlySubmitterId: oversight && !mine ? null : req.user?.id ?? -1,
+    scopeUser: req.user,
   });
 
   res.json({
@@ -148,12 +310,27 @@ const listExpenses = asyncHandler(async (req, res) => {
       expenses: decorate(result.expenses, req.user),
       // Tells the page whose entries are on screen, rather than leaving someone
       // wondering why a colleague's row is missing.
-      scope: oversight ? "all" : "own",
-      can_review: oversight,
+      scope: oversight && !mine ? "all" : "own",
+      // Seeing everyone's requests and being able to action them are separate
+      // questions — `audit` reads the queue without acting on it.
+      can_review: chain.canOversee(req.user),
       statuses: Object.entries(chain.STATUS_LABELS).map(([value, label]) => ({ value, label })),
     },
   });
 });
+
+/**
+ * Resolves a vendor_id (if given) to the name that gets snapshotted onto the
+ * expense row. `vendor` never becomes a live lookup — renaming a vendor later
+ * must not rewrite an expense raised against the old name.
+ */
+const vendorFor = async (body) => {
+  const vendorId = pick(body, "vendor_id", "vendorId");
+  if (!vendorId) return { vendorId: null, vendorName: body.vendor || "" };
+  const vendor = await vendorRepo.findById(vendorId);
+  if (!vendor) throw httpErr(400, "Vendor not found");
+  return { vendorId: vendor.id, vendorName: vendor.name };
+};
 
 const createExpense = asyncHandler(async (req, res) => {
   const categoryId = req.body.category_id ?? req.body.categoryId ?? req.body.category;
@@ -162,19 +339,27 @@ const createExpense = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!Number.isFinite(amount) || amount < 0) throw httpErr(400, "Amount must be a positive number");
 
-  const { pfiId } = await applyCategoryPfi(categoryId);
+  const { pfiId } = await resolveBooking(categoryId, req.body.pfi_id ?? req.body.pfiId);
   const { actorId, actorName } = await actorFor(req);
+  const { vendorId, vendorName } = await vendorFor(req.body);
 
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
     category_id: Number(categoryId),
     expense_date: parseDate(req.body.expense_date ?? req.body.expenseDate) || new Date().toISOString(),
-    vendor: req.body.vendor || "",
+    vendor: vendorName,
+    vendor_id: vendorId,
+    tin_number: pick(req.body, "tin_number", "tinNumber") ?? "",
+    invoice_number: pick(req.body, "invoice_number", "invoiceNumber") ?? "",
     description: req.body.description || "",
+    // The money that leaves the bank. The invoice columns document it; they
+    // never replace it.
     amount: String(amount),
+    ...invoiceFigures(req.body),
     bank_paid_from: req.body.bank_paid_from ?? req.body.bankPaidFrom ?? "",
     receipt_reference: req.body.receipt_reference ?? req.body.receiptReference ?? "",
     payee_bank_name: req.body.payee_bank_name ?? req.body.payeeBankName ?? "",
+    bank_code: pick(req.body, "bank_code", "bankCode") ?? "",
     payee_account_number: req.body.payee_account_number ?? req.body.payeeAccountNumber ?? "",
     payee_account_name: req.body.payee_account_name ?? req.body.payeeAccountName ?? "",
     // A new request always enters at the start of the chain.
@@ -208,13 +393,24 @@ const updateExpense = asyncHandler(async (req, res) => {
   if (!existing) throw httpErr(404, "Expense not found");
   if (existing.deleted_at) throw httpErr(400, "This expense has been deleted");
 
+  // Anyone on the request may edit it; a paid one is closed to everybody.
+  // See chain.canEditExpense — the rule lives there with the rest of them.
+  const gate = chain.canEditExpense(existing, req.user);
+  if (!gate.ok) throw httpErr(gate.status, gate.message);
+
   const data = {};
 
-  // Changing the category re-points the PFI link — that is the whole mechanism.
+  // The account and the cargo are re-resolved together: moving a line onto an
+  // administrative account has to clear its PFI, and moving it onto a direct
+  // cost has to be given one. Touching either field runs the same check the
+  // create path runs.
   const categoryId = req.body.category_id ?? req.body.categoryId ?? req.body.category;
-  if (categoryId !== undefined) {
-    const { pfiId } = await applyCategoryPfi(categoryId);
-    data.category_id = Number(categoryId);
+  const bodyPfiId = req.body.pfi_id ?? req.body.pfiId;
+  if (categoryId !== undefined || bodyPfiId !== undefined) {
+    const effectiveCategory = categoryId !== undefined ? categoryId : existing.category_id;
+    const effectivePfi = bodyPfiId !== undefined ? bodyPfiId : existing.pfi_id;
+    const { pfiId } = await resolveBooking(effectiveCategory, effectivePfi);
+    data.category_id = Number(effectiveCategory);
     data.pfi_id = pfiId;
   }
 
@@ -228,10 +424,41 @@ const updateExpense = asyncHandler(async (req, res) => {
 
   const date = req.body.expense_date ?? req.body.expenseDate;
   if (date !== undefined) data.expense_date = parseDate(date);
-  if (req.body.vendor !== undefined) data.vendor = req.body.vendor;
-  if (req.body.description !== undefined) data.description = req.body.description;
-  const bank = req.body.bank_paid_from ?? req.body.bankPaidFrom;
-  if (bank !== undefined) data.bank_paid_from = bank;
+
+  // vendor_id and vendor move together — resolving one from the other here,
+  // rather than in the pass-through list below, keeps a stale `vendor` string
+  // in the same request body from ever winning over a freshly picked vendor_id.
+  if (pick(req.body, "vendor_id", "vendorId") !== undefined || req.body.vendor !== undefined) {
+    const { vendorId, vendorName } = await vendorFor(req.body);
+    data.vendor_id = vendorId;
+    data.vendor = vendorName;
+  }
+
+  // Everything else is a straight pass-through, in either casing. The invoice
+  // figures move as a set — recomputing one from a stale sibling is how a
+  // schedule ends up not adding up.
+  const TEXT_FIELDS = [
+    ["tin_number", "tinNumber"],
+    ["invoice_number", "invoiceNumber"],
+    ["description", "description"],
+    ["bank_paid_from", "bankPaidFrom"],
+    ["receipt_reference", "receiptReference"],
+    ["payee_bank_name", "payeeBankName"],
+    ["bank_code", "bankCode"],
+    ["payee_account_number", "payeeAccountNumber"],
+    ["payee_account_name", "payeeAccountName"],
+  ];
+  for (const [snake, camel] of TEXT_FIELDS) {
+    const value = pick(req.body, snake, camel);
+    if (value !== undefined) data[snake] = value;
+  }
+
+  const touchesInvoice = [
+    "amount_ex_vat", "amountExVat", "vat_amount", "vatAmount",
+    "invoice_amount", "invoiceAmount", "wht_deduction", "whtDeduction",
+    "wht_rate", "whtRate",
+  ].some((k) => req.body[k] !== undefined);
+  if (touchesInvoice) Object.assign(data, invoiceFigures(req.body));
 
   if (Object.keys(data).length === 0) {
     return res.json({ success: true, message: "Nothing to update", data: { expense: existing } });
@@ -257,8 +484,10 @@ const updateExpense = asyncHandler(async (req, res) => {
 
   // Only these fields are worth a diff; the rest is noise in the trail.
   const TRACKED = [
-    "expense_date", "category_id", "vendor", "description",
+    "expense_date", "category_id", "pfi_id", "vendor", "vendor_id", "description",
     "amount", "bank_paid_from", "receipt_reference",
+    "tin_number", "invoice_number", "amount_ex_vat", "vat_amount",
+    "invoice_amount", "wht_deduction", "wht_rate",
   ];
   const diff = {};
   for (const f of TRACKED) {
@@ -295,11 +524,43 @@ const updateExpense = asyncHandler(async (req, res) => {
   });
 });
 
+// Deletable up to "with CFO" — past that the chain has already spent effort
+// approving it, and a reject/send-back is the honest way to unwind it so the
+// paperwork remembers why, rather than the row just vanishing.
+/**
+ * Deletable until the money leaves.
+ *
+ * This was pending / changes_requested / verified, on the reasoning that past
+ * "With CFO" the chain has spent effort and a reject records why. In practice
+ * that left the officer who raised a request unable to withdraw their own
+ * mistake — a duplicate, a wrong payee — once anyone had approved it, and
+ * "reject" is the reviewer's verb, not the raiser's; it reads as a judgement
+ * on the request rather than as taking it back.
+ *
+ * A paid expense stays undeletable: once the bank has moved, the row is a
+ * record of what happened, not a proposal. Same line edit already draws, so
+ * the two rules now agree.
+ */
+const isDeletableStatus = (status) => status !== chain.STATUS.PAID;
+
 const deleteExpense = asyncHandler(async (req, res) => {
   const existing = await pfiExpenseRepo.findExpenseById(req.params.id);
   if (!existing) throw httpErr(404, "Expense not found");
   if (existing.deleted_at) {
     return res.json({ success: true, message: "Expense already deleted" });
+  }
+
+  const isOwner =
+    req.user?.id != null &&
+    Number(existing.added_by ?? existing.recorded_by) === Number(req.user.id);
+  if (!isOwner && !chain.canOversee(req.user)) {
+    throw httpErr(403, "You can only delete a request you raised");
+  }
+  if (!isDeletableStatus(existing.status)) {
+    throw httpErr(
+      400,
+      "This expense is paid and closed — it can no longer be deleted.",
+    );
   }
 
   const deleted = await pfiExpenseRepo.softDeleteExpense(existing.id);
@@ -329,6 +590,9 @@ const decorate = (rows, user) =>
     );
     return {
       ...e,
+      // Whoever raised it — a clean id the client can compare against its own
+      // user without duplicating the added_by/recorded_by fallback rule.
+      submitted_by_id: e.added_by ?? e.recorded_by ?? null,
       status_label: chain.STATUS_LABELS[e.status] || e.status,
       status_step: chain.STATUS_STEP[e.status] ?? 0,
       total_steps: chain.TOTAL_STEPS,
@@ -340,13 +604,99 @@ const decorate = (rows, user) =>
 const getExpense = asyncHandler(async (req, res) => {
   const expense = await pfiExpenseRepo.findExpenseFull(req.params.id);
   if (!expense || expense.deleted_at) throw httpErr(404, "Expense not found");
-  res.json({ success: true, data: { expense: decorate([expense], req.user)[0] } });
+  // Salaries and settlements pass through here, so the detail view is the chain
+  // plus the person who raised it — not every authenticated member of staff.
+  if (!chain.canSeeExpense(expense, req.user)) throw httpErr(403, "This request is not yours to view");
+
+  res.json({
+    success: true,
+    data: {
+      expense: decorate([expense], req.user)[0],
+      /** Anyone who can see it can join the conversation. */
+      can_comment: true,
+    },
+  });
+});
+
+// ─── The conversation ───────────────────────────────────────────────────────
+
+/**
+ * A reviewer's query and the requester's answer, on the request itself.
+ *
+ * Kept out of `review_note`, which holds only the newest reason and is cleared
+ * when a sent-back request is resubmitted — precisely when the exchange that
+ * caused it matters most.
+ */
+const listComments = asyncHandler(async (req, res) => {
+  const expense = await pfiExpenseRepo.findExpenseById(req.params.id);
+  if (!expense || expense.deleted_at) throw httpErr(404, "Expense not found");
+  if (!chain.canSeeExpense(expense, req.user)) throw httpErr(403, "This request is not yours to view");
+
+  const comments = await pfiExpenseRepo.listComments(expense.id);
+  res.json({ success: true, data: { comments } });
+});
+
+const addComment = asyncHandler(async (req, res) => {
+  const expense = await pfiExpenseRepo.findExpenseById(req.params.id);
+  if (!expense || expense.deleted_at) throw httpErr(404, "Expense not found");
+  if (!chain.canSeeExpense(expense, req.user)) throw httpErr(403, "This request is not yours to comment on");
+
+  const body = String(req.body.body ?? req.body.comment ?? "").trim();
+  if (!body) throw httpErr(400, "Write something first");
+  if (body.length > 2000) throw httpErr(400, "Keep a comment under 2000 characters");
+
+  const { actorId, actorName } = await actorFor(req);
+  const comment = await pfiExpenseRepo.addComment({
+    expenseId: expense.id, body, authorId: actorId, authorName: actorName,
+  });
+
+  // Everyone who has touched the request hears about it — including the person
+  // who raised it, which is the only way a query ever gets answered.
+  notifyExpenseComment({ expense, body, actorId, actorName }).catch(() => {});
+
+  res.status(201).json({ success: true, message: "Comment added", data: { comment } });
 });
 
 /**
  * The single path by which status moves. It is read-only on every other
  * endpoint — one writer, or the audit trail is fiction.
  */
+/**
+ * What the Expenditure Officer supplies when the money actually moves.
+ *
+ * Both are required, and for the same reason: a payment nobody can trace to an
+ * account, for an amount nobody recorded, is not a payment — it is a rumour.
+ * The amount is captured separately from `amount` rather than overwriting it,
+ * so the request and the settlement can be compared afterwards.
+ */
+const paymentFor = (body, existing) => {
+  const bank = String(pick(body, "bank_paid_from", "bankPaidFrom") ?? "").trim();
+  if (!bank) throw httpErr(400, "Say which account this was paid from");
+
+  const raw = pick(body, "amount_paid", "amountPaid");
+  const paid = money(raw ?? existing.amount);
+  if (paid === null || paid <= 0) throw httpErr(400, "Enter the amount actually paid");
+
+  const paymentNotes = String(pick(body, "payment_notes", "paymentNotes") ?? "").trim();
+  // A payment that settles for something other than what was approved needs a
+  // reason on the record — otherwise the variance is just a number nobody
+  // ever explained.
+  if (paid !== money(existing.amount) && !paymentNotes) {
+    throw httpErr(400, "Amount paid differs from the approved amount — explain why");
+  }
+
+  const paymentDate = parseDate(pick(body, "payment_date", "paymentDate")) || new Date().toISOString();
+
+  return {
+    bank_paid_from: bank,
+    amount_paid: String(paid),
+    payment_reference: String(pick(body, "payment_reference", "paymentReference") ?? "").trim(),
+    payment_date: paymentDate,
+    payment_method: String(pick(body, "payment_method", "paymentMethod") ?? "").trim(),
+    payment_notes: paymentNotes,
+  };
+};
+
 const reviewExpense = asyncHandler(async (req, res) => {
   const action = String(req.body.action || "");
   const note = String(req.body.note || "");
@@ -373,6 +723,10 @@ const reviewExpense = asyncHandler(async (req, res) => {
   const stamp = chain.STAGE_STAMPS[to];
   const now = new Date().toISOString();
 
+  // Validated before the transaction opens, so a missing bank or amount is a
+  // 400 that changes nothing rather than a rolled-back approval.
+  const payment = check.transition.capturesPayment ? paymentFor(req.body, existing) : null;
+
   // Status, stamps and the audit row are one unit: a transition that is not
   // recorded may as well not have happened.
   const updated = await client.begin(async (tx) => {
@@ -382,6 +736,7 @@ const reviewExpense = asyncHandler(async (req, res) => {
       reviewed_at: now,
       review_note: note || "",
       updated_at: now,
+      ...(payment || {}),
     };
     if (stamp) {
       const [byCol, atCol] = stamp;
@@ -390,10 +745,22 @@ const reviewExpense = asyncHandler(async (req, res) => {
       set[snake(atCol)] = now;
     }
     const [row] = await tx`UPDATE pfi_expenses SET ${tx(set)} WHERE id = ${existing.id} RETURNING *`;
+    // The settlement figures go into the trail too — "paid ₦96,250 of ₦100,000
+    // requested, from Zenith" is the fact anyone auditing this will want, and
+    // the row itself only ever holds the latest state.
+    const changes = { status: [existing.status, to], note };
+    if (payment) {
+      changes.amount_requested = existing.amount;
+      changes.amount_paid = payment.amount_paid;
+      changes.bank_paid_from = payment.bank_paid_from;
+      changes.payment_date = payment.payment_date;
+      if (payment.payment_reference) changes.payment_reference = payment.payment_reference;
+      if (payment.payment_method) changes.payment_method = payment.payment_method;
+      if (payment.payment_notes) changes.payment_notes = payment.payment_notes;
+    }
     await tx`
       INSERT INTO pfi_expense_audits (expense_id, action, changes, actor_id, actor_name)
-      VALUES (${existing.id}, ${to}, ${JSON.stringify({ status: [existing.status, to], note })},
-              ${actorId}, ${actorName})
+      VALUES (${existing.id}, ${to}, ${JSON.stringify(changes)}, ${actorId}, ${actorName})
     `;
     return row;
   });
@@ -417,12 +784,33 @@ const reviewExpense = asyncHandler(async (req, res) => {
 // metadata, so a receipt lives behind Cloudinary's URL rather than a public
 // MEDIA_URL path that 404s in production.
 
+/**
+ * A signed Cloudinary upload, scoped to expenses.
+ *
+ * The general `/uploads/signature` route sits behind `verifyStaff`, which
+ * admits only admin and super_admin — so the person actually holding the
+ * receipt could not upload it. This is the same signature under the same rule
+ * as raising a request: if you can raise one, you can attach its paperwork.
+ */
+const attachmentSignature = asyncHandler(async (req, res) => {
+  // `auto` so Cloudinary takes whatever it is handed — a PDF, a photo of a
+  // teller slip, a spreadsheet. Nothing here restricts type or size; a receipt
+  // is whatever the vendor gave them, and refusing it at upload just means it
+  // never gets attached at all.
+  const params = generateSignature({ folder: "soroman/expenses", resourceType: "auto" });
+  res.json({ success: true, data: params });
+});
+
 const listAttachments = asyncHandler(async (req, res) => {
+  const expense = await pfiExpenseRepo.findExpenseById(req.params.id);
+  if (!expense) throw httpErr(404, "Expense not found");
+  if (!chain.canSeeExpense(expense, req.user)) throw httpErr(403, "This request is not yours to view");
+
   const rows = await client`
     SELECT a.*, s.first_name || ' ' || s.surname AS uploaded_by_name
     FROM pfi_expense_attachments a
     LEFT JOIN staff s ON s.id = a.uploaded_by
-    WHERE a.expense_id = ${Number(req.params.id)}
+    WHERE a.expense_id = ${expense.id}
     ORDER BY a.uploaded_at
   `;
   res.json({ success: true, data: { attachments: rows } });
@@ -431,6 +819,9 @@ const listAttachments = asyncHandler(async (req, res) => {
 const addAttachments = asyncHandler(async (req, res) => {
   const expense = await pfiExpenseRepo.findExpenseById(req.params.id);
   if (!expense || expense.deleted_at) throw httpErr(404, "Expense not found");
+  if (!chain.canSeeExpense(expense, req.user)) {
+    throw httpErr(403, "This request is not yours to add files to");
+  }
 
   // Accepts one or many; the client uploads first, then registers here.
   const incoming = Array.isArray(req.body.files) ? req.body.files : [req.body].filter((f) => f?.url);
@@ -441,11 +832,11 @@ const addAttachments = asyncHandler(async (req, res) => {
   for (const f of incoming) {
     const [row] = await client`
       INSERT INTO pfi_expense_attachments
-        (expense_id, storage_key, file_name, content_type, size_bytes, uploaded_by)
+        (expense_id, storage_key, file_name, content_type, size_bytes, type, uploaded_by)
       VALUES (${expense.id}, ${f.url || f.secure_url || f.storageKey},
               ${f.fileName || f.original_filename || ""},
               ${f.contentType || f.resource_type || ""},
-              ${Number(f.sizeBytes || f.bytes || 0)}, ${actorId})
+              ${Number(f.sizeBytes || f.bytes || 0)}, ${f.type || null}, ${actorId})
       RETURNING *
     `;
     rows.push(row);
@@ -458,8 +849,20 @@ const addAttachments = asyncHandler(async (req, res) => {
 });
 
 const deleteAttachment = asyncHandler(async (req, res) => {
+  // Read before deleting: the file belongs to an expense, and not everyone who
+  // can call this route is on that expense.
+  const [existing] = await client`
+    SELECT * FROM pfi_expense_attachments WHERE id = ${Number(req.params.id)}
+  `;
+  if (!existing) throw httpErr(404, "Attachment not found");
+
+  const expense = await pfiExpenseRepo.findExpenseById(existing.expense_id);
+  if (expense && !chain.canSeeExpense(expense, req.user)) {
+    throw httpErr(403, "This request is not yours to remove files from");
+  }
+
   const [row] = await client`
-    DELETE FROM pfi_expense_attachments WHERE id = ${Number(req.params.id)} RETURNING *
+    DELETE FROM pfi_expense_attachments WHERE id = ${existing.id} RETURNING *
   `;
   if (!row) throw httpErr(404, "Attachment not found");
 
@@ -472,6 +875,7 @@ const deleteAttachment = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  attachmentSignature,
   listAttachments,
   addAttachments,
   deleteAttachment,
@@ -487,7 +891,10 @@ module.exports = {
   createExpense,
   updateExpense,
   deleteExpense,
+  listComments,
+  addComment,
   // Shared with the PFI controller's quick-add.
-  applyCategoryPfi,
+  resolveBooking,
   actorFor,
+  vendorFor,
 };

@@ -1,6 +1,27 @@
-const { eq, and, ilike, asc, desc, count, gte, lte } = require("drizzle-orm");
+const { eq, and, ilike, asc, desc, count, gte, lte, inArray, or, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { dailyReports } = require("../db/schema");
+const { dailyReports, depots, lpgStations, pfis, staff } = require("../db/schema");
+
+/**
+ * Who filed it, resolved against the staff table rather than trusted from the
+ * row.
+ *
+ * `submitted_by_name` is written at submission time, and for a long stretch
+ * that value was the filer's EMAIL — utils/actor.js used req.user.email as the
+ * display name because the name was not being carried onto req.user. 24 of the
+ * 416 reports on file still read as an address in the Staff column because of
+ * it.
+ *
+ * Reading through the join fixes every one of those without touching the
+ * stored data, and keeps the column current if someone's name is corrected
+ * later. The stored value remains the fallback: it is the only record of who
+ * filed a report whose staff row has since been deleted.
+ */
+const SUBMITTED_BY_NAME = sql`COALESCE(
+  NULLIF(TRIM(CONCAT_WS(' ', ${staff.firstName}, ${staff.surname})), ''),
+  NULLIF(${dailyReports.submittedByName}, ''),
+  ''
+)`.as("submittedByName");
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
 const SORTABLE = {
@@ -12,8 +33,45 @@ const SORTABLE = {
 };
 
 const findById = async (id) => {
-  const [row] = await db.select().from(dailyReports).where(eq(dailyReports.id, id)).limit(1);
+  const [row] = await db
+    .select({ ...dailyReports, submittedByName: SUBMITTED_BY_NAME })
+    .from(dailyReports)
+    .leftJoin(staff, eq(staff.id, dailyReports.submittedBy))
+    .where(eq(dailyReports.id, id))
+    .limit(1);
   return row || null;
+};
+
+/**
+ * A location/PFI-scoped viewer's reports are matched by name, not id —
+ * `daily_reports.location`/`pfi_number` are free text typed on the filing
+ * form, not foreign keys. Resolves the scope's depot/LPG-station ids to the
+ * names filers would have typed, plus every PFI number that scope reaches
+ * (held directly, or sitting at one of the scoped depots/stations).
+ */
+const scopedNames = async ({ depotIds = [], lpgStationIds = [], pfiIds = [] } = {}) => {
+  const [depotRows, stationRows, pfiRows] = await Promise.all([
+    depotIds.length ? db.select({ name: depots.name }).from(depots).where(inArray(depots.id, depotIds)) : [],
+    lpgStationIds.length
+      ? db.select({ name: lpgStations.name }).from(lpgStations).where(inArray(lpgStations.id, lpgStationIds))
+      : [],
+    pfiIds.length || depotIds.length || lpgStationIds.length
+      ? db
+          .select({ number: pfis.pfiNumber })
+          .from(pfis)
+          .where(
+            or(
+              pfiIds.length ? inArray(pfis.id, pfiIds) : sql`false`,
+              depotIds.length ? inArray(pfis.locationId, depotIds) : sql`false`,
+              lpgStationIds.length ? inArray(pfis.lpgStationId, lpgStationIds) : sql`false`,
+            ),
+          )
+      : [],
+  ]);
+  return {
+    locationNames: [...depotRows.map((r) => r.name), ...stationRows.map((r) => r.name)],
+    pfiNumbers: pfiRows.map((r) => r.number),
+  };
 };
 
 const findAll = async ({
@@ -33,11 +91,14 @@ const findAll = async ({
   dateTo,
   sort,
   order,
+  /** The authenticated caller — only set for a location/PFI-scoped viewer
+   * who otherwise has oversight of every report (see the controller). */
+  scopeUser,
   page = 1,
   limit = 50,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
@@ -49,12 +110,27 @@ const findAll = async ({
   if (dateFrom) conditions.push(gte(dailyReports.reportDate, dateFrom));
   if (dateTo) conditions.push(lte(dailyReports.reportDate, dateTo));
 
+  if (scopeUser && !scopeUser.canViewAllLocations) {
+    const { locationNames, pfiNumbers } = await scopedNames(scopeUser.scope);
+    const clauses = [];
+    if (locationNames.length) clauses.push(inArray(dailyReports.location, locationNames));
+    if (pfiNumbers.length) clauses.push(inArray(dailyReports.pfiNumber, pfiNumbers));
+    // Whatever the scope says, a person always sees the reports they filed
+    // themselves. Without this, someone scoped to a location that has since
+    // been renamed — or assigned nothing at all, which fell through to the
+    // fail-closed branch below — could not find a single report they had
+    // written, which reads as data loss rather than as a permission.
+    if (scopeUser.id != null) clauses.push(eq(dailyReports.submittedBy, Number(scopeUser.id)));
+    conditions.push(clauses.length ? or(...clauses) : sql`false`);
+  }
+
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select()
+      .select({ ...dailyReports, submittedByName: SUBMITTED_BY_NAME })
       .from(dailyReports)
+      .leftJoin(staff, eq(staff.id, dailyReports.submittedBy))
       .where(whereClause)
       .orderBy(
         (order === "asc" ? asc : desc)(SORTABLE[sort] || dailyReports.reportDate),

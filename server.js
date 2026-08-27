@@ -57,6 +57,14 @@ if (process.env.OTP_DEV_MODE === "true") {
   );
 }
 
+// Store-review static OTP: production-safe, but only for the allowlisted
+// numbers. Logged at boot so it is obvious this is still on after review.
+if (process.env.OTP_DEMO_CODE && process.env.OTP_DEMO_PHONES) {
+  console.warn(
+    "[otp] OTP_DEMO_CODE is set — store-review numbers accept a static code and no SMS is sent to them.",
+  );
+}
+
 // Turnstile is optional while the frontend catches up, but never silently off
 // in production: either a secret is set, or it is explicitly disabled with
 // TURNSTILE_ENABLED=false. This stops a missing secret from disabling the bot

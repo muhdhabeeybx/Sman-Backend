@@ -1,4 +1,5 @@
 const repo = require("../../repositories/bankStatement.repository");
+const { generateOrderReference } = require("../../utils/helpers");
 
 const ok = (res, data, message) => res.json({ success: true, message, data });
 const fail = (res, code, message) => res.status(code).json({ success: false, message });
@@ -71,6 +72,35 @@ async function listStatements(req, res) {
   return ok(res, { statements });
 }
 
+/**
+ * GET /api/bank-statements/:id/lines?page=&limit=&status=
+ *
+ * Every row of one upload with what became of it — which order took it and
+ * who matched it. The order reference is built the way the rest of the app
+ * builds it, so a reference read here finds the order it names.
+ */
+async function statementLines(req, res) {
+  const { page, limit, status } = req.query;
+  const result = await repo.listStatementLines({
+    statementId: Number(req.params.id),
+    page: page ? Number(page) : 1,
+    limit: limit ? Math.min(Number(limit), 200) : 25,
+    status: status || null,
+  });
+
+  return ok(res, {
+    ...result,
+    lines: result.lines.map((l) => ({
+      ...l,
+      order_reference:
+        l.order_id != null ? generateOrderReference(l.order_company, l.order_id) : null,
+      matched_by_name: l.matched_by_first_name
+        ? `${l.matched_by_first_name} ${l.matched_by_surname || ""}`.trim()
+        : null,
+    })),
+  });
+}
+
 /** DELETE /api/bank-statements/:id */
 async function deleteStatement(req, res) {
   const result = await repo.deleteStatement(Number(req.params.id));
@@ -113,6 +143,7 @@ module.exports = {
   saveMapping,
   uploadStatement,
   listStatements,
+  statementLines,
   deleteStatement,
   searchLines,
   matchLines,

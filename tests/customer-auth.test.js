@@ -28,6 +28,8 @@ const PHONES = {
   intl: "+447400123456",
   pending: "+2348111000007",
   scoping: "+2348111000008",
+  delete: "+2348111000009",
+  deleteBalance: "+2348111000010",
 };
 
 const { db } = require("../config/db");
@@ -504,6 +506,122 @@ describe("customer auth — register, OTP, enumeration safety", () => {
       assert.equal(res.status, 401);
     } finally {
       await customerRepo.update(customer.id, { status: "Active" });
+    }
+  });
+
+  // --- account deletion (App Store 5.1.1(v), OTP-gated) ---------------------
+
+  test("DELETE /account anonymizes after a deletion OTP", async () => {
+    const phone = PHONES.delete;
+    const stray = await customerRepo.findByPhone(phone);
+    if (stray) {
+      await customerRepo.update(stray.id, {
+        phone: `z${stray.id}`,
+        status: "Inactive",
+      });
+    }
+
+    const { accessToken, customer } = await signIn(phone, "Delete Me");
+    const customerId = customer.id;
+
+    const otpRes = await request(app)
+      .post(`${BASE}/account/request-otp`)
+      .set("Authorization", `Bearer ${accessToken}`);
+    assert.equal(otpRes.status, 200, JSON.stringify(otpRes.body));
+
+    const res = await request(app)
+      .delete(`${BASE}/account`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ code: DEV_CODE });
+
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.success, true);
+    assert.ok(res.body.data.deletedAt);
+
+    const after = await customerRepo.findById(customerId);
+    assert.equal(after.status, "Inactive");
+    assert.equal(after.name, "Deleted User");
+    assert.equal(after.phone, `deleted_${customerId}`);
+    assert.equal(after.email, "");
+    assert.equal(after.phoneVerifiedAt, null);
+
+    const me = await request(app)
+      .get(`${BASE}/me`)
+      .set("Authorization", `Bearer ${accessToken}`);
+    assert.equal(me.status, 401, "revoked session cannot keep browsing");
+
+    const reregister = await request(app)
+      .post(`${BASE}/register`)
+      .send({ phone, name: "Brand New" });
+    assert.equal(reregister.status, 200);
+
+    const fresh = await customerRepo.findByPhone(phone);
+    assert.ok(fresh);
+    assert.notEqual(fresh.id, customerId);
+    assert.equal(fresh.name, "Brand New");
+  });
+
+  test("a login OTP cannot delete the account", async () => {
+    const phone = PHONES.deleteBalance;
+    const { accessToken, customer } = await signIn(phone, "Wrong Purpose");
+
+    await request(app).post(`${BASE}/request-otp`).send({ phone });
+    const res = await request(app)
+      .delete(`${BASE}/account`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ code: DEV_CODE });
+
+    assert.equal(res.status, 401, JSON.stringify(res.body));
+    const after = await customerRepo.findById(customer.id);
+    assert.equal(after.phone, phone, "account must remain intact");
+    assert.equal(after.status, "Active");
+  });
+
+  test("DELETE /account requires a verification code", async () => {
+    const { accessToken } = await signIn(PHONES.deleteBalance);
+    const res = await request(app)
+      .delete(`${BASE}/account`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ confirm: "DELETE" });
+
+    assert.equal(res.status, 400);
+    assert.equal(res.body.success, false);
+  });
+
+  test("request-otp and delete refuse when the wallet still has a balance", async () => {
+    const phone = PHONES.deleteBalance;
+    const { accessToken, customer } = await signIn(phone, "Has Balance");
+    await customerRepo.update(customer.id, { balance: "150.00" });
+
+    try {
+      const otpRes = await request(app)
+        .post(`${BASE}/account/request-otp`)
+        .set("Authorization", `Bearer ${accessToken}`);
+      assert.equal(otpRes.status, 409, JSON.stringify(otpRes.body));
+      assert.match(otpRes.body.message, /wallet/i);
+      assert.match(otpRes.body.message, /₦150\.00/);
+
+      await customerRepo.update(customer.id, { balance: "0.00" });
+      await request(app)
+        .post(`${BASE}/account/request-otp`)
+        .set("Authorization", `Bearer ${accessToken}`);
+      await customerRepo.update(customer.id, { balance: "150.00" });
+
+      const res = await request(app)
+        .delete(`${BASE}/account`)
+        .set("Authorization", `Bearer ${accessToken}`)
+        .send({ code: DEV_CODE });
+
+      assert.equal(res.status, 409, JSON.stringify(res.body));
+      assert.match(res.body.message, /wallet/i);
+      assert.match(res.body.message, /₦150\.00/);
+      assert.ok(Array.isArray(res.body.data?.blockers));
+
+      const after = await customerRepo.findById(customer.id);
+      assert.equal(after.phone, phone, "PII must remain when deletion is blocked");
+      assert.equal(after.status, "Active");
+    } finally {
+      await customerRepo.update(customer.id, { balance: "0.00" });
     }
   });
 

@@ -1,12 +1,16 @@
 const asyncHandler = require("express-async-handler");
+const QRCode = require("qrcode");
 const {
   orderRepo,
   depotRepo,
   pfiRepo,
   truckRepo,
   orderTruckRepo,
+  orderPfiAllocationRepo,
+  ticketRepo,
   auditLogRepo,
 } = require("../../repositories");
+const { isWithinScope } = require("../../lib/scopeFilter");
 const { db } = require("../../config/db");
 const { sql } = require("drizzle-orm");
 const { pfiMovements } = require("../../db/schema");
@@ -32,6 +36,7 @@ const getOrders = asyncHandler(async (req, res) => {
     depot,
     dateFrom,
     dateTo,
+    scopeUser: req.user,
     page,
     limit,
   });
@@ -63,6 +68,13 @@ const createOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({
       success: false,
       message: "Please fill in all required fields to place the order",
+    });
+  }
+
+  if (!isWithinScope(req.user, "depotIds", depotId)) {
+    return res.status(403).json({
+      success: false,
+      message: "You cannot create orders for this location",
     });
   }
 
@@ -134,16 +146,30 @@ const releaseOrder = asyncHandler(async (req, res) => {
   }
 
   const released = await db.transaction(async (tx) => {
-    const updated = await orderStatus.transition(orderId, "Released", {
-      tx,
-      actor: { type: "staff", staffId: req.user.id },
-      set: { releasedAt: new Date(), releasedBy: req.user.id },
-      metadata: { truckCount: isDelivery ? trucks.length : 0 },
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    });
+    const current = await orderRepo.lockById(orderId, tx);
+    if (!current) throw httpErr(404, "Order not found");
 
-    if (isDelivery) {
+    // Payment releases an order on its own now (orderStatus.releaseOnPayment),
+    // so this desk action almost always arrives at an order that is already
+    // Released. That is a no-op, not a conflict — the caller came here to
+    // allocate trucks, which still runs below.
+    const updated =
+      current.status === "Released"
+        ? current
+        : await orderStatus.transition(orderId, "Released", {
+            tx,
+            actor: { type: "staff", staffId: req.user.id },
+            set: { releasedAt: new Date(), releasedBy: req.user.id },
+            metadata: { truckCount: isDelivery ? trucks.length : 0 },
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+
+    // Allocating again over an order that already carries loads would double
+    // them — the second call reports the first allocation instead.
+    const already = await orderTruckRepo.findByOrder(orderId, tx);
+
+    if (isDelivery && already.length === 0) {
       let index = 1;
       for (const t of trucks) {
         // A fleet truck contributes its registered plate; the stored plate is
@@ -227,11 +253,20 @@ const cancelOrder = asyncHandler(async (req, res) => {
 
 // --- The truck gate flow ----------------------------------------------------
 //
-// Three physical checkpoints move a released order through loading:
+// A load's life, and where each step happens:
 //
-//   gate-in  (security_entry)  pending  → gated_in   ; first truck ⇒ Released→Loading
-//   load     (ticketing)       gated_in → loaded     ; issues the per-truck ticket
-//   gate-out (security_exit)   loaded   → gated_out  ; last truck  ⇒ Loading→Completed
+//   generate-tickets (ticketing)  →  loaded     ; the ticket IS the loading
+//   gate-in   (security_entry)  loaded → gated_in   ; first truck ⇒ Released→Loading
+//   gate-out  (security_exit)  gated_in → gated_out ; last truck  ⇒ Loading→Completed
+//
+// `pending` is the odd one out: it is a fleet allocation captured at release
+// before its ticket exists. Ticketing turns it `loaded`; it may also be gated
+// in as-is, and the exit stamps the loading it never got.
+//
+// The separate `load` (ticketing) endpoint is what remains of a third
+// checkpoint. Nothing in the flow needs it now — it stays as the correction
+// desk for a truck swapped at the gantry, where the plate on the ticket must
+// change after the ticket was cut.
 //
 // Every action locks the ORDER row first (orderRepo.lockById), so concurrent
 // trucks on the same order serialise: exactly one sees the "first in" / "last
@@ -275,9 +310,11 @@ const gateInTruck = asyncHandler(async (req, res) => {
       // pickup truck the customer declared at order. Flip that specific one.
       const existing = await orderTruckRepo.findById(loadId, tx);
       if (!existing || existing.orderId !== orderId) throw httpErr(404, "Truck load not found on this order");
-      // Idempotent: a second entry reports the first rather than
+      // A truck may arrive ticketed (`loaded`, the normal case) or merely
+      // allocated (`pending`). Anything further along has been here already:
+      // idempotent, so a second entry reports the first rather than
       // overwriting the original timestamp.
-      if (existing.status !== "pending") {
+      if (existing.status !== "pending" && existing.status !== "loaded") {
         return { load: existing, alreadyEntered: true };
       }
       // The truck that actually arrived may differ from the one declared (a
@@ -370,11 +407,13 @@ const gateInTruck = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Truck gated in", data: { truck: load } });
 });
 
-// ticketing: the truck has loaded; issue its ticket. This is the LAST moment
-// the plate can change — trucks get swapped at the gantry (the declared one
-// broke down, another came), and the ticket must name the truck that actually
-// loaded. An optional truckNumber/driver here records that actual truck; the
-// change is audited and the ticket is generated from the corrected load.
+// ticketing: confirm the loading and issue the ticket if the load somehow has
+// none. Tickets are now cut at generation, so the flow no longer passes through
+// here — what it remains good for is the LAST moment the plate can change.
+// Trucks get swapped at the gantry (the declared one broke down, another came)
+// and the ticket must name the truck that actually loaded. An optional
+// truckNumber/driver here records that actual truck; the change is audited and
+// the ticket is generated from the corrected load.
 const markTruckLoaded = asyncHandler(async (req, res) => {
   const orderId = Number(req.params.id);
   const loadId = Number(req.params.loadId);
@@ -388,8 +427,8 @@ const markTruckLoaded = asyncHandler(async (req, res) => {
 
     const load = await orderTruckRepo.findById(loadId, tx);
     if (!load || load.orderId !== orderId) throw httpErr(404, "Truck load not found on this order");
-    if (load.status !== "gated_in") {
-      throw httpErr(409, `Truck is ${load.status}; only a gated-in truck can be marked loaded`);
+    if (load.status === "gated_out") {
+      throw httpErr(409, "Truck has already left the depot; its ticket can no longer be changed");
     }
 
     // optionalString yields "" for an omitted field — treat that as "not
@@ -398,7 +437,9 @@ const markTruckLoaded = asyncHandler(async (req, res) => {
     const updated = await orderTruckRepo.update(
       loadId,
       {
-        status: "loaded",
+        // A truck already through the entrance gate keeps that state — being
+        // marked loaded afterwards must not send it back outside.
+        ...(load.status === "gated_in" ? {} : { status: "loaded" }),
         loadedAt: new Date(),
         loadedBy: req.user.id,
         ...(truckNumber ? { truckNumber } : {}),
@@ -438,6 +479,72 @@ const markTruckLoaded = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Truck loaded and ticket issued", data: result });
 });
 
+// Correct a load's own details after the fact — quantity, plate, driver.
+// Deliberately separate from markTruckLoaded: that endpoint is the ticketing
+// desk's "confirm loaded" action and has side effects (status, a fresh
+// ticket); this one only ever touches the four columns on the load itself.
+const updateTruckLoad = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const loadId = Number(req.params.loadId);
+  const { truckNumber, quantity, driverName, driverPhone } = req.body;
+
+  const updated = await db.transaction(async (tx) => {
+    const order = await orderRepo.lockById(orderId, tx);
+    if (!order) throw httpErr(404, "Order not found");
+
+    const load = await orderTruckRepo.findById(loadId, tx);
+    if (!load || load.orderId !== orderId) throw httpErr(404, "Truck load not found on this order");
+    if (load.status === "gated_out") {
+      throw httpErr(409, "Truck has already left the depot; its ticket can no longer be changed");
+    }
+
+    if (quantity !== undefined) {
+      const others = await orderTruckRepo.findByOrder(orderId, tx);
+      const otherTotal = others
+        .filter((l) => l.id !== loadId)
+        .reduce((s, l) => s + Number(l.quantity), 0);
+      if (otherTotal + quantity > Number(order.quantity)) {
+        throw httpErr(
+          400,
+          `That puts total ticketed quantity at ${otherTotal + quantity}, above the order's ${order.quantity}`
+        );
+      }
+    }
+
+    const row = await orderTruckRepo.update(
+      loadId,
+      {
+        ...(quantity !== undefined ? { quantity: String(quantity) } : {}),
+        ...(truckNumber ? { truckNumber } : {}),
+        ...(driverName ? { driverName } : {}),
+        ...(driverPhone ? { driverPhone } : {}),
+      },
+      tx
+    );
+
+    await auditLogRepo.record(
+      {
+        entityType: "order_truck",
+        entityId: loadId,
+        action: "order_truck.details_corrected",
+        actor: { type: "staff", staffId: req.user.id },
+        metadata: {
+          orderId,
+          from: { truckNumber: load.truckNumber, quantity: load.quantity, driverName: load.driverName, driverPhone: load.driverPhone },
+          to: { truckNumber: row.truckNumber, quantity: row.quantity, driverName: row.driverName, driverPhone: row.driverPhone },
+        },
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      tx
+    );
+
+    return row;
+  });
+
+  res.json({ success: true, message: "Truck details updated", data: { truck: updated } });
+});
+
 // security_exit: the loaded truck leaves the depot.
 const gateOutTruck = asyncHandler(async (req, res) => {
   const orderId = Number(req.params.id);
@@ -455,22 +562,25 @@ const gateOutTruck = asyncHandler(async (req, res) => {
     if (load.status === "gated_out") {
       return { load, alreadyExited: true };
     }
-    // The ordering rule: a truck that never arrived cannot leave.
-    if (load.status === "pending") {
+    // The one ordering rule left: a truck that never arrived cannot leave.
+    if (load.status !== "gated_in") {
       throw httpErr(409, "Truck must be marked as entered before it can exit");
     }
-    // A truck that arrived but never loaded cannot leave. It must be marked
-    // loaded (ticketing) before it can pass through the exit gate.
-    if (load.status === "gated_in") {
-      throw httpErr(409, "Truck must be marked as loaded before it can exit");
-    }
+
+    // A load with no loading stamped is one security captured at the gate
+    // itself — a pickup truck the customer brought without a ticket. The exit
+    // stands in for the loading it never had: stamp it, issue the ticket, and
+    // audit it as a loading recorded at the gate.
+    const loadedHere = !load.loadedAt;
+    const exitedAt = parseWhen(req.body.exitedAt);
 
     const updated = await orderTruckRepo.update(
       loadId,
       {
         status: "gated_out",
-        securityExitedAt: parseWhen(req.body.exitedAt),
+        securityExitedAt: exitedAt,
         securityExitedBy: req.user.id,
+        ...(loadedHere ? { loadedAt: exitedAt, loadedBy: req.user.id } : {}),
         // Gantry the truck loaded from and the loader on duty, per the
         // security handover record.
         ...(req.body.gantry ? { gantry: String(req.body.gantry).trim() } : {}),
@@ -478,6 +588,21 @@ const gateOutTruck = asyncHandler(async (req, res) => {
       },
       tx
     );
+
+    if (loadedHere) {
+      await generateTicketForTruck(order, updated, tx);
+      await auditLogRepo.record(
+        {
+          entityType: "order_truck",
+          entityId: loadId,
+          action: "order_truck.loaded",
+          actor,
+          metadata: { orderId, truckNumber: updated.truckNumber, via: "gate-out" },
+          ...audit,
+        },
+        tx
+      );
+    }
 
     await auditLogRepo.record(
       {
@@ -491,11 +616,16 @@ const gateOutTruck = asyncHandler(async (req, res) => {
       tx
     );
 
-    // Last truck out completes the order. "Last" = no load remains in a
-    // non-terminal state. Under the order lock this is race-free.
+    // Last truck out completes the order — but only once the order's full
+    // quantity has actually been ticketed. "No load remains in a non-terminal
+    // state" alone isn't enough: if trucks were added in batches and only the
+    // first batch has gated out so far, that also reads as "none remaining"
+    // even though real litres are still unticketed. Under the order lock this
+    // is race-free.
     let completed = false;
     const remaining = await orderTruckRepo.countRemainingByOrder(orderId, tx);
-    if (remaining === 0 && order.status === "Loading") {
+    const ticketedQty = await orderTruckRepo.sumQuantityByOrder(orderId, tx);
+    if (remaining === 0 && ticketedQty >= Number(order.quantity) && order.status === "Loading") {
       await orderStatus.transition(orderId, "Completed", {
         tx,
         actor,
@@ -534,6 +664,12 @@ const gateOutTruck = asyncHandler(async (req, res) => {
  * they are removed explicitly first: tickets, commissions and wallet holds.
  * order_trucks, pfi_movements and pfi allocations cascade on their own;
  * delivery notes and WhatsApp sessions null their reference.
+ *
+ * The cascade drops the allocation rows but not what they reserved: a PFI's
+ * `sold_qty_litres` is only ever incremented by reserveStock and decremented
+ * by releaseStock, and neither runs just because a row disappeared. Every
+ * allocation is released explicitly, before the cascade, or the litres stay
+ * claimed on a PFI forever against an order that no longer exists.
  *
  * The audit row is written BEFORE the delete and survives it — audit_logs has
  * no foreign key to orders — so a deleted order still leaves a record of what
@@ -574,6 +710,33 @@ const deleteOrder = asyncHandler(async (req, res) => {
       tx
     );
 
+    // Give back whatever this order still had reserved, before the cascade
+    // takes the allocation rows with it and there is nothing left to read.
+    const allocations = await orderPfiAllocationRepo.findByOrderId(orderId, tx);
+    for (const alloc of allocations) {
+      await pfiRepo.releaseStock(alloc.pfiId, alloc.quantity, tx);
+    }
+
+    /**
+     * Hand the customer's money back before the hold row is destroyed.
+     *
+     * placeHold() takes the money out of customers.balance and the hold row is
+     * the only record that it is owed back. Deleting that row outright — which
+     * is what this did — left the balance permanently short with nothing on
+     * the ledger to show why.
+     *
+     * Order PU11486 is how it surfaced: ₦103,700,000, Paid, deleted on
+     * 2026-08-26. Its customer was left holding three unspent credits totalling
+     * exactly that and a balance of zero, so the money could not be put toward
+     * the replacement order and the credits looked lost.
+     *
+     * releaseHold does the whole reversal — credits the balance, marks the hold
+     * released, and returns each deposit's remainingAmount so the credits can
+     * fund something else. It is a no-op on a hold already converted, which is
+     * correct: that money genuinely left, and its debit row says so.
+     */
+    const released = await walletService.releaseHold(orderId, tx);
+
     // The three RESTRICT relations, which would otherwise block the delete.
     const counts = {};
     for (const table of ["tickets", "commissions", "wallet_holds"]) {
@@ -582,6 +745,7 @@ const deleteOrder = asyncHandler(async (req, res) => {
       );
       counts[table] = rows.length ?? rows.rowCount ?? 0;
     }
+    counts.walletReleased = released?.success ? Number(order.totalAmount) : 0;
 
     // Everything else cascades or nulls out via its own constraint.
     await tx.execute(sql`DELETE FROM orders WHERE id = ${orderId}`);
@@ -596,7 +760,7 @@ const deleteOrder = asyncHandler(async (req, res) => {
 });
 
 const getPayableOrders = asyncHandler(async (req, res) => {
-  const orders = await orderRepo.findPayableOrders();
+  const orders = await orderRepo.findPayableOrders(req.user);
   res.json({ success: true, data: { orders: await withExpiresAt(orders) } });
 });
 
@@ -681,7 +845,23 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
     // Read under the row lock, so a concurrent call cannot pick the same start.
     const startIndex = existing.reduce((max, l) => Math.max(max, Number(l.truckIndex || 0)), 0);
 
-    const created = [];
+    // The ticket IS the loading authority: a load leaves this desk already
+    // `loaded`, so security can take it straight in and out with no separate
+    // "mark loaded" step in between. `pending` is now only what a release-time
+    // fleet allocation looks like before its ticket is cut.
+    const loadedNow = { status: "loaded", loadedAt: new Date(), loadedBy: req.user.id };
+
+    // Two paths through this batch. A dup — a resubmission of a plate+quantity
+    // already on the order — is rare and handled per-row exactly as before.
+    // A genuinely new truck is the common case, and every new truck used to
+    // cost ~5 sequential round trips (create, find-existing-ticket, create
+    // ticket, QR write-back, audit row); batched below, the whole request
+    // costs a small constant number of round trips regardless of how many
+    // trucks are in it. `created` is filled by original index so the response
+    // still lists trucks in the order they were submitted.
+    const created = new Array(trucks.length);
+    const newRows = [];
+
     for (let i = 0; i < trucks.length; i++) {
       const t = trucks[i];
       const plate = String(t.truckNumber).trim();
@@ -696,38 +876,80 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
         (l) => l.truckNumber === plate && String(l.quantity) === String(t.quantity)
       );
       if (dup) {
+        const patch = {};
         if (dup.driverName !== driverName || dup.driverPhone !== driverPhone) {
-          await orderTruckRepo.update(dup.id, { driverName, driverPhone }, tx);
-          dup.driverName = driverName;
-          dup.driverPhone = driverPhone;
+          Object.assign(patch, { driverName, driverPhone });
+        }
+        // An allocation made at release is still `pending`; ticketing it now is
+        // what makes it loaded. A truck already at the gate keeps its own state.
+        if (dup.status === "pending") Object.assign(patch, loadedNow);
+        if (Object.keys(patch).length) {
+          Object.assign(dup, await orderTruckRepo.update(dup.id, patch, tx));
         }
         const ticket = await generateTicketForTruck(order, dup, tx);
-        created.push({ load: dup, ticket, alreadyExisted: true });
+        created[i] = { load: dup, ticket, alreadyExisted: true };
         continue;
       }
 
-      const load = await orderTruckRepo.create(
-        {
+      newRows.push({
+        index: i,
+        quantity: String(t.quantity),
+        data: {
           orderId,
           truckIndex: startIndex + i + 1,
           truckId: t.truckId ?? null,
-          truckNumber: String(t.truckNumber).trim(),
+          truckNumber: plate,
           quantity: String(t.quantity),
           compartments: t.compartments ?? null,
-          driverName: String(t.driverName).trim(),
-          driverPhone: String(t.driverPhone).trim(),
+          driverName,
+          driverPhone,
           loaderName: t.loaderName ?? null,
           loaderPhone: t.loaderPhone ?? null,
-          status: "pending",
+          ...loadedNow,
         },
+      });
+    }
+
+    if (newRows.length) {
+      // One round trip for every new load, instead of one per truck.
+      const newLoads = await orderTruckRepo.createMany(newRows.map((r) => r.data), tx);
+
+      // One round trip for every placeholder ticket — skips the per-truck
+      // "does this load already have a ticket" check, which can only ever be
+      // false for a load this same call just created.
+      const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+      const placeholderTickets = await ticketRepo.createMany(
+        newLoads.map((load) => ({
+          ticketNumber: `TCK-${order.id}-${load.truckIndex}`,
+          orderId: order.id,
+          orderTruckId: load.id,
+          status: "Active",
+          qrCodeDataUrl: "placeholder",
+        })),
         tx,
       );
 
-      const ticket = await generateTicketForTruck(order, load, tx);
-      created.push({ load, ticket });
+      // QR encoding is CPU-only, not a database call — run every truck's
+      // concurrently rather than serialising them behind awaits.
+      const qrCodeDataUrls = await Promise.all(
+        placeholderTickets.map((tk) =>
+          QRCode.toDataURL(`${clientUrl}/ticket/details?id=${tk.id}`, { margin: 1, width: 300 }),
+        ),
+      );
 
-      await auditLogRepo.record(
-        {
+      // One round trip to write every ticket's QR code back.
+      await ticketRepo.updateManyQrCodes(
+        placeholderTickets.map((tk, idx) => ({ id: tk.id, qrCodeDataUrl: qrCodeDataUrls[idx] })),
+        tx,
+      );
+      const finishedTickets = placeholderTickets.map((tk, idx) => ({
+        ...tk,
+        qrCodeDataUrl: qrCodeDataUrls[idx],
+      }));
+
+      // One round trip for every audit row.
+      await auditLogRepo.recordMany(
+        newLoads.map((load, idx) => ({
           entityType: "order_truck",
           entityId: load.id,
           action: "order_truck.ticket_generated",
@@ -736,14 +958,18 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
             orderId,
             truckIndex: load.truckIndex,
             truckNumber: load.truckNumber,
-            quantity: String(t.quantity),
+            quantity: newRows[idx].quantity,
             via: "generate-tickets",
           },
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        },
+        })),
         tx,
       );
+
+      newRows.forEach((r, idx) => {
+        created[r.index] = { load: newLoads[idx], ticket: finishedTickets[idx] };
+      });
     }
 
     // First generation moves the order onto the loading floor. Routed through
@@ -895,10 +1121,92 @@ const reconcileOrderEffects = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * POST /orders/:id/rematch-funding — point a paid order at the statement
+ * line(s) that actually paid for it.
+ *
+ * For the case the matching flow had no answer to: the wrong line was
+ * matched, the order is already paid, and a MATCHED line could never be
+ * released again — so the finance report named the wrong payment for that
+ * order permanently. See walletService.rematchOrderFunding for the ordering
+ * the money movement depends on.
+ */
+const rematchOrderFunding = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const { bankAccountId, lineIds, description } = req.body;
+
+  const order = await orderRepo.findById(orderId);
+  if (!order) throw httpErr(404, "Order not found");
+  if (order.paymentStatus !== "Paid") {
+    throw httpErr(409, "Only a paid order has a payment to re-match");
+  }
+
+  const result = await walletService.rematchOrderFunding({
+    orderId,
+    bankAccountId: Number(bankAccountId),
+    lineIds: lineIds.map(Number),
+    staffId: req.user?.id || null,
+    description: description || "",
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ success: false, message: result.message });
+  }
+
+  await auditLogRepo.record({
+    entityType: "order",
+    entityId: orderId,
+    action: "order.funding_rematched",
+    actor: { type: "staff", staffId: req.user.id },
+    metadata: {
+      replacedDepositIds: result.replacedDepositIds,
+      newDepositIds: result.newDeposits.map((d) => d.id),
+      lineIds: lineIds.map(Number),
+      newTotal: result.newTotal,
+    },
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({
+    success: true,
+    message: "Payment re-matched — the previous statement line is back in the unmatched pool",
+    data: {
+      newTotal: result.newTotal,
+      unattributed: result.unattributed,
+      replaced: result.replacedDepositIds.length,
+    },
+  });
+});
+
+// Edit anything about an order short of its status — reassign it to another
+// customer, move it to a different PFI, correct its date, quantity, price or
+// logistics text. See orderService.updateOrder for why status/paymentStatus
+// stay out of this (AUDIT H1) and how the wallet hold, commission snapshot
+// and PFI stock ledger are all kept in step with whatever changes.
+const updateOrder = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+
+  const updated = await orderService.updateOrder(orderId, req.body, {
+    actor: { type: "staff", staffId: req.user.id },
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+    scopeUser: req.user,
+  });
+
+  res.json({
+    success: true,
+    message: "Order updated",
+    data: { order: await withExpiresAt(await orderRepo.findByIdFull(updated.id)) },
+  });
+});
+
 module.exports = {
   getOrders,
   getOrderById,
   createOrder,
+  updateOrder,
+  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   generateOrderTickets,
@@ -906,6 +1214,7 @@ module.exports = {
   getOrderTrucks,
   gateInTruck,
   markTruckLoaded,
+  updateTruckLoad,
   gateOutTruck,
   getPayableOrders,
   deleteOrder,

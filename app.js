@@ -57,13 +57,17 @@ app.use("/api/products", require("./routes/administration/product.route"));
 app.use("/api/pfis", require("./routes/administration/pfi.route"));
 app.use("/api/expenses", require("./routes/administration/expense.route"));
 app.use("/api/customers", require("./routes/administration/customer.route"));
+app.use("/api/contacts", require("./routes/administration/contact.route"));
 app.use("/api/delivery-customers", require("./routes/administration/deliveryCustomer.route"));
 app.use("/api/delivery-inventory", require("./routes/administration/deliveryInventory.route"));
 app.use("/api/delivery-sales", require("./routes/administration/deliverySale.route"));
 app.use("/api/orders", require("./routes/administration/order.route"));
 app.use("/api/tickets", require("./routes/administration/ticket.route"));
 app.use("/api/deposits", require("./routes/administration/deposit.route"));
+app.use("/api/expected-payments", require("./routes/administration/expectedPayment.route"));
 app.use("/api/bank-accounts", require("./routes/administration/bankAccount.route"));
+app.use("/api/vendors", require("./routes/administration/vendor.route"));
+app.use("/api/finance-report", require("./routes/administration/financeReport.route"));
 app.use("/api/bank-statements", require("./routes/administration/bankStatement.route"));
 app.use("/api/settlements", require("./routes/administration/settlement.route"));
 app.use("/api/order-expiry", require("./routes/administration/orderExpiry.route"));
@@ -80,6 +84,7 @@ app.use("/api/uploads", require("./routes/administration/upload.route"));
 // Staff notifications: every signed-in staff member's own inbox, preferences
 // and push devices, plus the admin-only broadcast and delivery-log endpoints.
 app.use("/api/notifications", require("./routes/administration/notification.route"));
+app.use("/api/message-templates", require("./routes/administration/messageTemplate.route"));
 
 // Dangote orders
 app.use("/api", require("./routes/administration/dangoteOrder.route"));

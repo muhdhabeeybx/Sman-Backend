@@ -1,1 +1,0 @@
-ALTER TABLE "dangote_order_requests" DROP COLUMN "plant";

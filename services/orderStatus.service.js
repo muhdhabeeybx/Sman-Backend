@@ -222,4 +222,32 @@ async function transition(orderId, toStatus, opts = {}) {
   return updated;
 }
 
-module.exports = { TRANSITIONS, isLegal, transition, httpError };
+/**
+ * Release an order the instant its payment lands — Paid → Released, in the
+ * caller's payment transaction.
+ *
+ * Payment is the only condition for release in this business. The desk was
+ * clicking "release" on every paid order as a formality, and an order left
+ * sitting at Paid is invisible to ticketing (TICKETABLE is Released/Loading),
+ * so the formality was a stall. Running it inside the payment transaction means
+ * an order can never commit as Paid without also being Released.
+ *
+ * Trucks are NOT allocated here — they are captured at ticketing for a delivery
+ * order and at the gate for a pickup. The manual release endpoint still stands
+ * for a desk that would rather allocate the fleet up front.
+ *
+ * Deliberately NOT wrapped in a try/catch. Both moves belong to one atomic
+ * unit: the caller holds the order's row lock, so nothing can race the release,
+ * and the only way it can fail is a database error — which should take the
+ * payment down with it rather than commit a half-applied payment.
+ */
+async function releaseOnPayment(orderId, opts = {}) {
+  return transition(orderId, "Released", {
+    ...opts,
+    actor: opts.actor || { type: "system" },
+    set: { releasedAt: new Date(), ...(opts.set || {}) },
+    metadata: { trigger: "payment", ...(opts.metadata || {}) },
+  });
+}
+
+module.exports = { TRANSITIONS, isLegal, transition, releaseOnPayment, httpError };

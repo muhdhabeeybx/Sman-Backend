@@ -8,6 +8,8 @@ const {
   getOrders,
   getOrderById,
   createOrder,
+  updateOrder,
+  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   deleteOrder,
@@ -16,6 +18,7 @@ const {
   getOrderTrucks,
   gateInTruck,
   markTruckLoaded,
+  updateTruckLoad,
   gateOutTruck,
   getPayableOrders,
   payOrder,
@@ -39,6 +42,26 @@ router.get("/payable", verifyStaff, getPayableOrders);
 router.get("/", verifyStaff, validate({ query: orderSchemas.listOrders }), getOrders);
 router.get("/:id", verifyStaff, validate({ params: orderSchemas.idParam }), getOrderById);
 router.post("/", verifyStaff, validate({ body: orderSchemas.createOrder }), createOrder);
+
+// Edit anything about an order short of its status — customer, PFI, date,
+// quantity, price, logistics text. Open to any signed-in staff, same as the
+// reads/create above; the handler itself gates a PFI reassignment against
+// the caller's own PFI scope (see orderService.updateOrder).
+router.patch(
+  "/:id",
+  verifyStaff,
+  validate({ params: orderSchemas.idParam, body: orderSchemas.updateOrder }),
+  updateOrder
+);
+
+// Correcting which statement line is recorded against a paid order. Not a
+// lifecycle transition — the order stays paid and its hold is untouched.
+router.post(
+  "/:id/rematch-funding",
+  verifyStaff,
+  validate({ params: orderSchemas.idParam, body: orderSchemas.rematchFunding }),
+  rematchOrderFunding
+);
 
 // Lifecycle transitions are role-gated to the desk that owns the action, and
 // each flows through the state machine (see services/orderStatus.service.js).
@@ -101,6 +124,15 @@ router.post(
   requireRole("ticketing", "super_admin", { message: "Ticketing access required" }),
   validate({ params: orderSchemas.loadParam, body: orderSchemas.loadTruck }),
   markTruckLoaded
+);
+// Correct a load's own details after the fact — quantity, plate, driver.
+// Open to any signed-in staff, same as the order-edit route above; refused
+// once the truck has gated out (see updateTruckLoad).
+router.patch(
+  "/:id/trucks/:loadId",
+  verifyStaff,
+  validate({ params: orderSchemas.loadParam, body: orderSchemas.updateTruckLoad }),
+  updateTruckLoad
 );
 router.post(
   "/:id/trucks/:loadId/gate-out",

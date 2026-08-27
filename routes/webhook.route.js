@@ -50,44 +50,59 @@ router.post(
     }
 
     // 3. Process payment event
-    try {
-      const result = await processPaystackPayment(event.data, eventName);
-
-      // Auto-settle: credit landed in the customer's wallet — try to pay
-      // their oldest Pending order immediately so they don't wait for the
-      // batch settlement sweep.
-      if (result.success && result.customer?.id) {
-        processUnpaidOrdersForCustomer(result.customer.id).catch((err) =>
-          console.error("[webhook] auto-settle failed:", err.message)
-        );
-      }
-
-      if (webhookRecord) {
-        if (result.success) {
-          await webhookEventRepo.update(webhookRecord.id, {
-            status: "processed",
-            error: result.alreadyProcessed ? result.message : "",
-            processedAt: new Date(),
-          });
-          console.log(`Webhook ${eventName} processed:`, result.reference || result.message);
-        } else {
-          await webhookEventRepo.update(webhookRecord.id, {
-            status: "failed",
-            error: result.message,
-            processedAt: new Date(),
-          });
-          console.error(`Webhook ${eventName} failed:`, result.message);
-        }
-      }
-    } catch (procErr) {
-      console.error("Webhook processing error:", procErr.message);
-      if (webhookRecord) {
-        await webhookEventRepo.update(webhookRecord.id, {
-          status: "failed",
-          error: procErr.message,
-          processedAt: new Date(),
-        });
-      }
+    //
+    // Disabled — manual deposit only. Wallets no longer get funded by a
+    // Paystack DVA credit, so there is nothing for this webhook to settle;
+    // processPaystackPayment() is a stub (see payment.service.js) that
+    // always returns { success: false, disabled: true }. The event is still
+    // logged above for audit purposes. To reinstate, restore the block below
+    // and un-stub processPaystackPayment / processUnpaidOrdersForCustomer.
+    //
+    // try {
+    //   const result = await processPaystackPayment(event.data, eventName);
+    //
+    //   // Auto-settle: credit landed in the customer's wallet — try to pay
+    //   // their oldest Pending order immediately so they don't wait for the
+    //   // batch settlement sweep.
+    //   if (result.success && result.customer?.id) {
+    //     processUnpaidOrdersForCustomer(result.customer.id).catch((err) =>
+    //       console.error("[webhook] auto-settle failed:", err.message)
+    //     );
+    //   }
+    //
+    //   if (webhookRecord) {
+    //     if (result.success) {
+    //       await webhookEventRepo.update(webhookRecord.id, {
+    //         status: "processed",
+    //         error: result.alreadyProcessed ? result.message : "",
+    //         processedAt: new Date(),
+    //       });
+    //       console.log(`Webhook ${eventName} processed:`, result.reference || result.message);
+    //     } else {
+    //       await webhookEventRepo.update(webhookRecord.id, {
+    //         status: "failed",
+    //         error: result.message,
+    //         processedAt: new Date(),
+    //       });
+    //       console.error(`Webhook ${eventName} failed:`, result.message);
+    //     }
+    //   }
+    // } catch (procErr) {
+    //   console.error("Webhook processing error:", procErr.message);
+    //   if (webhookRecord) {
+    //     await webhookEventRepo.update(webhookRecord.id, {
+    //       status: "failed",
+    //       error: procErr.message,
+    //       processedAt: new Date(),
+    //     });
+    //   }
+    // }
+    if (webhookRecord) {
+      await webhookEventRepo.update(webhookRecord.id, {
+        status: "processed",
+        error: "Ignored: Paystack payments are disabled (manual deposit only)",
+        processedAt: new Date(),
+      });
     }
 
     res.sendStatus(200);

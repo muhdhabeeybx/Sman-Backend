@@ -15,6 +15,8 @@ const {
   handleListSessions,
   handleRevokeSession,
   handleGetMe,
+  handleRequestDeleteOtp,
+  handleDeleteAccount,
 } = require("../../controllers/portal/auth.controller");
 
 /**
@@ -52,5 +54,19 @@ router.get("/me", authenticateCustomer, handleGetMe);
 router.post("/logout-all", authenticateCustomer, handleLogoutAll);
 router.get("/sessions", authenticateCustomer, handleListSessions);
 router.delete("/sessions/:id", authenticateCustomer, validate({ params: authSchemas.sessionIdParam }), handleRevokeSession);
+// App Store 5.1.1(v): request a deletion OTP, then confirm with DELETE /account.
+router.post(
+  "/account/request-otp",
+  authenticateCustomer,
+  otpLimiter,
+  handleRequestDeleteOtp
+);
+router.delete(
+  "/account",
+  authenticateCustomer,
+  requireCsrfForCookieAuth("customer"),
+  validate({ body: authSchemas.deleteAccount }),
+  handleDeleteAccount
+);
 
 module.exports = router;

@@ -106,4 +106,23 @@ describe("customerOtp.repository — one live code, single use", () => {
     await customerOtpRepo.issue(customerId);
     assert.equal(await customerOtpRepo.countToday(), before + 1);
   });
+
+  test("auth and account_deletion codes do not clobber each other", async () => {
+    const auth = await customerOtpRepo.issue(customerId, {
+      purpose: customerOtpRepo.PURPOSE_AUTH,
+    });
+    const del = await customerOtpRepo.issue(customerId, {
+      purpose: customerOtpRepo.PURPOSE_ACCOUNT_DELETION,
+    });
+
+    const liveAuth = await customerOtpRepo.findLive(customerId, customerOtpRepo.PURPOSE_AUTH);
+    const liveDel = await customerOtpRepo.findLive(
+      customerId,
+      customerOtpRepo.PURPOSE_ACCOUNT_DELETION
+    );
+
+    assert.equal(liveAuth.id, auth.row.id);
+    assert.equal(liveDel.id, del.row.id);
+    assert.notEqual(liveAuth.id, liveDel.id);
+  });
 });

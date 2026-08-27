@@ -99,7 +99,17 @@ const verifyOtp = z.object({
   deviceName: optionalString("Device name", 255),
 });
 
+// Account deletion re-proves phone control with a purpose-scoped OTP (not a
+// typed "DELETE" string). Same length bounds as verifyOtp.code.
+const deleteAccount = z.object({
+  code: z
+    .string({ error: (iss) => (iss.input === undefined ? "Verification code is required" : "Verification code must be text") })
+    .trim()
+    .min(1, "Verification code is required")
+    .max(10, "Verification code is not valid"),
+});
+
 module.exports = {
   login, refresh, setPassword, forgotPassword, sessionIdParam,
-  register, requestOtp, verifyOtp,
+  register, requestOtp, verifyOtp, deleteAccount,
 };

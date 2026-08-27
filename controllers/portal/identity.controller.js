@@ -1,5 +1,5 @@
 const asyncHandler = require("express-async-handler");
-const { customerRepo, customerIdentityRepo, customerOtpRepo } = require("../../repositories");
+const { customerRepo, customerIdentityRepo } = require("../../repositories");
 const identityService = require("../../services/identity.service");
 const passkeyService = require("../../services/passkey.service");
 const sessionService = require("../../services/session.service");
@@ -90,7 +90,10 @@ const handlePasswordLogin = asyncHandler(async (req, res) => {
 
   const trusted = await identityService.isTrustedDevice(result.customer.id, deviceToken);
   if (!trusted) {
-    if (await otpService.isOverDailyCap()) {
+    if (
+      !otpService.isDemoAccount(result.customer.phone) &&
+      (await otpService.isOverDailyCap())
+    ) {
       return res.status(503).json({
         success: false,
         message: "Verification is temporarily unavailable. Please try again later.",
@@ -128,22 +131,8 @@ const handlePasswordStepUpVerify = asyncHandler(async (req, res) => {
   const customer = await customerRepo.findByPhone(e164);
   if (!customer || customer.status === "Inactive") return reject();
 
-  const live = await customerOtpRepo.findLive(customer.id);
-  if (!live) return reject();
-  if (live.attempts >= customerOtpRepo.MAX_ATTEMPTS) {
-    await customerOtpRepo.consume(live.id);
-    return reject();
-  }
-  const expected = customerOtpRepo.hashCode(customer.id, code);
-  if (expected !== live.codeHash) {
-    const updated = await customerOtpRepo.recordFailedAttempt(live.id);
-    if (updated && updated.attempts >= customerOtpRepo.MAX_ATTEMPTS) {
-      await customerOtpRepo.consume(live.id);
-    }
-    return reject();
-  }
-  const consumed = await customerOtpRepo.consume(live.id);
-  if (!consumed) return reject();
+  const verified = await otpService.verifyCode(customer.id, code, otpService.PURPOSE_AUTH);
+  if (!verified.ok) return reject();
 
   let deviceToken;
   if (trustDevice) {

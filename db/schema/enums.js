@@ -8,6 +8,22 @@ const customerStatusEnum = pgEnum("customer_status", [
   "Pending",
 ]);
 
+// A contact is someone we hold a number for who is not a customer. "lead" is
+// a sales prospect; "contact" is anyone else worth keeping (a haulier, a
+// depot officer, a referrer). Both are messageable — only the first is being
+// sold to. There is no "customer" member: becoming one is a phone match
+// against the customers table, not a value stored here. See
+// db/migrations/0005_contacts_and_leads.sql.
+const contactStageEnum = pgEnum("contact_stage", ["lead", "contact"]);
+
+const contactSourceEnum = pgEnum("contact_source", [
+  "manual",
+  "csv",
+  "referral",
+  "event",
+  "other",
+]);
+
 // Which realm a session belongs to. Drives the exclusive arc on `sessions`
 // and the domain separation of refresh-token hashes.
 const principalTypeEnum = pgEnum("principal_type", ["staff", "customer"]);
@@ -165,6 +181,24 @@ const depositStatusEnum = pgEnum("deposit_status_enum", [
 const paymentMethodEnum = pgEnum("payment_method", [
   "manual",
   "paystack_dva",
+]);
+
+/**
+ * How a filling-station remittance reached the bank.
+ *
+ * Kept apart from payment_method, which says who keyed the payment in
+ * (a person or the gateway); this says what kind of money movement it was.
+ * The column is nullable: every row written before this existed has no
+ * channel on record and must not be guessed at, so it reads as unspecified
+ * rather than being defaulted into one of these.
+ *
+ * The pairing is what the ledger reports on — bank charges are the
+ * difference between what the POS transacted and what the bank credited,
+ * which is only knowable once both sides of a day are entered.
+ */
+const depositChannelEnum = pgEnum("deposit_channel", [
+  "pos",
+  "bank_deposit",
 ]);
 
 const webhookStatusEnum = pgEnum("webhook_status", [
@@ -346,6 +380,8 @@ const notificationDeliveryStatusEnum = pgEnum("notification_delivery_status", [
 
 module.exports = {
   customerStatusEnum,
+  contactStageEnum,
+  contactSourceEnum,
   principalTypeEnum,
   auditActorTypeEnum,
   orderTruckStatusEnum,
@@ -367,6 +403,7 @@ module.exports = {
   loadingStatusEnum,
   depositStatusEnum,
   paymentMethodEnum,
+  depositChannelEnum,
   webhookStatusEnum,
   fleetEntryTypeEnum,
   customerIdentityProviderEnum,

@@ -1,23 +1,31 @@
 const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
-const { staffRepo, sessionRepo } = require("../../repositories");
+const { staffRepo, staffScopeRepo, sessionRepo } = require("../../repositories");
 const { notify, notifyAndWait } = require("../../notifications");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
 
 const REALM = "staff";
 
-const getAdminPayload = (user) => ({
-  id: user.id,
-  email: user.email,
-  firstName: user.firstName,
-  surname: user.surname,
-  roles: user.roles,
-  profilePicture: {
-    url: user.profilePictureUrl,
-    publicId: user.profilePicturePublicId,
-  },
-});
+// The sidebar/route-guard need canViewAllLocations and pageOverrides at login
+// (not just in the admin-management screens) to decide what this session can
+// see — so this payload builder needs the extra lookup, hence async.
+const getAdminPayload = async (user) => {
+  const pageOverrides = await staffScopeRepo.getAuthContext(user.id).then((ctx) => ctx.pageOverrides);
+  return {
+    id: user.id,
+    email: user.email,
+    firstName: user.firstName,
+    surname: user.surname,
+    roles: user.roles,
+    canViewAllLocations: user.canViewAllLocations,
+    pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed })),
+    profilePicture: {
+      url: user.profilePictureUrl,
+      publicId: user.profilePicturePublicId,
+    },
+  };
+};
 
 const handleLogin = asyncHandler(async (req, res) => {
   let { email, password } = req.body;
@@ -62,7 +70,7 @@ const handleLogin = asyncHandler(async (req, res) => {
     success: true,
     message: "Login successful",
     data: {
-      user: getAdminPayload(foundAdmin),
+      user: await getAdminPayload(foundAdmin),
       accessToken,
       // Omitted when the client declared X-Auth-Transport: cookie.
       ...(bodyToken !== undefined ? { refreshToken: bodyToken } : {}),
@@ -106,7 +114,7 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
     success: true,
     message: "Token refreshed",
     data: {
-      user: getAdminPayload(admin),
+      user: await getAdminPayload(admin),
       accessToken: result.accessToken,
       ...(bodyToken !== undefined ? { refreshToken: bodyToken } : {}),
       ...(csrfToken !== undefined ? { csrfToken } : {}),

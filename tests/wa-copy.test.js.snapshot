@@ -163,9 +163,9 @@ exports[`every copy string, pinned 1`] = `
     }
   },
   "orderPending": "Please wait while your order is being created.",
-  "orderCreated": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay by *Wed, 12 Aug, 16:42* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to your dedicated account:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO\\n\\nOnce your transfer reflects, tap *Pay now* below to confirm your order.",
-  "orderCreatedHoursOnly": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay within *24 hours* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to your dedicated account:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO\\n\\nOnce your transfer reflects, tap *Pay now* below to confirm your order.",
-  "payFailedInsufficient": "Not yet — there isn't enough in your wallet to cover this order. Please transfer to the dedicated account above, then tap *Pay now* again.",
+  "orderCreated": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay by *Wed, 12 Aug, 16:42* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO\\n\\nOnce Soroman confirms your transfer, tap *Pay now* below to confirm your order.",
+  "orderCreatedHoursOnly": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay within *24 hours* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO\\n\\nOnce Soroman confirms your transfer, tap *Pay now* below to confirm your order.",
+  "payFailedInsufficient": "Not yet — there isn't enough in your wallet to cover this order. Please transfer to the account above; once Soroman confirms it, tap *Pay now* again.",
   "payFailedGeneric": "We couldn't take the payment. Please try again, or transfer to the account above.",
   "orderExpired": "This order has expired. Payment was not received in time, so the price is no longer held. Please place a new order at current prices.",
   "orderExpiredButtons": {
@@ -177,9 +177,6 @@ exports[`every copy string, pinned 1`] = `
   "orderFailedStockSome": "We regret that part of the requested stock at Warri is no longer available. Please try a smaller quantity.",
   "orderFailedStockNone": "We regret that this product is no longer available at Warri. Please select another depot.",
   "orderFailedGeneric": "An error occurred while creating your order. Please note that no amount has been charged. Please try again shortly, or contact us on +234-800-SOROMAN.",
-  "devPaidPrompt": "Test mode: no real transfer is required. Select the button below to simulate payment.",
-  "devPaidButton": "I have paid (test)",
-  "devSimulating": "Simulating your transfer. Confirmation will follow shortly.",
   "awaitPaymentNudge": "We are still awaiting your transfer for order *SOR-1042*. Amount: ₦25,500,000. Bank: Wema Bank. Account Number: *9930001111*.\\n\\nPlease pay by *Wed, 12 Aug, 16:42* — after that this price is no longer held.",
   "awaitPaymentCancelButton": "Cancel this order",
   "payNowButton": "Pay now",

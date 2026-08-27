@@ -1,10 +1,11 @@
 const asyncHandler = require("express-async-handler");
-const { customerRepo, customerOtpRepo, sessionRepo } = require("../../repositories");
+const { customerRepo, sessionRepo } = require("../../repositories");
 const otpService = require("../../services/otp.service");
 const botCheck = require("../../services/botCheck.service");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
 const identityService = require("../../services/identity.service");
+const accountDeletionService = require("../../services/accountDeletion.service");
 const { toE164, checkSmsEligibility } = require("../../utils/phone");
 const { constantTimeFloor } = require("../../utils/timing");
 const { publicCustomer } = require("../../utils/publicCustomer");
@@ -76,10 +77,11 @@ const handleRegister = asyncHandler(async (req, res) => {
     });
   }
 
-  if (await otpService.isOverDailyCap()) {
+  if (!otpService.isDemoAccount(e164) && (await otpService.isOverDailyCap())) {
     // Global, not per-phone, so a 503 discloses nothing about any number — and
     // silently returning 200 would strand real customers with no signal to
-    // anyone that the budget is spent.
+    // anyone that the budget is spent. Demo-review numbers skip this: a spent
+    // SMS budget must not strand an App Store reviewer.
     return res.status(503).json({
       success: false,
       message: "Verification is temporarily unavailable. Please try again later.",
@@ -134,7 +136,7 @@ const handleRequestOtp = asyncHandler(async (req, res) => {
   const customer = e164 ? await customerRepo.findByPhone(e164) : null;
 
   if (customer) {
-    if (await otpService.isOverDailyCap()) {
+    if (!otpService.isDemoAccount(customer.phone) && (await otpService.isOverDailyCap())) {
       return res.status(503).json({
         success: false,
         message: "Verification is temporarily unavailable. Please try again later.",
@@ -156,8 +158,8 @@ const handleRequestOtp = asyncHandler(async (req, res) => {
 /**
  * POST /verify-otp — { phone, code }
  *
- * Completes either flow. Which one it was is answerable from
- * phone_verified_at, so the OTP row carries no `purpose`.
+ * Completes register or login. Purpose is always `auth` — deletion codes live
+ * under `account_deletion` and cannot mint a session here.
  */
 const handleVerifyOtp = asyncHandler(async (req, res) => {
   const { phone, code, trustDevice, deviceName } = req.body || {};
@@ -178,29 +180,8 @@ const handleVerifyOtp = asyncHandler(async (req, res) => {
   // and answered with the same rejection so nothing is disclosed.
   if (customer.status === "Inactive") return reject();
 
-  const live = await customerOtpRepo.findLive(customer.id);
-  if (!live) return reject();
-
-  if (live.attempts >= customerOtpRepo.MAX_ATTEMPTS) {
-    await customerOtpRepo.consume(live.id);
-    return reject();
-  }
-
-  const expected = customerOtpRepo.hashCode(customer.id, code);
-  if (expected !== live.codeHash) {
-    const updated = await customerOtpRepo.recordFailedAttempt(live.id);
-    // Burn the code at the cap rather than leaving it guessable for the rest
-    // of its ten-minute life.
-    if (updated && updated.attempts >= customerOtpRepo.MAX_ATTEMPTS) {
-      await customerOtpRepo.consume(live.id);
-    }
-    return reject();
-  }
-
-  // Guarded: two requests arriving with the correct code at the same moment
-  // must not both mint a session.
-  const consumed = await customerOtpRepo.consume(live.id);
-  if (!consumed) return reject();
+  const verified = await otpService.verifyCode(customer.id, code, otpService.PURPOSE_AUTH);
+  if (!verified.ok) return reject();
 
   // Proving control of the number IS the activation gate — there is no staff
   // approval step. `Pending` means "registered, phone not yet proven", and the
@@ -344,6 +325,101 @@ const handleGetMe = asyncHandler(async (req, res) => {
   return res.json({ success: true, data: { customer: publicCustomer(req.customer) } });
 });
 
+/**
+ * POST /account/request-otp — authenticated.
+ *
+ * Sends a purpose-scoped deletion code to the customer's phone. Blockers are
+ * checked first so we do not burn an SMS when deletion cannot proceed.
+ */
+const handleRequestDeleteOtp = asyncHandler(async (req, res) => {
+  const { blockers } = await accountDeletionService.collectBlockers(req.customer.id);
+  if (blockers.length > 0) {
+    return res.status(409).json({
+      success: false,
+      message: accountDeletionService.formatBlockerMessage(blockers),
+      data: { blockers },
+    });
+  }
+
+  if (
+    !otpService.isDemoAccount(req.customer.phone) &&
+    (await otpService.isOverDailyCap())
+  ) {
+    return res.status(503).json({
+      success: false,
+      message: "Verification is temporarily unavailable. Please try again later.",
+    });
+  }
+
+  const result = await otpService.issueAndSend(req.customer, {
+    action: "delete",
+    requestIp: req.ip,
+  });
+  if (!result.sent) {
+    console.warn(`[portal/auth] delete-otp: no code sent (${result.reason})`);
+    if (result.capped) {
+      return res.status(503).json({
+        success: false,
+        message: "Verification is temporarily unavailable. Please try again later.",
+      });
+    }
+    if (result.reason === "phone_rate_limited" || result.reason === "ip_rate_limited") {
+      return res.status(429).json({
+        success: false,
+        message: "Too many deletion codes requested. Please try again later.",
+      });
+    }
+  }
+
+  const payload = {
+    success: true,
+    message: "If that number can receive a code, one has been sent.",
+  };
+  const code = otpService.devCode();
+  if (code) payload.devCode = code;
+  return res.json(payload);
+});
+
+/**
+ * DELETE /account — { code }. App Store Guideline 5.1.1(v).
+ *
+ * Re-proves phone control with an account_deletion OTP, then anonymizes the
+ * customer tombstone and wipes auth surfaces. Ledger rows that legally/ops
+ * must stay keep the customer id; personal data does not.
+ */
+const handleDeleteAccount = asyncHandler(async (req, res) => {
+  const { code } = req.body || {};
+
+  const verified = await otpService.verifyCode(
+    req.customer.id,
+    code,
+    otpService.PURPOSE_ACCOUNT_DELETION
+  );
+  if (!verified.ok) {
+    return res.status(401).json({ success: false, message: "Invalid or expired code" });
+  }
+
+  const result = await accountDeletionService.deleteCustomerAccount(req.customer.id);
+
+  if (!result.ok) {
+    return res.status(result.status).json({
+      success: false,
+      message: result.message,
+      ...(result.blockers ? { data: { blockers: result.blockers } } : {}),
+    });
+  }
+
+  // Sessions are already revoked inside the service; drop the cookie so a
+  // browser client cannot keep refreshing into a dead principal.
+  cookieService.clearRefreshCookie(res, REALM);
+
+  return res.json({
+    success: true,
+    message: "Your account has been deleted.",
+    data: { deletedAt: result.deletedAt },
+  });
+});
+
 module.exports = {
   handleRegister,
   handleRequestOtp,
@@ -354,4 +430,6 @@ module.exports = {
   handleListSessions,
   handleRevokeSession,
   handleGetMe,
+  handleRequestDeleteOtp,
+  handleDeleteAccount,
 };

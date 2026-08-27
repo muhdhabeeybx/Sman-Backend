@@ -39,8 +39,12 @@ describe("customer portal — own profile", () => {
     assert.equal(res.status, 401);
   });
 
-  test("GET returns the customer with address and virtual account", async () => {
+  test("GET returns the customer with address; virtualAccount stays null by design", async () => {
     const { customer, accessToken } = await registerCustomer("1");
+    // Even a customer whose row still carries DVA columns gets null back:
+    // wallet funding is manual-deposit-only (orders show the depot's own
+    // bank account), and profilePayload deliberately keeps the field in the
+    // response shape but never populates it — see profile.controller.js.
     await customerRepo.update(customer.id, {
       address: "12 Depot Rd, Apapa",
       virtualAccountNumber: `99${String(RUN).slice(-8)}`,
@@ -52,7 +56,7 @@ describe("customer portal — own profile", () => {
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.equal(res.body.data.customer.address, "12 Depot Rd, Apapa");
     assert.equal(res.body.data.customer.companyName, "Profile Co");
-    assert.equal(res.body.data.virtualAccount.bank, "Test Bank");
+    assert.equal(res.body.data.virtualAccount, null, "always null while DVA funding is disabled");
     assert.ok(!("balance" in res.body.data.customer), "internal fields stay internal");
   });
 

@@ -61,6 +61,12 @@ const ROLE_MAP = {
   41: "lpg_viewer",
   42: "lpg_operator",
   43: "lpg_manager",
+
+  // Verifies and pays expenses — the "Expenses Officer" stage of the
+  // pfi_expenses approval chain (lib/expenseChain.js ROLE.OFFICER). Was
+  // already referenced there and in expenseNotifications.service.js; this is
+  // the id that makes it assignable.
+  44: "expenditure_officer",
 };
 
 const mapRolesToBackend = (numericRoles) => {

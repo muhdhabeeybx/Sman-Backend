@@ -4,7 +4,7 @@ const { lpgStationRepo } = require("../../repositories");
 const getLpgStations = asyncHandler(async (req, res) => {
   const { search, page = 1, limit = 50 } = req.query;
 
-  const result = await lpgStationRepo.findAll({ search, page, limit });
+  const result = await lpgStationRepo.findAll({ search, page, limit, scopeUser: req.user });
 
   const enrichedStations = await Promise.all(
     result.stations.map(async (station) => {

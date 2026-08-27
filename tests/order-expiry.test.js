@@ -9,7 +9,7 @@ const { eq } = require("drizzle-orm");
 const app = require("../app");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis, orders } = require("../db/schema");
-const { customerRepo, orderRepo, pfiRepo } = require("../repositories");
+const { customerRepo, orderRepo, pfiRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
 const { NATIVE_TRANSPORT, closeDb } = require("./helpers");
 
@@ -61,6 +61,17 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
       })
       .returning();
     depotId = depot.id;
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Expiry Depot Account",
+      accountNumber: `EXPACC${String(RUN).slice(-6)}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
 
     const [product] = await db
       .insert(products)
@@ -146,7 +157,9 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     await backdate(orderId, 100);
     await orderService.expireStaleOrders();
 
-    assert.equal((await orderRepo.findById(orderId)).status, "Paid", "a funded order never lapses");
+    // Paid orders are Released the moment they are paid, and neither status is
+    // reachable from the expiry sweep — only Pending lapses.
+    assert.equal((await orderRepo.findById(orderId)).status, "Released", "a funded order never lapses");
   });
 
   test("the window is set by ORDER_EXPIRY_HOURS", async () => {

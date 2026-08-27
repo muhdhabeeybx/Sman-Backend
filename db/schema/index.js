@@ -1,6 +1,7 @@
 const enums = require("./enums");
 const staffSchema = require("./staff");
 const customerSchema = require("./customer");
+const contactSchema = require("./contact");
 const driverSchema = require("./driver");
 // Before its dependents: orderTruck, driverTruckHistory and deliveryInventory
 // all destructure `fleetTrucks` at load time.
@@ -17,12 +18,22 @@ const depotProductPricesSchema = require("./depotProductPrices");
 const depotPriceHistorySchema = require("./depotPriceHistory");
 const driverTruckHistorySchema = require("./driverTruckHistory");
 const pfiSchema = require("./pfi");
+// After ./pfi and ./staff — pfiStaff destructures both at load time.
+const pfiStaffSchema = require("./pfiStaff");
 const orderSchema = require("./order");
-// After ./order — pfiExpense destructures `orders` at load time.
+const vendorSchema = require("./vendor");
+// After ./order and ./vendor — pfiExpense destructures `orders` and `vendors`
+// at load time.
 const pfiExpenseSchema = require("./pfiExpense");
 const orderPfiAllocationSchema = require("./orderPfiAllocation");
 const ticketSchema = require("./ticket");
 const depositSchema = require("./deposit");
+// After ./order and ./deposit — orderDepositAllocation destructures both at
+// load time.
+const orderDepositAllocationSchema = require("./orderDepositAllocation");
+// After ./customer, ./order, ./deposit, ./staff — expectedPayment
+// destructures all four at load time.
+const expectedPaymentSchema = require("./expectedPayment");
 const walletHoldSchema = require("./walletHold");
 const deliveryCustomerSchema = require("./deliveryCustomer");
 const deliveryNoteSchema = require("./deliveryNote");
@@ -56,11 +67,15 @@ const notificationSchema = require("./notification");
 const notificationDeliverySchema = require("./notificationDelivery");
 const notificationPreferenceSchema = require("./notificationPreference");
 const deviceTokenSchema = require("./deviceToken");
+const staffPageOverrideSchema = require("./staffPageOverride");
+// After ./staff — messageTemplate destructures it at load time.
+const messageTemplateSchema = require("./messageTemplate");
 
 module.exports = {
   ...enums,
   ...staffSchema,
   ...customerSchema,
+  ...contactSchema,
   ...driverSchema,
   ...depotSchema,
   ...productSchema,
@@ -74,11 +89,15 @@ module.exports = {
   ...depotPriceHistorySchema,
   ...driverTruckHistorySchema,
   ...pfiSchema,
+  ...pfiStaffSchema,
   ...orderSchema,
+  ...vendorSchema,
   ...pfiExpenseSchema,
   ...orderPfiAllocationSchema,
   ...ticketSchema,
   ...depositSchema,
+  ...orderDepositAllocationSchema,
+  ...expectedPaymentSchema,
   ...walletHoldSchema,
   ...deliveryCustomerSchema,
   ...deliveryNoteSchema,
@@ -111,4 +130,6 @@ module.exports = {
   ...notificationDeliverySchema,
   ...notificationPreferenceSchema,
   ...deviceTokenSchema,
+  ...staffPageOverrideSchema,
+  ...messageTemplateSchema,
 };

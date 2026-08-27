@@ -6,6 +6,11 @@ const { customerOtps } = require("../db/schema");
 const CODE_LENGTH = 6;
 const MAX_ATTEMPTS = 5;
 
+/** Register / login / password step-up. */
+const PURPOSE_AUTH = "auth";
+/** App Store account deletion confirmation. */
+const PURPOSE_ACCOUNT_DELETION = "account_deletion";
+
 /**
  * sha256(customerId + ":" + code).
  *
@@ -33,35 +38,46 @@ function generateCode() {
 }
 
 /**
- * Invalidate every unconsumed code for a customer, so at most one is ever live.
- * Called immediately before issuing a new one.
+ * Invalidate every unconsumed code for this customer+purpose, so at most one
+ * is ever live for that purpose. Auth and account_deletion do not clobber
+ * each other.
  */
-const invalidateLive = async (customerId, tx = db) => {
+const invalidateLive = async (customerId, purpose = PURPOSE_AUTH, tx = db) => {
   return tx
     .update(customerOtps)
     .set({ consumedAt: sql`now()` })
-    .where(and(eq(customerOtps.customerId, customerId), isNull(customerOtps.consumedAt)))
+    .where(
+      and(
+        eq(customerOtps.customerId, customerId),
+        eq(customerOtps.purpose, purpose),
+        isNull(customerOtps.consumedAt)
+      )
+    )
     .returning({ id: customerOtps.id });
 };
 
 /**
  * Issue a code. Invalidate-then-insert runs in one transaction so a concurrent
- * request cannot leave two live codes behind.
+ * request cannot leave two live codes behind for the same purpose.
  *
  * Returns { row, code } — `code` is the only time the plaintext exists; it goes
  * straight to the SMS service and is never logged or persisted.
  */
-const issue = async (customerId, { ttlMinutes = 10, requestIp = null, code: fixedCode } = {}) => {
+const issue = async (
+  customerId,
+  { ttlMinutes = 10, requestIp = null, code: fixedCode, purpose = PURPOSE_AUTH } = {}
+) => {
   // `code` is an override for the development bypass, which needs a
   // predictable value. It never shortcuts verification — the code is still
   // hashed, stored, expired and attempt-capped exactly as a random one is.
   const code = fixedCode || generateCode();
   return db.transaction(async (tx) => {
-    await invalidateLive(customerId, tx);
+    await invalidateLive(customerId, purpose, tx);
     const [row] = await tx
       .insert(customerOtps)
       .values({
         customerId,
+        purpose,
         codeHash: hashCode(customerId, code),
         expiresAt: sql`now() + make_interval(mins => ${ttlMinutes})`,
         requestIp,
@@ -71,14 +87,15 @@ const issue = async (customerId, { ttlMinutes = 10, requestIp = null, code: fixe
   });
 };
 
-/** The single live code for a customer, or null. */
-const findLive = async (customerId, tx = db) => {
+/** The single live code for a customer+purpose, or null. */
+const findLive = async (customerId, purpose = PURPOSE_AUTH, tx = db) => {
   const [row] = await tx
     .select()
     .from(customerOtps)
     .where(
       and(
         eq(customerOtps.customerId, customerId),
+        eq(customerOtps.purpose, purpose),
         isNull(customerOtps.consumedAt),
         gt(customerOtps.expiresAt, sql`now()`)
       )
@@ -146,6 +163,8 @@ const deleteExpiredBefore = async (cutoff) => {
 module.exports = {
   CODE_LENGTH,
   MAX_ATTEMPTS,
+  PURPOSE_AUTH,
+  PURPOSE_ACCOUNT_DELETION,
   hashCode,
   generateCode,
   invalidateLive,

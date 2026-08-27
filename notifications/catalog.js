@@ -371,6 +371,30 @@ function expenseStages() {
         `${smsPrefix()}${expenseRef(d)} (${what(d)}) sent back for changes.` +
         `${d.note ? ` Reason: ${d.note}` : ""}`,
     },
+
+    /**
+     * Someone said something on the request. Email only: a comment is a
+     * conversation, and texting every participant on every remark is how people
+     * learn to ignore the channel that also carries the approvals.
+     */
+    "expense.comment": {
+      ...base,
+      priority: "normal",
+      channels: APP_AND_EMAIL,
+      title: (d) => `${who(d)} commented on an expense`,
+      body: (d) => d.note || what(d),
+      email: (d) =>
+        mail(d, {
+          subject: "New comment on an expense request",
+          heading: `${who(d)} commented on this expense request`,
+          lead: `${who(d)} left a comment on a request you are involved in.`,
+          rows: [
+            { label: "Comment", value: d.note },
+            { label: "Stage", value: d.label },
+          ],
+          note: "Reply from the Expenses page — everyone on the request will see it.",
+        }),
+    },
   };
 }
 
@@ -1426,6 +1450,25 @@ const CATALOG = {
     data: (d) => ({ screen: "Announcement", ...(d.link ? { link: d.link } : {}) }),
     actionUrl: (d) => d.actionUrl || null,
     imageUrl: (d) => d.imageUrl || null,
+    // Only reached when a caller overrides `channels` to include email/sms
+    // (e.g. the messaging page) — the default APP_ONLY set above never
+    // touches either of these.
+    // proseEmail, not simpleEmail: the messaging composer's body can be
+    // multi-line (e.g. an inserted price list), and simpleEmail's `intro` is
+    // one <p> that would collapse every line break into a single paragraph.
+    email: (d) =>
+      proseEmail({
+        subject: d.title || "Announcement",
+        subtitle: "Announcement",
+        heading: d.title || "Announcement",
+        paragraphs: String(d.body || "").split("\n"),
+        cta: d.actionUrl ? { url: d.actionUrl, label: "Learn more" } : undefined,
+      }),
+    // Without this, the engine's defaultSmsText fallback sends
+    // "Soroman: {title}. {body}" — doubling up the title (composed for the
+    // email subject/in-app heading, not for a 160-char text) ahead of the
+    // body the sender actually wrote. Just the brand prefix + body instead.
+    sms: (d) => `${smsPrefix()}${String(d.body || d.title || "").trim()}`,
   },
 
   // ═══ Ported from Django's raw-HTML templates ══════════════════════════════
@@ -1588,6 +1631,33 @@ const CATALOG = {
         heading: `Daily Staff Sales Report — ${formatDate(d.reportDate)}`,
         rows: [{ label: "Reports submitted", value: String(d.rowCount ?? 0) }],
         emptyNote: !d.rowCount ? "No staff sales reports today." : null,
+        d,
+      }),
+  },
+
+  // Sent on demand from the Reports Hub's "Email report" button — the
+  // workbook is whatever the browser just built for the admin's current
+  // date/location/PFI filters, not a fixed daily job.
+  //
+  // data: reportDate, filename, attachmentBase64, reportCount, location, pfi
+  "reports.hub_email": {
+    audience: "staff",
+    category: "reports",
+    priority: "normal",
+    channels: EMAIL_ONLY,
+    title: (d) => `Reports Hub - ${formatDate(d.reportDate)}`,
+    body: (d) => `${d.reportCount ?? 0} report(s) for ${formatDate(d.reportDate)}.`,
+    entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
+    email: (d) =>
+      reportEmail({
+        subject: `Soroman Reports Hub - ${formatDate(d.reportDate)}`,
+        heading: `Reports Hub — ${formatDate(d.reportDate)}`,
+        rows: [
+          { label: "Reports", value: String(d.reportCount ?? 0) },
+          ...(d.location && d.location !== "all" ? [{ label: "Location", value: d.location }] : []),
+          ...(d.pfi && d.pfi !== "all" ? [{ label: "PFI", value: d.pfi }] : []),
+        ],
+        emptyNote: !d.reportCount ? "No reports filed for this date/filter." : null,
         d,
       }),
   },

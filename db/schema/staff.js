@@ -23,6 +23,10 @@ const staff = pgTable(
     passwordResetToken: text("password_reset_token"),
     passwordResetExpires: timestamp("password_reset_expires", { withTimezone: true }),
     roles: text("roles").array().default(sql`ARRAY['admin']::text[]`).notNull(),
+    // Whether this user sees every depot/LPG-station/PFI, or only the ones
+    // assigned via depot_staff/lpg_station_staff/pfi_staff. Defaults true so
+    // existing staff are unaffected until an admin explicitly scopes them.
+    canViewAllLocations: boolean("can_view_all_locations").default(true).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     suspended: boolean("suspended").default(false).notNull(),
     profilePictureUrl: text("profile_picture_url"),

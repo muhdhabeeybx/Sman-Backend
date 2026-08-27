@@ -1,7 +1,7 @@
 const z = require("zod");
 const {
   id, money, quantity, numberLike, requiredString, optionalString, optionalEmail,
-  enumOf, searchTerm, pagination,
+  enumOf, searchTerm, pagination, typeError,
 } = require("./fields");
 const { ROLE_MAP } = require("../config/roleMapping");
 
@@ -173,6 +173,22 @@ const staffBase = {
     .max(ROLE_COUNT, `A user cannot have more than ${ROLE_COUNT} roles`)
     .optional(),
   suspended: z.boolean({ error: "Suspended must be true or false" }).optional(),
+  // Location/PFI scope and per-page overrides — gated the same way as roles
+  // and suspended (see staff.controller.js#updateAdmin's changesPrivileges
+  // check), since they equally decide what an account may see or do.
+  can_view_all_locations: z.boolean({ error: "can_view_all_locations must be true or false" }).optional(),
+  depot_ids: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
+  lpg_station_ids: z.array(z.union([id("LPG station id"), z.string(), z.number()])).optional(),
+  pfi_ids: z.array(z.union([id("PFI id"), z.string(), z.number()])).optional(),
+  page_overrides: z
+    .array(
+      z.object({
+        route_path: requiredString("Route path", 100),
+        allowed: z.boolean({ error: "allowed must be true or false" }),
+      })
+    )
+    .max(200, "Too many page overrides")
+    .optional(),
 };
 const createStaff = z.object({
   ...staffBase,
@@ -182,6 +198,34 @@ const createStaff = z.object({
 });
 const updateStaff = z.object(staffBase).partial();
 const listStaff = pagination.extend({ search: searchTerm });
+
+/**
+ * Self-service profile edit. A whitelist, not staffBase.partial(): schemas
+ * strip unknown keys, so email/roles/suspended/scope cannot reach the handler
+ * at all rather than merely being ignored by it.
+ */
+// Genuinely optional, NOT optionalString: that helper turns an absent field
+// into "", which on a partial update reads as "clear it" — saving just a name
+// change would have wiped the person's phone number and profile picture.
+const selfText = (label, max) =>
+  z.string({ error: typeError(label, "text") }).trim().max(max, `${label} must be ${max} characters or fewer`).optional();
+
+const updateMyProfile = z.object({
+  first_name: requiredString("First name", 100).optional(),
+  surname: requiredString("Surname", 100).optional(),
+  other_names: selfText("Other names", 200),
+  phone_number: selfText("Phone number", 30),
+  profile_picture_url: selfText("Profile picture URL", 1000),
+  profile_picture_public_id: selfText("Profile picture id", 255),
+});
+
+const changeMyPassword = z.object({
+  current_password: requiredString("Current password", 200),
+  new_password: requiredString("New password", 200).refine(
+    (v) => v.length >= 8,
+    "Your new password must be at least 8 characters",
+  ),
+});
 
 // --- bank accounts --------------------------------------------------------
 
@@ -197,21 +241,73 @@ const bankAccountBase = {
   isDefault: z.boolean({ error: "isDefault must be true or false" }).optional(),
   depotIds: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
   lpgStationIds: z.array(z.union([id("Station id"), z.string(), z.number()])).optional(),
+  /**
+   * Which areas of the app may collect into this account.
+   *
+   * Missing from this schema until now, and a schema here is a whitelist —
+   * unknown keys are stripped before the controller sees them (see
+   * middleware/validate.js). So ticking an account on the Expense Bank
+   * Accounts list sent `{usage: [...]}`, the validator removed it, the PATCH
+   * ran with an empty body, and the API answered 200. The dialog showed
+   * success and nothing had been written. Creating an account from that same
+   * dialog lost its usage tag the same way, so a new account was added and
+   * still did not appear on the list it was added from.
+   */
+  usage: z.array(enumOf("Usage", ["truck_sales", "expenses"])).optional(),
   notes: optionalString("Notes", 1000),
 };
 const createBankAccount = z.object(bankAccountBase);
 const updateBankAccount = z.object(bankAccountBase).partial();
 
+// --- vendors ----------------------------------------------------------------
+
+const vendorBase = {
+  name: requiredString("Vendor name", 255),
+  contactPerson: optionalString("Contact person", 255),
+  phone: optionalString("Phone", 50),
+  email: optionalString("Email", 255),
+  address: optionalString("Address", 1000),
+  bankName: optionalString("Bank name", 200),
+  accountNumber: optionalString("Account number", 50),
+  accountName: optionalString("Account name", 255),
+  taxId: optionalString("Tax/registration ID", 50),
+  status: enumOf("Status", ["Active", "Inactive"]).optional(),
+};
+const createVendor = z.object(vendorBase);
+const updateVendor = z.object(vendorBase).partial();
+
 // --- bank statements ------------------------------------------------------
+
+/** A 0-based column index — unlike `id()`, 0 is valid (the first column). */
+const columnIndex = (label) =>
+  numberLike(label).pipe(
+    z.number().int(`${label} must be a whole number`).min(0, `${label} must be zero or greater`)
+  );
 
 const createBankStatement = z.object({
   bankAccountId: id("Bank account"),
-  fileName: optionalString("File name", 255),
-  statementDate: optionalString("Statement date", 40),
-  lines: z.array(z.record(z.unknown())).optional(),
+  filename: optionalString("Filename", 255),
+  rows: z
+    .array(
+      z.object({
+        txnDate: requiredString("Transaction date", 40),
+        amount: numberLike("Amount"),
+        depositor: optionalString("Depositor", 255),
+        bankRef: optionalString("Bank reference", 255),
+        narration: optionalString("Narration", 1000),
+      })
+    )
+    .min(1, "At least one row is required"),
 });
 const bankStatementMapping = z.object({
-  mapping: z.record(z.unknown()),
+  headerRow: columnIndex("Header row").optional(),
+  dateColumn: columnIndex("Date column").optional().nullable(),
+  amountColumn: columnIndex("Amount column").optional().nullable(),
+  creditColumn: columnIndex("Credit column").optional().nullable(),
+  depositorColumn: columnIndex("Depositor column").optional().nullable(),
+  referenceColumn: columnIndex("Reference column").optional().nullable(),
+  narrationColumn: columnIndex("Narration column").optional().nullable(),
+  sampleHeaders: z.array(z.string()).optional(),
 });
 const matchBankLines = z.object({
   lineIds: z.array(id("Line id")).min(1, "At least one line is required"),
@@ -220,17 +316,73 @@ const matchBankLines = z.object({
 
 // --- expenses --------------------------------------------------------------
 
+/**
+ * An invoice figure. Blank stays blank — mapping it to "0.00" the way the PFI
+ * fields do would turn "no invoice was raised" into "an invoice worth nothing",
+ * and those read very differently on a payment schedule.
+ */
+/** A percentage between 0 and 100. Blank stays blank. */
+const optPercent = (label = "Rate") =>
+  z
+    .union([
+      numberLike(label).pipe(
+        z.number().min(0, `${label} cannot be negative`).max(100, `${label} cannot exceed 100%`)
+      ),
+      z.literal(""),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : Number(v)));
+
+const optInvoiceMoney = (label = "Amount") =>
+  z
+    .union([
+      money(label),
+      numberLike(label).pipe(z.number().nonnegative(`${label} cannot be negative`)).transform((v) => v.toFixed(2)),
+      z.literal(""),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : String(v)));
+
 const expenseBase = {
   // A description is genuinely optional — the category, vendor and amount
   // already identify the line, and forcing prose here just gets "expense".
   description: optionalString("Description", 500),
   amount: money("Amount", { min: 0.01 }),
-  // The category decides which cargo the line lands on, so it is the one
-  // field the create path actually needs. Accepted as an id in either casing.
+  // The GL account the cost is posted to. Accepted as an id in either casing.
   category: id("Category").optional().nullable(),
   category_id: id("Category").optional().nullable(),
   categoryId: id("Category").optional().nullable(),
+  // Which cargo carries the cost. Only honoured for a PFI/product-related
+  // account — the controller refuses it on any other, so it can never be used
+  // to slip an overhead into a batch's landed cost.
+  pfi_id: id("PFI").optional().nullable(),
+  pfiId: id("PFI").optional().nullable(),
   vendor: optionalString("Vendor", 255),
+  // Set when the requester picked (or saved) an entry from the vendor list;
+  // `vendor` above still carries the name — see expense.controller.js.
+  vendor_id: id("Vendor").optional().nullable(),
+  vendorId: id("Vendor").optional().nullable(),
+  tin_number: optionalString("TIN number", 30),
+  tinNumber: optionalString("TIN number", 30),
+  invoice_number: optionalString("Invoice number", 100),
+  invoiceNumber: optionalString("Invoice number", 100),
+  // The invoice behind the payment. `amount` above stays the money paid.
+  amount_ex_vat: optInvoiceMoney("Amount excluding VAT"),
+  amountExVat: optInvoiceMoney("Amount excluding VAT"),
+  vat_amount: optInvoiceMoney("VAT"),
+  vatAmount: optInvoiceMoney("VAT"),
+  invoice_amount: optInvoiceMoney("Invoice amount"),
+  invoiceAmount: optInvoiceMoney("Invoice amount"),
+  wht_deduction: optInvoiceMoney("WHT deduction"),
+  whtDeduction: optInvoiceMoney("WHT deduction"),
+  // The rate behind the deduction, as a percentage. Bounded rather than free:
+  // a "50" typed into a percent field is a decimal point away from a disaster.
+  wht_rate: optPercent("WHT rate"),
+  whtRate: optPercent("WHT rate"),
+  bank_code: optionalString("Bank code", 20),
+  bankCode: optionalString("Bank code", 20),
   expense_date: optionalString("Expense date", 40),
   expenseDate: optionalString("Expense date", 40),
   bank_paid_from: optionalString("Bank paid from", 255),
@@ -252,9 +404,39 @@ const updateExpense = z.object(expenseBase).partial();
 const categoryBase = {
   name: requiredString("Category name", 255),
   description: optionalString("Description", 500),
+  // The chart fields. Present here or the validator strips them before the
+  // controller ever sees them — a whitelist is only a whitelist if it lists
+  // everything the endpoint accepts.
+  gl_code: optionalString("GL code", 20),
+  glCode: optionalString("GL code", 20),
+  gl_group: optionalString("GL group", 40),
+  glGroup: optionalString("GL group", 40),
+  gl_subgroup: optionalString("GL subgroup", 60),
+  glSubgroup: optionalString("GL subgroup", 60),
 };
 const createCategory = z.object(categoryBase);
-const updateCategory = z.object(categoryBase).partial();
+
+/**
+ * A PATCH must be able to leave a field alone.
+ *
+ * `optionalString` turns an absent key into "", which is right on create and
+ * catastrophic here: a rename that omitted `gl_group` would arrive as a request
+ * to clear it. These keep `undefined` undefined, so only what was sent is
+ * touched.
+ */
+const chartField = (label, max) =>
+  z.string({ error: `${label} must be text` }).trim().max(max, `${label} must be ${max} characters or fewer`).optional();
+
+const updateCategory = z.object({
+  name: chartField("Category name", 255),
+  description: chartField("Description", 500),
+  gl_code: chartField("GL code", 20),
+  glCode: chartField("GL code", 20),
+  gl_group: chartField("GL group", 40),
+  glGroup: chartField("GL group", 40),
+  gl_subgroup: chartField("GL subgroup", 60),
+  glSubgroup: chartField("GL subgroup", 60),
+});
 
 // --- dangote products -----------------------------------------------------
 
@@ -313,6 +495,17 @@ const optPfiFloat = (label = "Volume") =>
     .optional()
     .transform((v) => (v === "" || v === null ? 0 : v === undefined ? undefined : Number(v)));
 
+/** Same as optPfiBlQty (nullable, not zero-defaulted) but without the whole-number constraint. */
+const optPfiBlFloat = (label = "Volume") =>
+  z
+    .union([
+      numberLike(label).pipe(z.number().nonnegative(`${label} cannot be negative`)),
+      z.literal(""),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : Number(v)));
+
 const optPfiMoney = (label = "Amount") =>
   z
     .union([
@@ -358,8 +551,12 @@ const pfiBase = {
   bl_qty_litres: optPfiBlQty("BL quantity"),
   qtyVolumeMt: optPfiFloat("Quantity volume (MT)"),
   qty_volume_mt: optPfiFloat("Quantity volume (MT)"),
+  blQtyMt: optPfiBlFloat("BL quantity (MT)"),
+  bl_qty_mt: optPfiBlFloat("BL quantity (MT)"),
   unitPrice: optPfiMoney("Unit price"),
   unit_price: optPfiMoney("Unit price"),
+  creditBalance: optPfiMoney("Credit balance"),
+  credit_balance: optPfiMoney("Credit balance"),
   auditOfficerId: optPfiId("Audit officer"),
   audit_officer: optPfiId("Audit officer"),
   audit_officer_id: optPfiId("Audit officer"),
@@ -423,9 +620,10 @@ module.exports = {
   listTickets, ticketIdOrCode,
   createStation, updateStation, listStations,
   createInventory, updateInventory, listInventory,
-  createStaff, updateStaff, listStaff,
+  createStaff, updateStaff, listStaff, updateMyProfile, changeMyPassword,
   createBankAccount, updateBankAccount,
   createBankStatement, bankStatementMapping, matchBankLines,
+  createVendor, updateVendor,
   createExpense, updateExpense, createCategory, updateCategory,
   createDangoteProduct, updateDangoteProduct,
   createPfi, updatePfi,

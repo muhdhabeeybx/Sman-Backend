@@ -1,1 +1,0 @@
-ALTER TABLE "wa_sessions" ADD COLUMN "failure_count" smallint DEFAULT 0 NOT NULL;

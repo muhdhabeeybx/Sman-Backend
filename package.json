@@ -17,6 +17,7 @@
     "db:check": "drizzle-kit check",
     "db:reset-test": "node scripts/reset-test-db.js",
     "check:migrations": "node scripts/check-migrations.js",
+    "db:apply-handwritten": "node scripts/apply-unjournaled-migrations.js",
     "test": "NODE_ENV=test CORS_ALLOW_NO_ORIGIN=true RATE_LIMIT_DISABLED=true SMS_ENABLED=false OTP_DEV_MODE=true OTP_DEV_CODE=000000 OTP_DAILY_SEND_CAP=1000000 OTP_REGISTER_PER_IP=1000000 OTP_LOGIN_PER_IP=1000000 node --test --test-concurrency=1 --test-force-exit \"tests/**/*.test.js\"",
     "test:watch": "node --test --watch \"tests/**/*.test.js\"",
     "db:refresh": "bash scripts/refresh-local-from-prod.sh",

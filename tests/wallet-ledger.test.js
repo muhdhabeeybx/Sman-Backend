@@ -3,10 +3,18 @@ require("dotenv").config();
 
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { eq } = require("drizzle-orm");
+const { eq, inArray } = require("drizzle-orm");
 
 const { db } = require("../config/db");
-const { customers, depots, products, orders, walletHolds, deposits } = require("../db/schema");
+const {
+  customers,
+  depots,
+  products,
+  orders,
+  walletHolds,
+  deposits,
+  orderDepositAllocations,
+} = require("../db/schema");
 const walletService = require("../services/wallet.service");
 const { closeDb } = require("./helpers");
 
@@ -88,7 +96,15 @@ describe("wallet ledger", () => {
   });
 
   after(async () => {
-    // FK order: holds and deposits reference the customer and orders.
+    // FK order: allocations reference orders/deposits; holds reference orders.
+    const customerOrderIds = (
+      await db.select({ id: orders.id }).from(orders).where(eq(orders.customerId, customer.id))
+    ).map((row) => row.id);
+    if (customerOrderIds.length) {
+      await db
+        .delete(orderDepositAllocations)
+        .where(inArray(orderDepositAllocations.orderId, customerOrderIds));
+    }
     await db.delete(walletHolds).where(eq(walletHolds.customerId, customer.id));
     await db.delete(deposits).where(eq(deposits.customerId, customer.id));
     await db.delete(orders).where(eq(orders.customerId, customer.id));

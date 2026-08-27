@@ -3,12 +3,21 @@ const { customerRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
 
 const getCustomers = asyncHandler(async (req, res) => {
-  const { search, searchType, status, page = 1, limit = 50 } = req.query;
+  const {
+    search, searchType, status,
+    depotId, activity, hasBalance, optedOut, sort,
+    page = 1, limit = 50,
+  } = req.query;
 
   const result = await customerRepo.findAll({
     search,
     searchType,
     status,
+    depotId,
+    activity,
+    hasBalance,
+    optedOut,
+    sort,
     page,
     limit,
   });
@@ -49,18 +58,44 @@ const createCustomer = asyncHandler(async (req, res) => {
     });
   }
 
-  if (await customerRepo.existsByPhone(normalizedPhone)) {
+  // Names the customer already holding the number rather than just refusing.
+  // "That phone is taken" leaves the desk guessing whether they are looking at
+  // a duplicate of their own customer or somebody else's; the row itself
+  // answers it, and `existingCustomer` lets the form offer to open them.
+  const phoneOwner = await customerRepo.findByPhone(normalizedPhone);
+  if (phoneOwner) {
     return res.status(409).json({
       success: false,
-      message: `A customer with phone ${normalizedPhone} already exists`,
+      message: `${phoneOwner.name}${phoneOwner.companyName ? ` (${phoneOwner.companyName})` : ""} already uses ${normalizedPhone}`,
+      data: {
+        existingCustomer: {
+          id: phoneOwner.id,
+          name: phoneOwner.name,
+          phone: phoneOwner.phone,
+          email: phoneOwner.email,
+          companyName: phoneOwner.companyName,
+          balance: phoneOwner.balance,
+        },
+      },
     });
   }
 
   if (email && email.trim()) {
-    if (await customerRepo.existsByEmail(email)) {
+    const emailOwner = await customerRepo.findByEmail(email);
+    if (emailOwner) {
       return res.status(409).json({
         success: false,
-        message: `A customer with email ${email} already exists`,
+        message: `${emailOwner.name}${emailOwner.companyName ? ` (${emailOwner.companyName})` : ""} already uses ${email}`,
+        data: {
+          existingCustomer: {
+            id: emailOwner.id,
+            name: emailOwner.name,
+            phone: emailOwner.phone,
+            email: emailOwner.email,
+            companyName: emailOwner.companyName,
+            balance: emailOwner.balance,
+          },
+        },
       });
     }
   }
@@ -93,7 +128,7 @@ const updateCustomer = asyncHandler(async (req, res) => {
 
   const allowedFields = [
     "name", "email", "phone", "companyName", "address",
-    "status", "balance", "deposit", "previousDeposit",
+    "status", "balance", "deposit", "previousDeposit", "marketingOptOut",
   ];
 
   // Validate before building updateData, so an invalid number cannot be
@@ -141,6 +176,21 @@ const updateCustomer = asyncHandler(async (req, res) => {
   });
 });
 
+/** GET /api/customers/segments — the messaging page's audience preview + recipient source. */
+const getCustomerSegment = asyncHandler(async (req, res) => {
+  const { depotId, minOrders, sinceDays, inactiveSinceDays, limit } = req.query;
+
+  const result = await customerRepo.findForSegment({
+    depotId,
+    minOrders,
+    sinceDays,
+    inactiveSinceDays,
+    limit,
+  });
+
+  res.json({ success: true, data: result });
+});
+
 const deleteCustomer = asyncHandler(async (req, res) => {
   const customer = await customerRepo.findById(req.params.id);
 
@@ -169,4 +219,4 @@ const deleteCustomer = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Customer deleted successfully" });
 });
 
-module.exports = { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer };
+module.exports = { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getCustomerSegment };

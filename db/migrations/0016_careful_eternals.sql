@@ -1,2 +1,0 @@
-ALTER TABLE "dangote_order_requests" ADD COLUMN "payment_status" varchar(20) DEFAULT 'Unpaid' NOT NULL;--> statement-breakpoint
-ALTER TABLE "dangote_order_requests" ADD COLUMN "collection_status" varchar(20) DEFAULT 'Pending' NOT NULL;

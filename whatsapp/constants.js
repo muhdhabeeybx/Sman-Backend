@@ -81,8 +81,6 @@ const EFFECTS = Object.freeze({
   // button). Orders are always created Unpaid now, so this is how a
   // wallet-funded customer settles without a bank transfer.
   PAY_ORDER: "PAY_ORDER",
-  // Test environments only: the "I've paid" button simulates the transfer.
-  DEV_SIMULATE_PAYMENT: "DEV_SIMULATE_PAYMENT",
 });
 
 // Approved-template names (submitted to Meta in Phase C). Outside the 24-hour

@@ -20,6 +20,8 @@ const bankAccounts = pgTable("bank_accounts", {
   isDefault: boolean("is_default").default(false).notNull(),
   depotIds: jsonb("depot_ids").default([]).notNull(),
   lpgStationIds: jsonb("lpg_station_ids").default([]).notNull(),
+  /** Which areas may collect into this account: "truck_sales", "expenses". */
+  usage: jsonb("usage").default([]).notNull(),
   notes: text("notes").default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

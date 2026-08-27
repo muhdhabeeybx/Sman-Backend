@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, desc, count, gte, lte, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { deposits, customers, staff } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 const findById = async (id) => {
   const [row] = await db.select().from(deposits).where(eq(deposits.id, id)).limit(1);
@@ -45,13 +46,21 @@ const findByReference = async (reference) => {
   return row || null;
 };
 
-const findAll = async ({ customer, page = 1, limit = 50, type = "credit" } = {}) => {
+const findAll = async ({ customer, pfiId, page = 1, limit = 50, type = "credit", scopeUser } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(5000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+  // depotId/pfiId are only set where a deposit is unambiguously attributable
+  // (see db/schema/deposit.js) — a deposit split across several orders via
+  // order_deposit_allocations can't be pinned to one depot/PFI, so most rows
+  // stay null and are invisible to a scoped user until attributed some other
+  // way. Known v1 gap, not a bug.
+  const scope = scopeCondition(scopeUser, { depotColumn: deposits.depotId, pfiColumn: deposits.pfiId });
+  if (scope) conditions.push(scope);
   if (customer) conditions.push(eq(deposits.customerId, customer));
+  if (pfiId) conditions.push(eq(deposits.pfiId, pfiId));
   if (type) conditions.push(eq(deposits.type, type));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -107,7 +116,7 @@ const findAll = async ({ customer, page = 1, limit = 50, type = "credit" } = {})
  */
 const findCustomerHistory = async ({ customerId, page = 1, limit = 50, dateFrom, dateTo } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(200, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [eq(deposits.customerId, customerId)];

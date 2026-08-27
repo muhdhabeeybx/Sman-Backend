@@ -8,62 +8,70 @@ const getPaystackHeaders = () => ({
   "Content-Type": "application/json",
 });
 
-/**
- * Create or update a Paystack subaccount for a depot using the given bank
- * account details. Returns the subaccount code on success.
- */
-const createOrUpdateSubaccount = async (depot, bankAccount) => {
-  try {
-    const payload = {
-      business_name: depot.name,
-      settlement_bank: bankAccount.bankCode,
-      account_number: bankAccount.accountNumber,
-      percentage_charge: 0,
-      description: `Depot ${depot.code} - ${depot.name}`,
-    };
-
-    // If depot already has a subaccount code, update instead of create
-    if (depot.paystackSubaccountCode) {
-      const response = await axios.put(
-        `${PAYSTACK_BASE_URL}/subaccount/${depot.paystackSubaccountCode}`,
-        payload,
-        { headers: getPaystackHeaders() }
-      );
-
-      if (response.data.status) {
-        await depotRepo.updateSubaccountFields(depot.id, {
-          subaccountActive: true,
-        });
-        return { success: true, subaccountCode: depot.paystackSubaccountCode };
-      }
-
-      return { success: false, message: "Paystack update subaccount failed" };
-    }
-
-    // Create new subaccount
-    const response = await axios.post(
-      `${PAYSTACK_BASE_URL}/subaccount`,
-      payload,
-      { headers: getPaystackHeaders() }
-    );
-
-    if (response.data.status) {
-      const subaccountCode = response.data.data.subaccount_code;
-      await depotRepo.updateSubaccountFields(depot.id, {
-        paystackSubaccountCode: subaccountCode,
-        subaccountActive: true,
-      });
-      return { success: true, subaccountCode };
-    }
-
-    return { success: false, message: "Paystack create subaccount failed" };
-  } catch (error) {
-    const errMsg =
-      error.response?.data?.message || error.message || "Paystack error";
-    console.error("Paystack subaccount error:", errMsg);
-    return { success: false, message: errMsg };
-  }
-};
+/* --- Paystack depot subaccount (disabled — manual deposit only) -----------
+ * Created/updated a Paystack subaccount for a depot so a customer's DVA
+ * payment could auto-split to it. Customers now pay straight into the
+ * depot's own bank account (no Paystack in the loop), so there is nothing
+ * left to subaccount. Kept for reinstatement.
+ *
+ * const createOrUpdateSubaccount = async (depot, bankAccount) => {
+ *   try {
+ *     const payload = {
+ *       business_name: depot.name,
+ *       settlement_bank: bankAccount.bankCode,
+ *       account_number: bankAccount.accountNumber,
+ *       percentage_charge: 0,
+ *       description: `Depot ${depot.code} - ${depot.name}`,
+ *     };
+ *
+ *     // If depot already has a subaccount code, update instead of create
+ *     if (depot.paystackSubaccountCode) {
+ *       const response = await axios.put(
+ *         `${PAYSTACK_BASE_URL}/subaccount/${depot.paystackSubaccountCode}`,
+ *         payload,
+ *         { headers: getPaystackHeaders() }
+ *       );
+ *
+ *       if (response.data.status) {
+ *         await depotRepo.updateSubaccountFields(depot.id, {
+ *           subaccountActive: true,
+ *         });
+ *         return { success: true, subaccountCode: depot.paystackSubaccountCode };
+ *       }
+ *
+ *       return { success: false, message: "Paystack update subaccount failed" };
+ *     }
+ *
+ *     // Create new subaccount
+ *     const response = await axios.post(
+ *       `${PAYSTACK_BASE_URL}/subaccount`,
+ *       payload,
+ *       { headers: getPaystackHeaders() }
+ *     );
+ *
+ *     if (response.data.status) {
+ *       const subaccountCode = response.data.data.subaccount_code;
+ *       await depotRepo.updateSubaccountFields(depot.id, {
+ *         paystackSubaccountCode: subaccountCode,
+ *         subaccountActive: true,
+ *       });
+ *       return { success: true, subaccountCode };
+ *     }
+ *
+ *     return { success: false, message: "Paystack create subaccount failed" };
+ *   } catch (error) {
+ *     const errMsg =
+ *       error.response?.data?.message || error.message || "Paystack error";
+ *     console.error("Paystack subaccount error:", errMsg);
+ *     return { success: false, message: errMsg };
+ *   }
+ * };
+ * --------------------------------------------------------------------- */
+const createOrUpdateSubaccount = async () => ({
+  success: false,
+  disabled: true,
+  message: "Paystack subaccounts are disabled — depots are paid by manual deposit only",
+});
 
 /**
  * Deactivate a depot's subaccount (mark inactive in DB).
@@ -124,58 +132,65 @@ const syncSubaccountForDepot = async (depotId) => {
   }
 };
 
-/**
- * Create or update a Paystack subaccount for an LPG Station.
- */
-const createOrUpdateSubaccountForStation = async (station, bankAccount) => {
-  try {
-    const payload = {
-      business_name: station.name,
-      settlement_bank: bankAccount.bankCode,
-      account_number: bankAccount.accountNumber,
-      percentage_charge: 0,
-      description: `LPG Station ${station.code} - ${station.name}`,
-    };
-
-    if (station.paystackSubaccountCode) {
-      const response = await axios.put(
-        `${PAYSTACK_BASE_URL}/subaccount/${station.paystackSubaccountCode}`,
-        payload,
-        { headers: getPaystackHeaders() }
-      );
-
-      if (response.data.status) {
-        await lpgStationRepo.updateSubaccountFields(station.id, {
-          subaccountActive: true,
-        });
-        return { success: true, subaccountCode: station.paystackSubaccountCode };
-      }
-
-      return { success: false, message: "Paystack update station subaccount failed" };
-    }
-
-    const response = await axios.post(
-      `${PAYSTACK_BASE_URL}/subaccount`,
-      payload,
-      { headers: getPaystackHeaders() }
-    );
-
-    if (response.data.status) {
-      const subaccountCode = response.data.data.subaccount_code;
-      await lpgStationRepo.updateSubaccountFields(station.id, {
-        paystackSubaccountCode: subaccountCode,
-        subaccountActive: true,
-      });
-      return { success: true, subaccountCode };
-    }
-
-    return { success: false, message: "Paystack create station subaccount failed" };
-  } catch (error) {
-    const errMsg = error.response?.data?.message || error.message || "Paystack error";
-    console.error("Paystack station subaccount error:", errMsg);
-    return { success: false, message: errMsg };
-  }
-};
+/* --- Paystack LPG station subaccount (disabled — manual deposit only) -----
+ * Same story as createOrUpdateSubaccount above, for LPG stations. Kept for
+ * reinstatement.
+ *
+ * const createOrUpdateSubaccountForStation = async (station, bankAccount) => {
+ *   try {
+ *     const payload = {
+ *       business_name: station.name,
+ *       settlement_bank: bankAccount.bankCode,
+ *       account_number: bankAccount.accountNumber,
+ *       percentage_charge: 0,
+ *       description: `LPG Station ${station.code} - ${station.name}`,
+ *     };
+ *
+ *     if (station.paystackSubaccountCode) {
+ *       const response = await axios.put(
+ *         `${PAYSTACK_BASE_URL}/subaccount/${station.paystackSubaccountCode}`,
+ *         payload,
+ *         { headers: getPaystackHeaders() }
+ *       );
+ *
+ *       if (response.data.status) {
+ *         await lpgStationRepo.updateSubaccountFields(station.id, {
+ *           subaccountActive: true,
+ *         });
+ *         return { success: true, subaccountCode: station.paystackSubaccountCode };
+ *       }
+ *
+ *       return { success: false, message: "Paystack update station subaccount failed" };
+ *     }
+ *
+ *     const response = await axios.post(
+ *       `${PAYSTACK_BASE_URL}/subaccount`,
+ *       payload,
+ *       { headers: getPaystackHeaders() }
+ *     );
+ *
+ *     if (response.data.status) {
+ *       const subaccountCode = response.data.data.subaccount_code;
+ *       await lpgStationRepo.updateSubaccountFields(station.id, {
+ *         paystackSubaccountCode: subaccountCode,
+ *         subaccountActive: true,
+ *       });
+ *       return { success: true, subaccountCode };
+ *     }
+ *
+ *     return { success: false, message: "Paystack create station subaccount failed" };
+ *   } catch (error) {
+ *     const errMsg = error.response?.data?.message || error.message || "Paystack error";
+ *     console.error("Paystack station subaccount error:", errMsg);
+ *     return { success: false, message: errMsg };
+ *   }
+ * };
+ * --------------------------------------------------------------------- */
+const createOrUpdateSubaccountForStation = async () => ({
+  success: false,
+  disabled: true,
+  message: "Paystack subaccounts are disabled — stations are paid by manual deposit only",
+});
 
 const deactivateSubaccountForStation = async (stationId) => {
   await lpgStationRepo.updateSubaccountFields(stationId, {

@@ -1,2 +1,0 @@
-DROP INDEX "daily_reports_unique_idx";--> statement-breakpoint
-CREATE UNIQUE INDEX "daily_reports_unique_idx" ON "daily_reports" USING btree ("report_type","report_date","location","pfi_number","submitted_by");

@@ -7,7 +7,7 @@ const assert = require("node:assert/strict");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis, orders } = require("../db/schema");
 const { eq } = require("drizzle-orm");
-const { customerRepo, pfiRepo, orderRepo } = require("../repositories");
+const { customerRepo, pfiRepo, orderRepo, bankAccountRepo } = require("../repositories");
 const { placeOrder } = require("../services/order.service");
 const { closeDb } = require("./helpers");
 
@@ -36,6 +36,17 @@ describe("placeOrder idempotency — a redelivered request must not order twice"
       })
       .returning();
     depotId = depot.id;
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Idem Depot Account",
+      accountNumber: `IDMACC${String(RUN).slice(-6)}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
 
     const [product] = await db
       .insert(products)

@@ -7,7 +7,7 @@ const assert = require("node:assert/strict");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis, waSessions } = require("../db/schema");
 const { eq } = require("drizzle-orm");
-const { customerRepo, orderRepo, waMessageRepo, waSessionRepo } = require("../repositories");
+const { customerRepo, orderRepo, waMessageRepo, waSessionRepo, bankAccountRepo } = require("../repositories");
 const { normalizeInbound } = require("../whatsapp/normalize");
 const { processInbound, processSend, processEvent, performEffect } = require("../whatsapp/pipeline");
 const { INBOUND } = require("../whatsapp/constants");
@@ -60,6 +60,17 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
         establishedYear: "2020",
       })
       .returning();
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Pipe Depot Account",
+      accountNumber: `PIPACC${String(RUN).slice(-6)}`,
+      depotIds: [depot.id],
+      status: "Active",
+      isDefault: true,
+    });
 
     const [product] = await db
       .insert(products)
@@ -153,14 +164,9 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
   });
 
   test("confirm places a REAL order through placeOrder, idempotency key = wamid", async () => {
-    // The engine-created customer has no DVA; give them one so the test never
-    // reaches for Paystack (live flow would create it lazily inside placeOrder).
-    const customer = await customerRepo.findByPhone(PHONE);
-    await customerRepo.update(customer.id, {
-      virtualAccountNumber: `VPIPE${String(RUN).slice(-5)}`,
-      virtualAccountBank: "Test Bank",
-      virtualAccountName: "SOROMANNIGERI/ CO",
-    });
+    // Manual-deposit-only: placeOrder pays into the DEPOT's bank account
+    // (seeded in before()), never a per-customer DVA — the reply must carry
+    // the depot account number.
 
     const { wamid, session, outbound } = await say("confirm");
     assert.equal(session.state, "AWAIT_PAYMENT");
@@ -175,8 +181,8 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
 
     // The account details now ride ON the Pay now / Cancel buttons message —
     // one message, not a separate text before it.
-    const paymentMsg = outbound.find((m) => /VPIPE/.test(m.payload.body || ""));
-    assert.ok(paymentMsg, "the reply carries the dedicated account number");
+    const paymentMsg = outbound.find((m) => (m.payload.body || "").includes(`PIPACC${String(RUN).slice(-6)}`));
+    assert.ok(paymentMsg, "the reply carries the depot's deposit account number");
     assert.equal(paymentMsg.payload.kind, "buttons", "details ride on the Pay now / Cancel message");
   });
 
@@ -246,53 +252,6 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
     });
   });
 
-  test("the dev 'I've paid' effect settles the order through the real path", async () => {
-    const session = await waSessionRepo.findByPhone(PHONE);
-    assert.ok(session.lastOrderId, "an order exists from the confirm test");
-    const before = await orderRepo.findById(session.lastOrderId);
-    assert.equal(before.paymentStatus, "Unpaid");
-
-    await performEffect(
-      { type: "DEV_SIMULATE_PAYMENT", payload: { orderId: session.lastOrderId } },
-      { wamid: `wamid.PIPE-${RUN}-DEVPAY`, waPhone: PHONE }
-    );
-
-    const after = await orderRepo.findById(session.lastOrderId);
-    assert.equal(after.paymentStatus, "Paid", "wallet credit + real settlement paid it");
-    assert.equal(after.status, "Paid");
-  });
-
-  test("the dev 'I've paid' effect pays the tapped order, never an older unpaid one", async () => {
-    const customer = await customerRepo.findByPhone(PHONE);
-    // Two unpaid orders; the button is tapped on the SECOND (newest) one.
-    const older = (await placeOrder({
-      customerId: customer.id,
-      state: this.depot.state,
-      depotId: this.depot.id,
-      productId: this.product.id,
-      quantity: 2000,
-      deliveryType: "pickup",
-      trucks: [],
-    })).order;
-    const current = (await placeOrder({
-      customerId: customer.id,
-      state: this.depot.state,
-      depotId: this.depot.id,
-      productId: this.product.id,
-      quantity: 3000,
-      deliveryType: "pickup",
-      trucks: [],
-    })).order;
-
-    await performEffect(
-      { type: "DEV_SIMULATE_PAYMENT", payload: { orderId: current.id } },
-      { wamid: `wamid.PIPE-${RUN}-DEVPAY-CURRENT`, waPhone: PHONE }
-    );
-
-    assert.equal((await orderRepo.findById(current.id)).paymentStatus, "Paid", "the tapped order is paid");
-    assert.equal((await orderRepo.findById(older.id)).paymentStatus, "Unpaid", "the older order is left untouched");
-  });
-
   test("the PAY_ORDER effect settles an unpaid order from wallet balance", async () => {
     const customer = await customerRepo.findByPhone(PHONE);
     // A fresh, own order — Unpaid on creation, like every order now.
@@ -324,14 +283,16 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
     const paid = await orderRepo.findById(order.id);
     assert.equal(paid.paymentStatus, "Paid");
 
-    // A stale second tap is refused (already paid), re-entering as ORDER_FAILED
-    // reason=pay — the engine keeps the order and points at transfer.
+    // A stale second tap on an already-paid order RE-CONFIRMS rather than
+    // erroring: an order that is paid — whether by this tap's predecessor or
+    // by a bank-transfer settlement between menu render and tap — should tell
+    // the customer "payment received", never "we couldn't take the payment".
     const repeat = await performEffect(
       { type: "PAY_ORDER", payload: { orderId: order.id, customerId: customer.id } },
       { wamid: `wamid.PIPE-${RUN}-PAYNOW2`, waPhone: PHONE }
     );
-    assert.equal(repeat.type, INBOUND.ORDER_FAILED);
-    assert.equal(repeat.reason, "pay");
+    assert.equal(repeat.type, INBOUND.PAYMENT_CONFIRMED);
+    assert.equal(repeat.order.id, order.id);
   });
 
   test("a stale inbound recovered by the janitor is skipped, never replayed", async () => {

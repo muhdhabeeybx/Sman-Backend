@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
-const { authenticateStaff } = require("../../middleware/verifyStaff");
+const { authenticateStaff, requireRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const schemas = require("../../schemas/notification.schema");
 const ctrl = require("../../controllers/notification.controller");
@@ -62,7 +62,17 @@ router.post("/archive-all", authenticateStaff, validate({ body: schemas.markAllR
 router.post("/test", authenticateStaff, validate({ body: schemas.sendTest }), ctrl.sendTest);
 
 // ─── Admin-only ─────────────────────────────────────────────────────────────
-router.post("/broadcast", verifyStaff, validate({ body: schemas.broadcast }), admin.broadcast);
+// Reaching every customer (or every staff member) is a step up from reading
+// the delivery log, so this gets its own role gate on top of verifyStaff —
+// the same admin/super_admin line the frontend's /messaging route already
+// draws (src/lib/rbac.ts).
+router.post(
+  "/broadcast",
+  verifyStaff,
+  requireRole("admin", "super_admin"),
+  validate({ body: schemas.broadcast }),
+  admin.broadcast
+);
 router.get("/deliveries", verifyStaff, validate({ query: schemas.listDeliveries }), admin.listDeliveries);
 router.get("/health", verifyStaff, admin.health);
 router.get("/entity/:type/:id", verifyStaff, admin.forEntity);

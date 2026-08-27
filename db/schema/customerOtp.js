@@ -10,7 +10,7 @@ const {
 const { customers } = require("./customer");
 
 /**
- * One-time codes for customer phone authentication.
+ * One-time codes for customer phone proof.
  *
  * code_hash is SHA-256 over `customerId + ":" + code`, not bcrypt. A 6-digit
  * code has only 10^6 possibilities, so bcrypt buys nothing against an attacker
@@ -18,12 +18,9 @@ const { customers } = require("./customer");
  * forcing a fetch-all-and-compare loop that makes attempt accounting ambiguous.
  * Domain-separating with customerId prevents cross-account rainbow reuse.
  *
- * Requesting a new code invalidates every prior unconsumed code for that
- * customer, so at most one is ever live.
- *
- * There is deliberately no `purpose` column. Verification is identical for the
- * register and login flows, and "was this a signup?" is already answerable from
- * customers.phone_verified_at IS NULL.
+ * `purpose` separates auth (register / login / step-up) from account_deletion
+ * so a leftover login code cannot delete an account, and a deletion code cannot
+ * mint a session. At most one live code per (customer, purpose).
  */
 const customerOtps = pgTable(
   "customer_otps",
@@ -32,6 +29,8 @@ const customerOtps = pgTable(
     customerId: integer("customer_id")
       .references(() => customers.id, { onDelete: "cascade" })
       .notNull(),
+    // auth | account_deletion
+    purpose: varchar("purpose", { length: 32 }).default("auth").notNull(),
     codeHash: char("code_hash", { length: 64 }).notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     attempts: integer("attempts").default(0).notNull(),

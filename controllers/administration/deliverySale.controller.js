@@ -1,6 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const { deliverySaleRepo, deliveryCustomerRepo } = require("../../repositories");
-const { generateDeliveryCustomerDva } = require("../../services/deliveryCustomerDva.service");
+// Paystack DVA auto-generation is disabled — see createDeliverySale below.
+// Re-add this import if reinstating:
+// const { generateDeliveryCustomerDva } = require("../../services/deliveryCustomerDva.service");
 
 const getDeliverySales = asyncHandler(async (req, res) => {
   const { search, customer, truck_number, date_from, date_to, page = 1, limit = 500 } = req.query;
@@ -27,22 +29,28 @@ const getDeliverySaleById = asyncHandler(async (req, res) => {
 });
 
 const createDeliverySale = asyncHandler(async (req, res) => {
-  // Auto-generate DVA for the customer on first truck assignment (non-blocking)
-  if (req.body.customer) {
-    try {
-      const customer = await deliveryCustomerRepo.findById(req.body.customer);
-      if (customer && !customer.virtualAccountNumber) {
-        const dvaResult = await generateDeliveryCustomerDva(customer);
-        if (dvaResult.success) {
-          console.log(`DVA generated for customer ${customer.name}: ${dvaResult.data.accountNumber}`);
-        } else {
-          console.warn(`DVA generation failed for customer ${customer.name}: ${dvaResult.message}`);
-        }
-      }
-    } catch (dvaErr) {
-      console.warn("DVA auto-generation error (non-blocking):", dvaErr.message);
-    }
-  }
+  // Paystack DVA auto-generation (disabled — manual deposit only): delivery
+  // customers used to get a personal DVA on first truck assignment so a bank
+  // transfer could auto-credit their wallet. Wallet funding is
+  // manual-deposit-only now (staff record deposits from the admin
+  // dashboard), so there's nothing to auto-generate. Kept for
+  // reinstatement — restore this block and the import above.
+  //
+  // if (req.body.customer) {
+  //   try {
+  //     const customer = await deliveryCustomerRepo.findById(req.body.customer);
+  //     if (customer && !customer.virtualAccountNumber) {
+  //       const dvaResult = await generateDeliveryCustomerDva(customer);
+  //       if (dvaResult.success) {
+  //         console.log(`DVA generated for customer ${customer.name}: ${dvaResult.data.accountNumber}`);
+  //       } else {
+  //         console.warn(`DVA generation failed for customer ${customer.name}: ${dvaResult.message}`);
+  //       }
+  //     }
+  //   } catch (dvaErr) {
+  //     console.warn("DVA auto-generation error (non-blocking):", dvaErr.message);
+  //   }
+  // }
 
   const sale = await deliverySaleRepo.create(req.body);
   res.status(201).json({
@@ -50,6 +58,43 @@ const createDeliverySale = asyncHandler(async (req, res) => {
     message: "Delivery sale record created",
     data: { sale },
   });
+});
+
+/**
+ * Move a truck's overpayment onto other trucks.
+ *
+ * Its own route rather than two calls to the create endpoint: the debit and
+ * the credit have to land together, and a client that managed the second
+ * without the first would have created money. The repository also recomputes
+ * the available surplus from the table, so the amount is never taken on the
+ * caller's word.
+ */
+const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
+  const actor = req.user?.name || req.user?.email || "";
+  const result = await deliverySaleRepo.transferOverpayment({
+    from: req.body.from,
+    to: req.body.to,
+    actor,
+  });
+
+  res.status(201).json({
+    success: true,
+    message:
+      result.remaining > 0
+        ? `Transferred — ${result.remaining.toFixed(2)} of the overpayment is still unallocated`
+        : "Overpayment transferred",
+    data: result,
+  });
+});
+
+/** What one truck-cycle is owed and has taken, so the dialog can offer a cap. */
+const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
+  const standing = await deliverySaleRepo.cycleStanding({
+    truckNumber: req.query.truckNumber,
+    dateLoaded: req.query.dateLoaded,
+    customerId: req.query.customerId || null,
+  });
+  res.json({ success: true, data: standing });
 });
 
 const updateDeliverySale = asyncHandler(async (req, res) => {
@@ -67,6 +112,31 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * Confirm (or un-confirm) a hand-recorded deposit.
+ *
+ * Its own route because depositStatus is deliberately absent from the update
+ * schema — see the audit note in schemas/deliverySale.schema.js. The UI's
+ * toggle previously sent it on the update route, where zod stripped it, so
+ * the status never moved while the toast said it had.
+ */
+const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
+  const sale = await deliverySaleRepo.findById(req.params.id);
+  if (!sale) {
+    return res.status(404).json({ success: false, message: "Sale record not found" });
+  }
+
+  const updated = await deliverySaleRepo.update(sale.id, {
+    depositStatus: req.body.depositStatus,
+  });
+
+  res.json({
+    success: true,
+    message: `Deposit marked ${req.body.depositStatus}`,
+    data: { sale: updated },
+  });
+});
+
 const deleteDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {
@@ -80,5 +150,8 @@ module.exports = {
   getDeliverySaleById,
   createDeliverySale,
   updateDeliverySale,
+  setDeliverySaleDepositStatus,
   deleteDeliverySale,
+  transferDeliveryOverpayment,
+  getDeliveryCycleStanding,
 };

@@ -40,10 +40,20 @@ const pfis = pgTable(
     // Nullable with no default: null means "not entered yet", which is what
     // makes every downstream money figure read "—" instead of a false ₦0.
     blQtyLitres: integer("bl_qty_litres"),
-    qtyVolumeMt: real("qty_volume_mt").default(0),
+    // The same "not entered yet" figure as blQtyLitres, in MT — nullable with
+    // no default for the same reason: an unknown BL weight must not read as 0.
+    //
+    // Tonnage is decimal in reality (14832.20 MT) and these are
+    // display/reporting figures, so exact numeric — float4 cannot even
+    // represent 19863.55 and would show 19863.549805.
+    blQtyMt: decimal("bl_qty_mt", { precision: 14, scale: 2 }),
+    qtyVolumeMt: decimal("qty_volume_mt", { precision: 14, scale: 2 }).default("0"),
     soldQtyLitres: integer("sold_qty_litres").default(0).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).default("0"),
     unitPrice: decimal("unit_price", { precision: 15, scale: 2 }).default("0"),
+    // Rebate, discount or claim credited back against this cargo. Subtracted
+    // from total cost to get the grand total cost — see lib/pfiFinance.js.
+    creditBalance: decimal("credit_balance", { precision: 15, scale: 2 }).default("0"),
     // Officers (FK to staff)
     auditOfficerId: integer("audit_officer_id").references(() => staff.id, { onDelete: "set null" }),
     auditOfficerName: varchar("audit_officer_name", { length: 255 }).default(""),

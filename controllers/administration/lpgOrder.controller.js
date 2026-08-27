@@ -3,15 +3,19 @@ const {
   lpgOrderRequestRepo,
   lpgStationRepo,
   customerRepo,
+  bankAccountRepo,
 } = require("../../repositories");
 const {
   sendLpgRequestReceivedEmail,
   sendLpgOrderConfirmedEmail,
 } = require("../../services/email.service");
-const { createDedicatedAccount, switchCustomerDvaToSubaccount, transferToStationSubaccount } = require("../../services/payment.service");
+// Paystack DVA creation/subaccount-switch and the station auto-split
+// transfer are disabled — see the DVA block in reviewLpgOrderRequest and the
+// station-transfer block in payLpgOrder below. Re-add this import if
+// reinstating either:
+// const { createDedicatedAccount, switchCustomerDvaToSubaccount, transferToStationSubaccount } = require("../../services/payment.service");
 const { sendLpgOrderSMS } = require("../../services/sms.service");
 const { notify } = require("../../notifications");
-const { virtualAccountName: formatVirtualAccountName } = require("../../utils/helpers");
 const walletService = require("../../services/wallet.service");
 const lpgOrderStatus = require("../../services/lpgOrderStatus.service");
 const { withRequestExpiresAt, expireIfStale } = require("../../services/requestExpiry.service");
@@ -209,53 +213,74 @@ const reviewLpgOrderRequest = asyncHandler(async (req, res) => {
 
   const customer = await customerRepo.findById(existing.customerId);
 
-  let virtualAccountNumber = customer?.virtualAccountNumber || "";
-  let virtualAccountBank = customer?.virtualAccountBank || "";
-  let virtualAccountName = customer?.virtualAccountName || "";
+  /* --- Paystack DVA funding (disabled — manual deposit only) ---------------
+   * Every customer used to get a personal DVA on first LPG order approval,
+   * immediately split to the station's Paystack subaccount. Wallet funding
+   * is manual-deposit-only now; the station's own bank account (looked up
+   * below) is what shows on the confirmation email/SMS instead. Kept for
+   * reinstatement — restore this block, drop the station-bank-account lookup
+   * beneath it, and uncomment the payment.service.js import above.
+   *
+   * let virtualAccountNumber = customer?.virtualAccountNumber || "";
+   * let virtualAccountBank = customer?.virtualAccountBank || "";
+   * let virtualAccountName = customer?.virtualAccountName || "";
+   *
+   * if (!virtualAccountNumber && customer) {
+   *   try {
+   *     const accountResult = await createDedicatedAccount(customer);
+   *     if (accountResult.success) {
+   *       virtualAccountNumber = accountResult.data.accountNumber;
+   *       virtualAccountBank = accountResult.data.bankName;
+   *       virtualAccountName =
+   *         accountResult.data.accountName ||
+   *         formatVirtualAccountName(customer.name);
+   *       const updateData = {
+   *         virtualAccountNumber,
+   *         virtualAccountBank,
+   *         virtualAccountName,
+   *       };
+   *       if (accountResult.data.paystackCustomerId) {
+   *         updateData.paystackCustomerId = accountResult.data.paystackCustomerId;
+   *       }
+   *       await customerRepo.update(customer.id, updateData);
+   *     } else {
+   *       console.error("Failed to create DVA for customer:", accountResult.message);
+   *     }
+   *   } catch (dvaErr) {
+   *     console.error("DVA creation error:", dvaErr.message);
+   *   }
+   * } else if (!virtualAccountName && customer) {
+   *   virtualAccountName = formatVirtualAccountName(customer.name);
+   *   await customerRepo.update(customer.id, { virtualAccountName });
+   * }
+   *
+   * // Automatically switch customer DVA to LPG station Paystack Subaccount
+   * const station = await lpgStationRepo.findById(existing.lpgStationId);
+   * const stationSubaccountCode = station?.paystackSubaccountCode || station?.paystack_subaccount_code;
+   * if (virtualAccountNumber && stationSubaccountCode && customer) {
+   *   try {
+   *     await switchCustomerDvaToSubaccount({
+   *       accountNumber: virtualAccountNumber,
+   *       subaccountCode: stationSubaccountCode,
+   *     });
+   *     await customerRepo.update(customer.id, { dvaSubaccountCode: stationSubaccountCode });
+   *   } catch (dvaErr) {
+   *     console.error(`[reviewLpgOrderRequest] Failed to switch DVA to subaccount for station ${station?.id}:`, dvaErr.message);
+   *   }
+   * }
+   * --------------------------------------------------------------------- */
 
-  if (!virtualAccountNumber && customer) {
-    try {
-      const accountResult = await createDedicatedAccount(customer);
-      if (accountResult.success) {
-        virtualAccountNumber = accountResult.data.accountNumber;
-        virtualAccountBank = accountResult.data.bankName;
-        virtualAccountName =
-          accountResult.data.accountName ||
-          formatVirtualAccountName(customer.name);
-        const updateData = {
-          virtualAccountNumber,
-          virtualAccountBank,
-          virtualAccountName,
-        };
-        if (accountResult.data.paystackCustomerId) {
-          updateData.paystackCustomerId = accountResult.data.paystackCustomerId;
-        }
-        await customerRepo.update(customer.id, updateData);
-      } else {
-        console.error("Failed to create DVA for customer:", accountResult.message);
-      }
-    } catch (dvaErr) {
-      console.error("DVA creation error:", dvaErr.message);
-    }
-  } else if (!virtualAccountName && customer) {
-    virtualAccountName = formatVirtualAccountName(customer.name);
-    await customerRepo.update(customer.id, { virtualAccountName });
-  }
-
-  // Automatically switch customer DVA to LPG station Paystack Subaccount
+  // The account the customer pays into is the LPG station's own bank
+  // account, set up by an admin on the dashboard (Bank Accounts, linked to
+  // this station) — not a per-customer virtual account.
   const station = await lpgStationRepo.findById(existing.lpgStationId);
-  const stationSubaccountCode = station?.paystackSubaccountCode || station?.paystack_subaccount_code;
-  if (virtualAccountNumber && stationSubaccountCode && customer) {
-    try {
-      await switchCustomerDvaToSubaccount({
-        accountNumber: virtualAccountNumber,
-        subaccountCode: stationSubaccountCode,
-      });
-      await customerRepo.update(customer.id, { dvaSubaccountCode: stationSubaccountCode });
-    } catch (dvaErr) {
-      console.error(`[reviewLpgOrderRequest] Failed to switch DVA to subaccount for station ${station?.id}:`, dvaErr.message);
-    }
-  }
+  const stationBankAccounts = station
+    ? await bankAccountRepo.findAll({ lpgStationId: station.id, status: "Active" })
+    : [];
+  const stationBankAccount = stationBankAccounts.find((a) => a.isDefault) || stationBankAccounts[0];
+  const virtualAccountNumber = stationBankAccount?.accountNumber || "";
+  const virtualAccountBank = stationBankAccount?.bankName || "";
+  const virtualAccountName = stationBankAccount?.accountName || "";
 
   await lpgOrderRequestRepo.update(id, {
     virtualAccountNumber,
@@ -444,14 +469,17 @@ const payLpgOrder = asyncHandler(async (req, res) => {
 
   const fullRequest = await lpgOrderRequestRepo.findByIdFull(updated.id);
 
-  // Best-effort transfer to station bank account / subaccount
-  try {
-    if (fullRequest) {
-      await transferToStationSubaccount(fullRequest);
-    }
-  } catch (subErr) {
-    console.error(`[payLpgOrder] station subaccount transfer failed for order ${existing.requestNumber}:`, subErr.message);
-  }
+  // Paystack auto-split transfer (disabled — manual deposit only): the
+  // station is paid directly by the customer into its own bank account, so
+  // there's no merchant-balance share to push out. Re-add the
+  // transferToStationSubaccount import above to reinstate:
+  // try {
+  //   if (fullRequest) {
+  //     await transferToStationSubaccount(fullRequest);
+  //   }
+  // } catch (subErr) {
+  //   console.error(`[payLpgOrder] station subaccount transfer failed for order ${existing.requestNumber}:`, subErr.message);
+  // }
 
   res.json({
     success: true,

@@ -1,6 +1,8 @@
 module.exports = {
   staffRepo: require("./staff.repository"),
+  staffScopeRepo: require("./staffScope.repository"),
   customerRepo: require("./customer.repository"),
+  contactRepo: require("./contact.repository"),
   truckRepo: require("./truck.repository"),
   driverRepo: require("./driver.repository"),
   depotRepo: require("./depot.repository"),
@@ -33,10 +35,13 @@ module.exports = {
   waSessionRepo: require("./waSession.repository"),
   waMessageRepo: require("./waMessage.repository"),
   bankAccountRepo: require("./bankAccount.repository"),
+  vendorRepo: require("./vendor.repository"),
+  expectedPaymentRepo: require("./expectedPayment.repository"),
   commissionRepo: require("./commission.repository"),
   customerLicenseRepo: require("./customerLicense.repository"),
   notificationRepo: require("./notification.repository"),
   deviceTokenRepo: require("./deviceToken.repository"),
   notificationPreferenceRepo: require("./notificationPreference.repository"),
   notificationDeliveryRepo: require("./notificationDelivery.repository"),
+  messageTemplateRepo: require("./messageTemplate.repository"),
 };

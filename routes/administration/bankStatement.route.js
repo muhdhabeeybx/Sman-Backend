@@ -8,6 +8,7 @@ const {
   saveMapping,
   uploadStatement,
   listStatements,
+  statementLines,
   deleteStatement,
   searchLines,
   matchLines,
@@ -24,6 +25,7 @@ router.put("/mapping/:bankAccountId", verifyStaff, validate({ body: misc.bankSta
 // Statements themselves.
 router.get("/", verifyStaff, listStatements);
 router.post("/", verifyStaff, validate({ body: misc.createBankStatement }), uploadStatement);
+router.get("/:id/lines", verifyStaff, statementLines);
 router.delete("/:id", verifyStaff, deleteStatement);
 
 module.exports = router;

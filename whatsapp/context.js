@@ -96,11 +96,6 @@ const loadContext = async ({ waPhone, customer, session }) => {
     communityUrl: envUrl("SOROMAN_COMMUNITY_URL"),
     supportWaUrl: supportWaLink(process.env.SUPPORT_PHONE),
     appDownloadUrl: envUrl("APP_DOWNLOAD_URL"),
-    // Test environments get an "I've paid" button that simulates the
-    // transfer — never in production, never on a live Paystack key.
-    devSimulatePayment:
-      process.env.NODE_ENV !== "production" &&
-      (process.env.PAYSTACK_SECRET_KEY || "").startsWith("sk_test"),
   };
 };
 

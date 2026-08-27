@@ -16,7 +16,12 @@ const { closeDb } = require("./helpers");
 
 const RUN = Date.now();
 
-describe("DVA Subaccount Auto-Switch on Order Placement", () => {
+// Skipped: Paystack DVA funding is disabled — placeOrder no longer creates
+// or switches a customer DVA, it pays into the depot's own bank account
+// instead (see order.service.js). switchCustomerDvaToSubaccount is now a
+// disabled stub. Re-enable (describe, not describe.skip) if DVA funding is
+// reinstated.
+describe.skip("DVA Subaccount Auto-Switch on Order Placement", () => {
   let depotId;
   let productId;
   let customer;

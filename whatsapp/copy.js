@@ -353,11 +353,11 @@ const orderCreated = (order) => {
     `Your order *${order.orderNumber}* has been created.\n\n` +
     `*Total: ${naira(order.totalAmount)}*\n\n` +
     (deadline ? `${deadline}\n\n` : "") +
-    `To pay by bank transfer, send to your dedicated account:\n` +
+    `To pay by bank transfer, send to the account for this order:\n` +
     `Bank: ${order.virtualAccountBank}\n` +
     `Account Number: *${order.virtualAccountNumber}*\n` +
     `Account Name: ${order.virtualAccountName}\n\n` +
-    "Once your transfer reflects, tap *Pay now* below to confirm your order."
+    "Once Soroman confirms your transfer, tap *Pay now* below to confirm your order."
   );
 };
 
@@ -368,7 +368,7 @@ const orderCreated = (order) => {
  */
 const payFailed = (message) =>
   message && /balance/i.test(message)
-    ? "Not yet — there isn't enough in your wallet to cover this order. Please transfer to the dedicated account above, then tap *Pay now* again."
+    ? "Not yet — there isn't enough in your wallet to cover this order. Please transfer to the account above; once Soroman confirms it, tap *Pay now* again."
     : "We couldn't take the payment. Please try again, or transfer to the account above.";
 
 /**
@@ -400,15 +400,6 @@ const orderFailedStock = (hasSome, depotName) =>
 
 const orderFailedGeneric = (supportPhone) =>
   `An error occurred while creating your order. Please note that no amount has been charged. Please try again shortly, or contact us on ${supportPhone}.`;
-
-// ------------------------------------------------- dev-only payment simulation
-
-const devPaidPrompt = () =>
-  "Test mode: no real transfer is required. Select the button below to simulate payment.";
-
-const devPaidButton = () => "I have paid (test)";
-
-const devSimulating = () => "Simulating your transfer. Confirmation will follow shortly.";
 
 const awaitPaymentNudge = (order) => {
   const deadline = paymentDeadlineLine(order);
@@ -537,9 +528,6 @@ module.exports = {
   invoiceCaption,
   orderFailedStock,
   orderFailedGeneric,
-  devPaidPrompt,
-  devPaidButton,
-  devSimulating,
   awaitPaymentNudge,
   awaitPaymentCancelButton,
   payNowButton,

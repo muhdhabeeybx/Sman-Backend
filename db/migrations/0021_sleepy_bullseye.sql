@@ -1,3 +1,0 @@
-ALTER TABLE "dangote_order_requests" ADD COLUMN "company_name" varchar(255) DEFAULT '';--> statement-breakpoint
-ALTER TABLE "dangote_order_requests" ADD COLUMN "license_id" integer;--> statement-breakpoint
-ALTER TABLE "dangote_order_requests" ADD CONSTRAINT "dangote_order_requests_license_id_customer_licenses_id_fk" FOREIGN KEY ("license_id") REFERENCES "public"."customer_licenses"("id") ON DELETE set null ON UPDATE no action;

@@ -1125,28 +1125,18 @@ describe("order outcomes", () => {
     assert.deepEqual(effectTypes(retried), [EFFECTS.CREATE_ORDER]);
   });
 
-  it("the order-created buttons carry the dev 'I've paid' button only in test mode", () => {
+  it("the order-created buttons offer Pay now and Cancel only", () => {
     const s = mkSession(STATES.CONFIRM, { ...fullPickupCart(), pendingOrder: true });
-    const dev = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx({ devSimulatePayment: true }));
-    const devButtons = dev.replies.find((r) => r.kind === REPLY.BUTTONS);
-    assert.ok(devButtons, "order-created always gets a buttons message now");
-    // Pay now + Cancel are always offered; dev mode adds the simulate button (3 = WhatsApp's max).
-    assert.deepEqual(buttonIds(devButtons), ["paynow", "cancelorder", "devpaid"]);
-
-    const prod = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
-    const prodButtons = prod.replies.find((r) => r.kind === REPLY.BUTTONS);
-    assert.deepEqual(buttonIds(prodButtons), ["paynow", "cancelorder"], "production never offers the dev button");
+    const out = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
+    const buttonsReply = out.replies.find((r) => r.kind === REPLY.BUTTONS);
+    assert.ok(buttonsReply, "order-created always gets a buttons message now");
+    assert.deepEqual(buttonIds(buttonsReply), ["paynow", "cancelorder"]);
   });
 
-  it("tapping 'I've paid' emits the simulate effect in test mode only", () => {
+  it("a stale 'I've paid' tap does nothing", () => {
     const s = mkSession(STATES.AWAIT_PAYMENT, { awaiting: { orderNumber: "SOR-1" } }, { lastOrderId: 501 });
-    const dev = reduce(s, btn("devpaid"), baseCtx({ devSimulatePayment: true }));
-    assert.deepEqual(effectTypes(dev), [EFFECTS.DEV_SIMULATE_PAYMENT]);
-    assert.equal(dev.effects[0].payload.orderId, 501);
-    assert.deepEqual(dev.replies, [], "Simulating… is sent by the effect before settlement");
-
-    const prod = reduce(s, btn("devpaid"), baseCtx());
-    assert.deepEqual(prod.effects, [], "a stale dev button does nothing in production");
+    const out = reduce(s, btn("devpaid"), baseCtx());
+    assert.deepEqual(out.effects, []);
   });
 
   it("cancelling an unpaid order: confirm first, then a real effect, then MENU", () => {

@@ -19,7 +19,13 @@ const { closeDb } = require("./helpers");
 const PAYSTACK_HOST = "https://api.paystack.co";
 const RUN = Date.now();
 
-describe("Dedicated Virtual Account (DVA) Creation & Settlement", () => {
+// Skipped: Paystack DVA funding is disabled — wallets are now funded by
+// manual deposit only, and orders pay into the depot's own bank account
+// (see order.service.js placeOrder, payment.service.js createDedicatedAccount).
+// createDedicatedAccount/generateDeliveryCustomerDva are now disabled stubs
+// that never call Paystack, so these assertions no longer hold. Re-enable
+// (describe, not describe.skip) if DVA funding is reinstated.
+describe.skip("Dedicated Virtual Account (DVA) Creation & Settlement", () => {
   let depotId;
   let productId;
 

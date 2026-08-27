@@ -4,6 +4,7 @@ const {
   varchar,
   text,
   decimal,
+  boolean,
   timestamp,
   index,
   uniqueIndex,
@@ -20,6 +21,10 @@ const customers = pgTable(
     companyName: varchar("company_name", { length: 255 }).default(""),
     address: text("address").default(""),
     status: customerStatusEnum("status").default("Active").notNull(),
+    // Staff-managed suppression for the messaging feature — set from the
+    // customer record, respected by segment resolution. Not a self-service
+    // unsubscribe; there's no inbound SMS/email loop wired up for that.
+    marketingOptOut: boolean("marketing_opt_out").default(false).notNull(),
     // Which surface created this customer. WhatsApp-created customers are
     // Active with phone_verified_at set on creation — the message itself
     // proved phone control, so no OTP was sent.

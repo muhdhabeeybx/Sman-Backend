@@ -8,29 +8,47 @@ const request = require("supertest");
 const app = require("../app");
 const { db } = require("../config/db");
 const { orders, depots, products } = require("../db/schema");
-const { orderRepo, customerRepo, auditLogRepo } = require("../repositories");
+const { orderRepo, customerRepo, auditLogRepo, bankAccountRepo } = require("../repositories");
 const walletService = require("../services/wallet.service");
 const { staffTokenWithRoles, closeDb } = require("./helpers");
 
 // depot/product are notNull FKs on orders — reuse an existing row or make one.
+// placeOrder pays into the depot's own bank account (manual deposit only —
+// no Paystack DVA), so whichever depot this resolves to needs one linked.
 async function depotFixture() {
   const [existing] = await db.select().from(depots).limit(1);
-  if (existing) return existing.id;
-  const [row] = await db
-    .insert(depots)
-    .values({
-      name: "Endpoint Depot",
-      code: "ENDP",
-      address: "1 Test Rd",
-      city: "Lagos",
-      state: "Lagos",
-      country: "NG",
-      postcode: "100001",
-      maxCapacity: 1000000,
-      establishedYear: "2020",
-    })
-    .returning();
-  return row.id;
+  const depotId = existing
+    ? existing.id
+    : (
+        await db
+          .insert(depots)
+          .values({
+            name: "Endpoint Depot",
+            code: "ENDP",
+            address: "1 Test Rd",
+            city: "Lagos",
+            state: "Lagos",
+            country: "NG",
+            postcode: "100001",
+            maxCapacity: 1000000,
+            establishedYear: "2020",
+          })
+          .returning()
+      )[0].id;
+
+  const linked = await bankAccountRepo.findAll({ depotId, status: "Active" });
+  if (linked.length === 0) {
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Endpoint Depot Account",
+      accountNumber: `ENDPACC${depotId}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
+  }
+
+  return depotId;
 }
 
 async function productFixture() {

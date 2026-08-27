@@ -8,7 +8,7 @@ const request = require("supertest");
 const app = require("../app");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis } = require("../db/schema");
-const { customerRepo, orderTruckRepo, ticketRepo, auditLogRepo } = require("../repositories");
+const { customerRepo, orderTruckRepo, ticketRepo, auditLogRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
 const { staffTokenWithRoles, NATIVE_TRANSPORT, closeDb } = require("./helpers");
 
@@ -68,6 +68,17 @@ describe("pickup trucks — declared at order, editable at the gate and at ticke
       })
       .returning();
     depotId = depot.id;
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Pickup Depot Account",
+      accountNumber: `PCKACC${String(RUN).slice(-6)}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
 
     const [product] = await db
       .insert(products)

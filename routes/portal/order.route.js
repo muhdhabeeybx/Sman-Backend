@@ -9,7 +9,6 @@ const {
   listMyOrders,
   getMyOrder,
   getMyOrderByRef,
-  simulateMyPayment,
   payMyOrder,
   payMyOrderByRef,
   cancelMyOrder,
@@ -85,19 +84,6 @@ router.get(
   authenticateCustomer,
   validate({ params: orderSchemas.idParam }),
   getMyOrder
-);
-
-// Test-only: simulate a bank transfer for one of the customer's own orders so a
-// tester can drive it to Paid from the web invoice page. The controller refuses
-// unless the server is in test mode (403); it's a cookie-session state change,
-// so it carries CSRF protection like the order-placement route above.
-router.post(
-  "/:id/simulate-payment",
-  authenticateCustomer,
-  requireActiveCustomer,
-  requireCsrfForCookieAuth("customer"),
-  validate({ params: orderSchemas.idParam }),
-  simulateMyPayment
 );
 
 // Pay one of the customer's own unpaid orders from their wallet balance. A

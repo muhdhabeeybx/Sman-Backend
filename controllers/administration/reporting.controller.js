@@ -1,6 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const reportingService = require("../../services/reporting.service");
-const { auditEventRepo } = require("../../repositories");
+const { auditEventRepo, orderTruckRepo } = require("../../repositories");
 
 // Thin fan-out over the reporting service: every endpoint is read-only.
 const wrap = (fn) =>
@@ -21,6 +21,22 @@ module.exports = {
   revenueSummary: wrap(reportingService.revenueSummary),
   auditTrail: asyncHandler(async (req, res) => {
     const data = await auditEventRepo.findAll(req.query);
+    res.json({ success: true, data });
+  }),
+  /**
+   * Every truck the gate handled in a period — in, out, by whom, and
+   * everything recorded about the load. Scoped like every other report, so an
+   * officer sees their own location.
+   */
+  gateMovements: asyncHandler(async (req, res) => {
+    const data = await orderTruckRepo.findGateMovements({
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+      depotId: req.query.depotId,
+      pfiId: req.query.pfiId,
+      search: req.query.search,
+      scopeUser: req.user,
+    });
     res.json({ success: true, data });
   }),
 };

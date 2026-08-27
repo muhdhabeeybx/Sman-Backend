@@ -26,12 +26,16 @@ const { orders, depots, products, orderTrucks } = require("../db/schema");
 // plate is on a public road, a driver's name and phone are not.
 const TRUCK_STATUS_LABEL = {
   pending: "Assigned",
+  // A ticketed truck is cleared to load but has not reached the gate yet, so
+  // this names the paperwork rather than claiming work already done.
+  loaded: "Ticket issued",
   gated_in: "At the depot",
-  loaded: "Loaded",
   gated_out: "Departed",
 };
 
-const loadedCount = (trucks) => trucks.filter((t) => t.status === "loaded" || t.status === "gated_out").length;
+// Counted off the gate, not off the ticket: a truck that has driven back out is
+// the only one certainly carrying product.
+const loadedCount = (trucks) => trucks.filter((t) => t.status === "gated_out").length;
 
 const NOTE = {
   received: () => "Order received — awaiting payment.",

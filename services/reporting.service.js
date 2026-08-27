@@ -186,26 +186,102 @@ const fleetSummary = async ({ dateFrom, dateTo } = {}) => {
 /**
  * Who owes us money on the delivery sales ledger, biggest first:
  * outstanding = sales value - payments, per customer.
+ *
+ * `totalOutstanding` is the whole book, not the slice `limit` returned. It
+ * used to be summed from `rows`, so a caller asking for the top 5 got a
+ * five-customer subtotal that the dashboard then presented as the total
+ * owed. The two figures answer different questions, so the total is now its
+ * own aggregate and `customerCount` says how many customers stand behind it.
  */
 const outstandingPayments = async ({ limit = 50 } = {}) => {
-  const rows = await db
-    .select({
-      customerId: deliverySales.customerId,
-      customerName: sql`COALESCE(MAX(${deliveryCustomers.name}), MAX(${deliverySales.customerName}))`,
-      customerType: sql`MAX(${deliveryCustomers.customerType})`,
-      salesValue: sql`COALESCE(SUM(${deliverySales.salesValue}), 0)`,
-      paymentAmount: sql`COALESCE(SUM(${deliverySales.paymentAmount}), 0)`,
-      outstanding: sql`COALESCE(SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount}), 0)`,
-    })
-    .from(deliverySales)
-    .leftJoin(deliveryCustomers, eq(deliverySales.customerId, deliveryCustomers.id))
-    .groupBy(deliverySales.customerId)
-    .having(sql`SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount}) > 0`)
-    .orderBy(desc(sql`SUM(${deliverySales.salesValue} - ${deliverySales.paymentAmount})`))
-    .limit(Math.min(200, limit));
+  /**
+   * Expected value is read ONCE per truck cycle, not summed across its rows.
+   *
+   * `delivery_sales` holds one row per PAYMENT, and every row of a cycle
+   * repeats that cycle's sales_value. Summing it therefore multiplied what
+   * was owed by however many times the customer had paid — a truck paid in
+   * three instalments counted its value three times. 161 cycles carry more
+   * than one payment row, and the dashboard was reporting ₦33.39bn
+   * outstanding against a true ₦24.85m: a figure 1,343 times too large, on
+   * the front page.
+   *
+   * MAX is what the sales ledger itself uses for exactly this reason (see
+   * useLedgerGroups), and the fallback to rate × quantity mirrors it too, so
+   * the two screens now answer with the same number.
+   *
+   * The plate is normalised the way getCycleKey normalises it, because a
+   * loading written "BWR 826 XB" and its payment written "BWR826XB" are the
+   * same cycle and must not split into two.
+   */
+  const perCycle = sql`
+    WITH per_cycle AS (
+      SELECT
+        ${deliverySales.customerId} AS customer_id,
+        regexp_replace(UPPER(COALESCE(${deliverySales.truckNumber}, '')), '\\s', '', 'g') AS plate,
+        COALESCE(LEFT(${deliverySales.dateLoaded}, 10), '') AS loaded_on,
+        MAX(${deliverySales.salesValue}::numeric) AS sales_value,
+        MAX(${deliverySales.rate}::numeric) AS rate,
+        MAX(${deliverySales.quantity}::numeric) AS quantity,
+        SUM(${deliverySales.paymentAmount}::numeric) AS paid
+      FROM ${deliverySales}
+      GROUP BY 1, 2, 3
+    ),
+    per_cycle_expected AS (
+      SELECT
+        customer_id,
+        CASE
+          WHEN COALESCE(sales_value, 0) > 0 THEN sales_value
+          WHEN COALESCE(rate, 0) > 0 AND COALESCE(quantity, 0) > 0 THEN rate * quantity
+          ELSE 0
+        END AS expected,
+        COALESCE(paid, 0) AS paid
+      FROM per_cycle
+    ),
+    per_customer AS (
+      SELECT
+        customer_id,
+        SUM(expected) AS sales_value,
+        SUM(paid) AS payment_amount,
+        SUM(expected - paid) AS outstanding
+      FROM per_cycle_expected
+      GROUP BY customer_id
+      HAVING SUM(expected - paid) > 0
+    )
+  `;
 
-  const totalOutstanding = rows.reduce((sum, row) => sum + num(row.outstanding), 0);
-  return { totalOutstanding, customers: rows };
+  const [rows, totals] = await Promise.all([
+    db.execute(sql`
+      ${perCycle}
+      SELECT
+        pc.customer_id AS "customerId",
+        COALESCE(dc.name, '') AS "customerName",
+        dc.customer_type AS "customerType",
+        pc.sales_value AS "salesValue",
+        pc.payment_amount AS "paymentAmount",
+        pc.outstanding AS "outstanding"
+      FROM per_customer pc
+      LEFT JOIN ${deliveryCustomers} dc ON dc.id = pc.customer_id
+      ORDER BY pc.outstanding DESC
+      LIMIT ${Math.min(200, limit)}
+    `),
+    // The whole book, not the slice `limit` returned — and only customers in
+    // debit, since netting one in credit against one who owes would
+    // understate what is actually out.
+    db.execute(sql`
+      ${perCycle}
+      SELECT COALESCE(SUM(outstanding), 0) AS total, COUNT(*)::int AS "customerCount"
+      FROM per_customer
+    `),
+  ]);
+
+  const rowList = rows.rows ?? rows;
+  const totalRow = (totals.rows ?? totals)[0] || {};
+
+  return {
+    totalOutstanding: num(totalRow.total),
+    customerCount: Number(totalRow.customerCount) || 0,
+    customers: rowList,
+  };
 };
 
 const dailyReportSummary = async ({ dateFrom, dateTo, location } = {}) => {

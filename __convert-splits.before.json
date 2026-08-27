@@ -1,0 +1,288 @@
+{
+  "takenAt": "2026-08-25T09:27:53.742Z",
+  "maxDepositIdBefore": 4807,
+  "allocations": [
+    {
+      "alloc_id": 12147,
+      "order_id": 11293,
+      "deposit_id": 4531,
+      "amount": "18695000.00"
+    },
+    {
+      "alloc_id": 12150,
+      "order_id": 11291,
+      "deposit_id": 4531,
+      "amount": "31260000.00"
+    },
+    {
+      "alloc_id": 12399,
+      "order_id": 11437,
+      "deposit_id": 4531,
+      "amount": "45000.00"
+    },
+    {
+      "alloc_id": 12263,
+      "order_id": 11379,
+      "deposit_id": 4652,
+      "amount": "8150000.00"
+    },
+    {
+      "alloc_id": 12391,
+      "order_id": 11439,
+      "deposit_id": 4652,
+      "amount": "15000.00"
+    },
+    {
+      "alloc_id": 12291,
+      "order_id": 11394,
+      "deposit_id": 4683,
+      "amount": "6450000.00"
+    },
+    {
+      "alloc_id": 12296,
+      "order_id": 11396,
+      "deposit_id": 4683,
+      "amount": "150000.00"
+    },
+    {
+      "alloc_id": 12295,
+      "order_id": 11397,
+      "deposit_id": 4687,
+      "amount": "9350000.00"
+    },
+    {
+      "alloc_id": 12311,
+      "order_id": 11411,
+      "deposit_id": 4687,
+      "amount": "5325000.00"
+    },
+    {
+      "alloc_id": 12298,
+      "order_id": 11396,
+      "deposit_id": 4689,
+      "amount": "23750000.00"
+    },
+    {
+      "alloc_id": 12299,
+      "order_id": 11398,
+      "deposit_id": 4689,
+      "amount": "150000.00"
+    },
+    {
+      "alloc_id": 12300,
+      "order_id": 11398,
+      "deposit_id": 4690,
+      "amount": "121350000.00"
+    },
+    {
+      "alloc_id": 12301,
+      "order_id": 11399,
+      "deposit_id": 4690,
+      "amount": "150000.00"
+    },
+    {
+      "alloc_id": 12302,
+      "order_id": 11399,
+      "deposit_id": 4691,
+      "amount": "48450000.00"
+    },
+    {
+      "alloc_id": 12303,
+      "order_id": 11400,
+      "deposit_id": 4691,
+      "amount": "150000.00"
+    },
+    {
+      "alloc_id": 12307,
+      "order_id": 11400,
+      "deposit_id": 4695,
+      "amount": "48850000.00"
+    },
+    {
+      "alloc_id": 12308,
+      "order_id": 11418,
+      "deposit_id": 4695,
+      "amount": "150000.00"
+    },
+    {
+      "alloc_id": 12310,
+      "order_id": 11418,
+      "deposit_id": 4697,
+      "amount": "29750000.00"
+    },
+    {
+      "alloc_id": 12319,
+      "order_id": 11417,
+      "deposit_id": 4697,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12312,
+      "order_id": 11411,
+      "deposit_id": 4698,
+      "amount": "49125000.00"
+    },
+    {
+      "alloc_id": 12313,
+      "order_id": 11412,
+      "deposit_id": 4698,
+      "amount": "875000.00"
+    },
+    {
+      "alloc_id": 12316,
+      "order_id": 11412,
+      "deposit_id": 4701,
+      "amount": "4125000.00"
+    },
+    {
+      "alloc_id": 12317,
+      "order_id": 11403,
+      "deposit_id": 4701,
+      "amount": "5325000.00"
+    },
+    {
+      "alloc_id": 12318,
+      "order_id": 11403,
+      "deposit_id": 4702,
+      "amount": "49125000.00"
+    },
+    {
+      "alloc_id": 12348,
+      "order_id": 11429,
+      "deposit_id": 4702,
+      "amount": "875000.00"
+    },
+    {
+      "alloc_id": 12320,
+      "order_id": 11417,
+      "deposit_id": 4704,
+      "amount": "54200000.00"
+    },
+    {
+      "alloc_id": 12321,
+      "order_id": 11414,
+      "deposit_id": 4704,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12323,
+      "order_id": 11414,
+      "deposit_id": 4706,
+      "amount": "24200000.00"
+    },
+    {
+      "alloc_id": 12325,
+      "order_id": 11420,
+      "deposit_id": 4706,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12326,
+      "order_id": 11420,
+      "deposit_id": 4708,
+      "amount": "54290000.00"
+    },
+    {
+      "alloc_id": 12327,
+      "order_id": 11421,
+      "deposit_id": 4708,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12330,
+      "order_id": 11421,
+      "deposit_id": 4710,
+      "amount": "24750000.00"
+    },
+    {
+      "alloc_id": 12339,
+      "order_id": 11427,
+      "deposit_id": 4710,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12336,
+      "order_id": 11424,
+      "deposit_id": 4717,
+      "amount": "9730000.00"
+    },
+    {
+      "alloc_id": 12337,
+      "order_id": 11422,
+      "deposit_id": 4717,
+      "amount": "270000.00"
+    },
+    {
+      "alloc_id": 12338,
+      "order_id": 11422,
+      "deposit_id": 4718,
+      "amount": "54270000.00"
+    },
+    {
+      "alloc_id": 12361,
+      "order_id": 11409,
+      "deposit_id": 4718,
+      "amount": "270000.00"
+    },
+    {
+      "alloc_id": 12342,
+      "order_id": 11427,
+      "deposit_id": 4721,
+      "amount": "54290000.00"
+    },
+    {
+      "alloc_id": 12343,
+      "order_id": 11428,
+      "deposit_id": 4721,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12344,
+      "order_id": 11428,
+      "deposit_id": 4722,
+      "amount": "60350000.00"
+    },
+    {
+      "alloc_id": 12345,
+      "order_id": 11426,
+      "deposit_id": 4722,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12347,
+      "order_id": 11426,
+      "deposit_id": 4724,
+      "amount": "29750000.00"
+    },
+    {
+      "alloc_id": 12371,
+      "order_id": 11419,
+      "deposit_id": 4724,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12373,
+      "order_id": 11419,
+      "deposit_id": 4746,
+      "amount": "960000.00"
+    },
+    {
+      "alloc_id": 12374,
+      "order_id": 11430,
+      "deposit_id": 4746,
+      "amount": "250000.00"
+    },
+    {
+      "alloc_id": 12375,
+      "order_id": 11430,
+      "deposit_id": 4747,
+      "amount": "28124500.00"
+    },
+    {
+      "alloc_id": 12378,
+      "order_id": 11401,
+      "deposit_id": 4747,
+      "amount": "250000.00"
+    }
+  ]
+}

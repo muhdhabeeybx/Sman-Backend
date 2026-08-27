@@ -147,6 +147,9 @@ const enumOf = (label, values) =>
   });
 
 /** Pagination shared by every list endpoint. */
+// 1000, not the old 500: the dashboard's list pages ask for a page of 1000
+// so a desk can see a whole book at once rather than clicking through it.
+// Repositories still clamp to their own ceiling on top of this.
 const pagination = z.object({
   page: numberLike("Page")
     .pipe(z.number().int("Page must be a whole number").positive("Page must be 1 or greater"))
@@ -158,7 +161,7 @@ const pagination = z.object({
         .number()
         .int("Limit must be a whole number")
         .positive("Limit must be 1 or greater")
-        .max(500, "Limit cannot exceed 500")
+        .max(1000, "Limit cannot exceed 1000")
     )
     .optional()
     .default(50),

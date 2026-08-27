@@ -123,20 +123,29 @@ const isUserInput = (inbound) =>
   inbound.type === INBOUND.TEXT || inbound.type === INBOUND.BUTTON || inbound.type === INBOUND.LIST;
 
 /**
- * "30000", "30,000", "30 000", "30000L", "30k" → 30000. NaN when it isn't a
- * quantity at all.
+ * "30000", "30,000", "30 000", "30.000", "30000L", "30k", "30.5k" → whole
+ * litres. NaN when it isn't a quantity at all.
+ *
+ * The `k` suffix is what disambiguates a dot. WITH `k`, the dot is a decimal
+ * point applied before the ×1000 multiplier ("30.5k" → 30500, "1.5k" → 1500).
+ * WITHOUT `k`, litres are always whole numbers, so a dot is a thousands
+ * separator, NOT a decimal — stripped like the comma/space. Without this,
+ * "30.000" parsed as the float 30 (thirty litres, not thirty thousand) and
+ * "1.500" as 1.5 → a silent, badly wrong quantity.
  */
 const parseLitres = (raw) => {
   let s = String(raw ?? "").trim().toLowerCase();
   s = s.replace(/(liters|litres|ltrs|ltr|l)$/i, "").trim();
-  let mult = 1;
   if (s.endsWith("k")) {
-    mult = 1000;
-    s = s.slice(0, -1);
+    // k present → the value is a plain decimal scaled by 1000.
+    const n = s.slice(0, -1).replace(/[,\s]/g, "");
+    if (!/^\d+(\.\d+)?$/.test(n)) return NaN;
+    return Math.round(Number(n) * 1000);
   }
-  s = s.replace(/[,\s]/g, "");
-  if (!/^\d+(\.\d+)?$/.test(s)) return NaN;
-  return Math.round(Number(s) * mult);
+  // No multiplier → every dot/comma/space is thousands grouping.
+  s = s.replace(/[,\s.]/g, "");
+  if (!/^\d+$/.test(s)) return NaN;
+  return Number(s);
 };
 
 // Forgiving: real plates vary; the gate audits and can correct them later.
@@ -394,18 +403,18 @@ const promptFor = (state, session, context) => {
 /**
  * The Pay now / Cancel buttons for an unpaid order. Pay now is always offered
  * so the customer has a single obvious way to confirm: after their transfer
- * lands, the DVA webhook credits the wallet and the tap settles the order. A
- * tap before the money reflects can't overspend — PAY_ORDER re-checks and, if
- * the balance still falls short, replies with the "transfer first" copy.
- * Cancel is always offered; the dev "paid" button only in test mode. Always
- * ≤ 3 buttons (WhatsApp's limit).
+ * lands in the depot's account and staff record the deposit (wallet funding
+ * is manual now — Paystack DVAs and their webhook are retired), the tap
+ * settles the order from the credited wallet. A tap before the deposit is
+ * recorded can't overspend — PAY_ORDER re-checks and, if the balance still
+ * falls short, replies with the "transfer first" copy. Cancel is always
+ * offered. Always ≤ 3 buttons (WhatsApp's limit).
  */
 const awaitPaymentButtonDefs = (cart, context) => {
   const total = Number(cart.awaiting?.totalAmount) || 0;
   const defs = {};
   if (total > 0) defs.paynow = copy.payNowButton();
   defs.cancelorder = copy.awaitPaymentCancelButton();
-  if (context.devSimulatePayment) defs.devpaid = copy.devPaidButton();
   return defs;
 };
 
@@ -691,7 +700,7 @@ const reduceInner = (session, inbound, ctx, expired) => {
       if (paidFromWallet) {
         replies.push(text(copy.orderPaidWallet(order)));
       } else {
-        // One message, not two: the order + dedicated-account details ARE the
+        // One message, not two: the order + payment-account details ARE the
         // body of the Pay now / Cancel buttons, so the "how to pay" copy and
         // the buttons that action it can't drift apart or repeat each other.
         replies.push(buttons(copy.orderCreated(order), awaitPaymentButtonDefs(next.cart, ctx)));
@@ -894,15 +903,6 @@ const reduceInner = (session, inbound, ctx, expired) => {
 };
 
 const handleAwaitPayment = (session, ctx, value) => {
-  // Dev-only: the "I've paid" button simulates the transfer landing. The
-  // confirmation itself arrives through the REAL settlement → push path.
-  if (value === "devpaid" && ctx.devSimulatePayment && session.lastOrderId) {
-    // No "Simulating…" reply here — the effect sends it on the wire BEFORE
-    // settlement, so the async payment-confirmed push cannot arrive first.
-    return done(session, [], [
-      { type: EFFECTS.DEV_SIMULATE_PAYMENT, payload: { orderId: session.lastOrderId } },
-    ]);
-  }
   // Pay now: settle the unpaid order from wallet balance. The engine only
   // shows this button when the balance covers the total; the effect (and
   // payOrder itself) re-check, so a stale tap can't overspend.

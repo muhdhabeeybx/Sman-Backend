@@ -9,7 +9,7 @@ const dangoteOrderStatus = require("./dangoteOrderStatus.service");
 const lpgOrderStatus = require("./lpgOrderStatus.service");
 const { sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
-const { orderExpiryHours, orderExpiryMs } = require("../config/orderExpiry");
+const { orderExpiryHours, orderExpiryMs, orderExpiryDisabled } = require("../config/orderExpiry");
 
 /**
  * Has this request lapsed? Only an Approved, unpaid request can — once payment
@@ -18,6 +18,7 @@ const { orderExpiryHours, orderExpiryMs } = require("../config/orderExpiry");
  */
 function isRequestExpired(request, now = Date.now()) {
   return (
+    !orderExpiryDisabled() &&
     request.status === "Approved" &&
     request.paymentStatus !== "Paid" &&
     request.reviewedAt &&
@@ -27,9 +28,11 @@ function isRequestExpired(request, now = Date.now()) {
 
 /**
  * Compute the expiration deadline for a request. Returns an ISO string if the
- * request is Approved and unpaid; null otherwise.
+ * request is Approved and unpaid; null otherwise — and null whenever the
+ * expiry mechanism itself is switched off.
  */
 function computeRequestExpiresAt(request) {
+  if (orderExpiryDisabled()) return null;
   if (request.status !== "Approved" || request.paymentStatus === "Paid" || !request.reviewedAt) return null;
   const reviewed = new Date(request.reviewedAt).getTime();
   return new Date(reviewed + orderExpiryMs()).toISOString();
@@ -55,7 +58,7 @@ async function withRequestExpiresAt(requestOrRequests) {
  * Internal helper: expire a request if past its deadline, then attach expiresAt.
  */
 async function expireAndAttach(request) {
-  if (request.status === "Approved" && request.paymentStatus !== "Paid" && request.reviewedAt) {
+  if (!orderExpiryDisabled() && request.status === "Approved" && request.paymentStatus !== "Paid" && request.reviewedAt) {
     const deadline = new Date(request.reviewedAt).getTime() + orderExpiryMs();
     if (Date.now() >= deadline) {
       try {
@@ -140,6 +143,7 @@ async function expireLpgRequest(requestId, { tx } = {}) {
  * @returns {{ dangote: number, lpg: number }} how many requests were expired
  */
 async function expireStaleRequests() {
+  if (orderExpiryDisabled()) return { dangote: 0, lpg: 0 };
   const cutoff = new Date(Date.now() - orderExpiryMs());
 
   let dangoteExpired = 0;

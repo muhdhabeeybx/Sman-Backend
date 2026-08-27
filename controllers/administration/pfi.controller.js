@@ -9,7 +9,8 @@ const {
   orderRepo,
 } = require("../../repositories");
 const { computeFinancials } = require("../../lib/pfiFinance");
-const { applyCategoryPfi, actorFor } = require("./expense.controller");
+const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
+const { isWithinScope } = require("../../lib/scopeFilter");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -59,7 +60,7 @@ const resolveOfficerName = async (id) => {
 const getPfis = asyncHandler(async (req, res) => {
   const { search, status, page = 1, limit = 100, location } = req.query;
 
-  const result = await pfiRepo.findAll({ search, status, location, page, limit });
+  const result = await pfiRepo.findAll({ search, status, location, scopeUser: req.user, page, limit });
   result.pfis = await withFinancials(result.pfis || []);
 
   res.json({ success: true, data: result });
@@ -90,8 +91,10 @@ const createPfi = asyncHandler(async (req, res) => {
   const product_id = req.body.product_id || req.body.productId;
   const starting_qty_litres = req.body.starting_qty_litres ?? req.body.startingQtyLitres;
   const bl_qty_litres = req.body.bl_qty_litres ?? req.body.blQtyLitres;
+  const bl_qty_mt = req.body.bl_qty_mt ?? req.body.blQtyMt;
   const qty_volume_mt = req.body.qty_volume_mt ?? req.body.qtyVolumeMt;
   const unit_price = req.body.unit_price ?? req.body.unitPrice;
+  const credit_balance = req.body.credit_balance ?? req.body.creditBalance;
   const audit_officer = req.body.audit_officer || req.body.auditOfficerId;
   const product_officer = req.body.product_officer || req.body.productOfficerId;
   const it_compliance_officer = req.body.it_compliance_officer || req.body.itComplianceOfficerId;
@@ -117,6 +120,9 @@ const createPfi = asyncHandler(async (req, res) => {
 
   if (location_id) {
     location_id_val = parseInt(location_id, 10) || location_id;
+    if (!isWithinScope(req.user, "depotIds", location_id_val)) {
+      return res.status(403).json({ success: false, message: "You cannot create a PFI for this location" });
+    }
     const depot = await depotRepo.findById(location_id_val);
     if (depot) location_name = depot.name;
   }
@@ -160,8 +166,10 @@ const createPfi = asyncHandler(async (req, res) => {
     // Left null when not supplied — an unknown BL must not read as zero, or
     // every money figure downstream would silently compute against it.
     blQtyLitres: bl_qty_litres == null || bl_qty_litres === "" ? null : Number(bl_qty_litres),
+    blQtyMt: bl_qty_mt == null || bl_qty_mt === "" ? null : Number(bl_qty_mt),
     qtyVolumeMt: Number(qty_volume_mt) || 0,
     unitPrice: String(Number(unit_price) || 0),
+    creditBalance: String(Number(credit_balance) || 0),
     auditOfficerId: audit_officer ? (parseInt(audit_officer, 10) || audit_officer) : null,
     productOfficerId: product_officer ? (parseInt(product_officer, 10) || product_officer) : null,
     itComplianceOfficerId: it_compliance_officer ? (parseInt(it_compliance_officer, 10) || it_compliance_officer) : null,
@@ -195,8 +203,8 @@ const updatePfi = asyncHandler(async (req, res) => {
 
   const allowedFields = [
     "pfi_number", "description", "pfi_date", "status", "starting_qty_litres",
-    "bl_qty_litres",
-    "qty_volume_mt", "sold_qty_litres", "total_amount", "unit_price", "product_unit",
+    "bl_qty_litres", "bl_qty_mt",
+    "qty_volume_mt", "sold_qty_litres", "total_amount", "unit_price", "credit_balance", "product_unit",
     "vessel_broker", "vessel_name", "surveyor_name", "surveyor_phone",
     "closure_date", "total_inflow", "closure_bank", "purchase_cost",
     "aggregate_expenses", "closure_handler", "closure_remarks",
@@ -214,6 +222,9 @@ const updatePfi = asyncHandler(async (req, res) => {
       } else if (field === "bl_qty_litres") {
         // Blank clears it back to unknown rather than setting zero.
         updateData.blQtyLitres = value === "" || value === null ? null : Number(value);
+      } else if (field === "bl_qty_mt") {
+        // Same "blank means unknown" rule as bl_qty_litres.
+        updateData.blQtyMt = value === "" || value === null ? null : Number(value);
       } else {
         updateData[camelKey] = value;
       }
@@ -229,6 +240,9 @@ const updatePfi = asyncHandler(async (req, res) => {
     const locId = req.body.location_id !== undefined ? req.body.location_id : req.body.locationId;
     if (locId && locId !== "none") {
       const parsedLoc = parseInt(locId, 10) || locId;
+      if (!isWithinScope(req.user, "depotIds", parsedLoc)) {
+        return res.status(403).json({ success: false, message: "You cannot move this PFI to a location outside your scope" });
+      }
       updateData.locationId = parsedLoc;
       updateData.lpgStationId = null;
       const depot = await depotRepo.findById(parsedLoc);
@@ -412,9 +426,11 @@ const getPfiExpenses = asyncHandler(async (req, res) => {
 /**
  * Quick-add from inside the PFI drawer.
  *
- * The category is resolved server-side from the PFI itself, so a line added
- * here is indistinguishable from one added on the expenses page — same row,
- * same stamped `pfi_id`, same audit entry.
+ * The PFI comes from the URL, so a line added here is indistinguishable from
+ * one added on the expenses page — same row, same stamped `pfi_id`, same audit
+ * entry. A GL account named in the body is used when there is one; without it
+ * the line falls back to this PFI's own category, where every pre-chart row
+ * already sits.
  */
 const addPfiExpense = asyncHandler(async (req, res) => {
   const pfi = await pfiRepo.findById(req.params.id);
@@ -423,13 +439,15 @@ const addPfiExpense = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!Number.isFinite(amount) || amount < 0) throw httpErr(400, "Amount must be a positive number");
 
-  const category =
-    (await pfiExpenseRepo.ensureCategoryForPfi(pfi.id, pfi.pfiNumber)) ||
-    (await pfiExpenseRepo.findCategoryById(req.body.category_id));
-  if (!category) throw httpErr(500, "Could not resolve this PFI's expense category");
+  const requested = req.body.category_id ?? req.body.categoryId;
+  const category = requested
+    ? await pfiExpenseRepo.findCategoryById(requested)
+    : await pfiExpenseRepo.ensureCategoryForPfi(pfi.id, pfi.pfiNumber);
+  if (!category) throw httpErr(400, "Could not resolve this PFI's expense category");
 
-  const { pfiId } = await applyCategoryPfi(category.id);
+  const { pfiId } = await resolveBooking(category.id, pfi.id);
   const { actorId, actorName } = await actorFor(req);
+  const { vendorId, vendorName } = await vendorFor(req.body);
 
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
@@ -437,7 +455,8 @@ const addPfiExpense = asyncHandler(async (req, res) => {
     expense_date:
       parseDate(req.body.expense_date ?? req.body.expenseDate)?.toISOString?.() ||
       new Date().toISOString(),
-    vendor: req.body.vendor || "",
+    vendor: vendorName,
+    vendor_id: vendorId,
     description: req.body.description || "",
     amount: String(amount),
     bank_paid_from: req.body.bank_paid_from ?? req.body.bankPaidFrom ?? "",

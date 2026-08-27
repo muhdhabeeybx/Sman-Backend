@@ -8,7 +8,7 @@ const request = require("supertest");
 const app = require("../app");
 const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis } = require("../db/schema");
-const { customerRepo, orderRepo, ticketRepo } = require("../repositories");
+const { customerRepo, orderRepo, ticketRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
 const { NATIVE_TRANSPORT, closeDb } = require("./helpers");
 
@@ -67,6 +67,17 @@ describe("customer portal — a customer places their own order", () => {
       })
       .returning();
     depotId = depot.id;
+
+    // placeOrder pays into the depot's own bank account (manual deposit
+    // only — no Paystack DVA), so every order-placing test depot needs one.
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Portal Depot Account",
+      accountNumber: `PORACC${String(RUN).slice(-6)}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
 
     const [product] = await db
       .insert(products)
@@ -163,7 +174,10 @@ describe("customer portal — a customer places their own order", () => {
 
     const order = await orderRepo.findById(res.body.data.order.id);
     assert.equal(order.paymentStatus, "Paid");
-    assert.equal(order.status, "Paid", "wallet payment advanced the lifecycle");
+    // Payment releases the order in the same transaction — nothing sits at Paid
+    // waiting for a desk to wave it through.
+    assert.equal(order.status, "Released", "payment cleared it for loading");
+    assert.ok(order.releasedAt, "releasedAt stamped by the payment");
     assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet spent");
   });
 
@@ -327,7 +341,8 @@ describe("customer portal — a customer places their own order", () => {
     assert.equal(pending.status, 201);
     const pendingNumber = pending.body.data.order.orderNumber;
 
-    // Fund the wallet, place a second order, then pay it so it settles to Paid.
+    // Fund the wallet, place a second order, then pay it so it settles and
+    // releases, leaving one Pending order and one Released for the filters.
     await customerRepo.creditBalance(pending.body.data.order.customerId, TOTAL);
     const paid = await request(app)
       .post(ORDERS)
@@ -335,7 +350,7 @@ describe("customer portal — a customer places their own order", () => {
       .send(body());
     assert.equal(paid.status, 201);
     await orderService.payOrder({ orderId: paid.body.data.order.id, actor: { type: "system" } });
-    assert.equal((await orderRepo.findById(paid.body.data.order.id)).status, "Paid");
+    assert.equal((await orderRepo.findById(paid.body.data.order.id)).status, "Released");
 
     // Status filter: only Pending.
     const onlyPending = await request(app)
@@ -396,7 +411,7 @@ describe("customer portal — a customer places their own order", () => {
       .send({});
     assert.equal(paid.status, 200, JSON.stringify(paid.body));
     assert.equal(paid.body.data.order.paymentStatus, "Paid");
-    assert.equal(paid.body.data.order.status, "Paid");
+    assert.equal(paid.body.data.order.status, "Released", "paying releases it");
     assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet spent");
   });
 
@@ -499,7 +514,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send({});
     assert.equal(res.status, 409, JSON.stringify(res.body));
-    assert.equal((await orderRepo.findById(orderId)).status, "Paid", "the paid order is untouched");
+    assert.equal((await orderRepo.findById(orderId)).status, "Released", "the paid order is untouched");
   });
 
   test("a customer cannot cancel another customer's order — 404", async () => {
@@ -596,7 +611,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send({});
     assert.equal(res.status, 409, JSON.stringify(res.body));
-    assert.equal((await orderRepo.findById(id)).status, "Paid", "the paid order is untouched");
+    assert.equal((await orderRepo.findById(id)).status, "Released", "the paid order is untouched");
   });
 
   test("a customer cannot cancel another customer's order by reference — 404", async () => {

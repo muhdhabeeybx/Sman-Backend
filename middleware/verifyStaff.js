@@ -1,5 +1,6 @@
 const { verifyAccessToken } = require("../services/token.service");
 const sessionService = require("../services/session.service");
+const { staffScopeRepo } = require("../repositories");
 
 // Role VALUES, not table names — these are data, consumed by config/roleMapping.js
 // and by the frontend. They are unrelated to the `staff` table rename.
@@ -41,14 +42,29 @@ const authenticateStaff = async (req, res, next) => {
   }
 
   // Shape preserved from the previous `decoded.UserInfo` payload so the 16
-  // route files and their controllers keep working unchanged.
+  // route files and their controllers keep working unchanged — the fields
+  // below are additive, nothing existing was removed.
   //
   // Roles come from the freshly loaded row, not from the token: a role revoked
-  // mid-session must take effect now, not when the access token expires.
+  // mid-session must take effect now, not when the access token expires. Scope
+  // and page overrides are loaded fresh for the same reason — an admin editing
+  // someone's depot/PFI access must take effect on their very next request.
+  const authContext = await staffScopeRepo.getAuthContext(active.principal.id);
+
   req.user = {
     id: active.principal.id,
     email: active.principal.email,
+    // The principal IS the staff row (see sessionRepo.findWithPrincipal), so
+    // the name is already loaded — it just was not being carried across, which
+    // left everything attributing actions to an email address.
+    name: [active.principal.firstName, active.principal.surname]
+      .filter(Boolean)
+      .join(" ")
+      .trim(),
     roles: active.principal.roles || [],
+    canViewAllLocations: authContext.canViewAllLocations,
+    scope: authContext.scope,
+    pageOverrides: authContext.pageOverrides,
   };
   // Deliberately not `req.session` — that name belongs to express-session, and
   // colliding with it would be a confusing trap if it is ever added.

@@ -4,19 +4,28 @@ const { publicCustomer } = require("../../utils/publicCustomer");
 
 /**
  * The signed-in customer's own profile — publicCustomer plus the fields the
- * account screen needs that the auth payload deliberately omits: the address
- * and the dedicated virtual account. The virtual account is the customer's
- * permanent funding route, so the portal shows it outside any one order.
+ * account screen needs that the auth payload deliberately omits: the
+ * address.
+ *
+ * `virtualAccount` used to carry the customer's personal Paystack Dedicated
+ * Virtual Account — their permanent self-service funding route. Wallet
+ * funding is manual-deposit-only now (staff record deposits from the admin
+ * dashboard; an order shows the depot's own bank account instead, see
+ * order.service.js placeOrder), so this is always null. Kept in the response
+ * shape — not removed — so the field can be repopulated without a client
+ * contract change if DVA funding is reinstated:
+ *
+ * virtualAccount: customer.virtualAccountNumber
+ *   ? {
+ *       bank: customer.virtualAccountBank,
+ *       accountNumber: customer.virtualAccountNumber,
+ *       accountName: customer.virtualAccountName,
+ *     }
+ *   : null,
  */
 const profilePayload = (customer) => ({
   customer: { ...publicCustomer(customer), address: customer.address || "" },
-  virtualAccount: customer.virtualAccountNumber
-    ? {
-        bank: customer.virtualAccountBank,
-        accountNumber: customer.virtualAccountNumber,
-        accountName: customer.virtualAccountName,
-      }
-    : null,
+  virtualAccount: null,
 });
 
 /** GET /api/customer/profile */

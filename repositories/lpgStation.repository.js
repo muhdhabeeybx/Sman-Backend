@@ -8,6 +8,7 @@ const {
   staff,
   pfis,
 } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 let columnsInitialized = false;
 async function ensureColumnsExist() {
@@ -44,13 +45,18 @@ const findByCode = async (code) => {
   return row || null;
 };
 
-const findAll = async ({ search, status, page = 1, limit = 50 } = {}) => {
+const findAll = async ({ search, status, scopeUser, page = 1, limit = 50 } = {}) => {
   await ensureColumnsExist();
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+
+  // A location-scoped user only sees the LPG stations they're assigned to —
+  // same fail-closed rule already applied to /pfis.
+  const scope = scopeCondition(scopeUser, { lpgStationColumn: lpgStations.id });
+  if (scope) conditions.push(scope);
 
   if (search) {
     const pattern = `%${search}%`;

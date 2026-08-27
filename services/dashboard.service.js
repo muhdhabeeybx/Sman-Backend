@@ -38,8 +38,9 @@ const toISODate = (d) => {
 
 /**
  * Month totals + a zero-filled day-by-day spend series from the 1st to today.
- * A "Cancelled" order is excluded from the order/litre counts (it was undone);
- * "spent" only ever counts orders whose payment actually confirmed.
+ * "Cancelled" and "Expired" orders are excluded from the order/litre counts
+ * (withdrawn or lapsed without payment); "spent" only ever counts orders
+ * whose payment actually confirmed.
  *
  * Bucketing is done in JS, not with SQL date_trunc, on purpose: the densify
  * loop below builds its day keys from JS Dates in the server's local zone, so
@@ -64,7 +65,7 @@ const loadMonth = async (customerId) => {
   const month = { orders: 0, litres: 0, spent: 0 };
   const spentByDay = new Map();
   for (const r of rows) {
-    if (r.status !== "Cancelled") {
+    if (r.status !== "Cancelled" && r.status !== "Expired") {
       month.orders += 1;
       month.litres += Number(r.quantity);
     }

@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, desc, count } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, asc, count } = require("drizzle-orm");
 const { db } = require("../config/db");
 const {
   depots,
@@ -9,6 +9,7 @@ const {
   products,
   staff,
 } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 const findById = async (id, tx = db) => {
   const [row] = await tx.select().from(depots).where(eq(depots.id, id)).limit(1);
@@ -24,12 +25,17 @@ const findByCode = async (code) => {
   return row || null;
 };
 
-const findAll = async ({ search, status, page = 1, limit = 50 } = {}) => {
+const findAll = async ({ search, status, scopeUser, page = 1, limit = 50 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+
+  // A location-scoped user only sees the depots they're assigned to — same
+  // fail-closed rule already applied to /pfis.
+  const scope = scopeCondition(scopeUser, { depotColumn: depots.id });
+  if (scope) conditions.push(scope);
 
   if (search) {
     const pattern = `%${search}%`;
@@ -54,7 +60,11 @@ const findAll = async ({ search, status, page = 1, limit = 50 } = {}) => {
       .select()
       .from(depots)
       .where(whereClause)
-      .orderBy(desc(depots.createdAt))
+      // createdAt alone ties for depots seeded/created at the same instant,
+      // and Postgres doesn't preserve tie order across queries — especially
+      // after an UPDATE rewrites a row. id is a strictly increasing tiebreaker
+      // that keeps the list order stable regardless of what gets edited.
+      .orderBy(desc(depots.createdAt), asc(depots.id))
       .limit(limitNum)
       .offset(offset),
     db

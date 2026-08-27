@@ -3,7 +3,8 @@
  * Reset the isolated test database to a clean, fully-migrated state — what CI
  * gets for free on every run, and what a dirty local DB needs when migrations
  * diverge (see the merge/renumber flow). Drops and recreates the schema, then
- * applies every migration in order.
+ * applies every migration in order — the generated ones through drizzle-kit,
+ * then the hand-written ones it has no journal entry for.
  *
  * Guarded to a localhost TEST_DATABASE_URL so it can never wipe a real database.
  * Run with: npm run db:reset-test
@@ -34,6 +35,16 @@ const { execSync } = require("child_process");
     stdio: "inherit",
     env: { ...process.env, DATABASE_URL: url },
   });
+
+  // drizzle-kit only runs what is in meta/_journal.json, and some migrations
+  // are hand-written precisely because generating them is not safe here. Left
+  // out, a reset test DB is missing real columns and endpoints that select
+  // them 500 under test while working fine locally.
+  execSync("node scripts/apply-unjournaled-migrations.js", {
+    stdio: "inherit",
+    env: { ...process.env, DATABASE_URL: url },
+  });
+
   console.log("✓ test DB is clean and fully migrated.");
 })().catch((err) => {
   console.error("reset-test-db failed:", err.message);

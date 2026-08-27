@@ -8,27 +8,45 @@ const request = require("supertest");
 const app = require("../app");
 const { db } = require("../config/db");
 const { orders, depots, products } = require("../db/schema");
-const { customerRepo, truckRepo, orderTruckRepo } = require("../repositories");
+const { customerRepo, truckRepo, orderTruckRepo, bankAccountRepo } = require("../repositories");
 const { staffTokenWithRoles, closeDb } = require("./helpers");
 
+// placeOrder pays into the depot's own bank account (manual deposit only —
+// no Paystack DVA), so whichever depot this resolves to needs one linked.
 async function depotFixture() {
   const [existing] = await db.select().from(depots).limit(1);
-  if (existing) return existing.id;
-  const [row] = await db
-    .insert(depots)
-    .values({
-      name: "Truck Depot",
-      code: "TRKD",
-      address: "1 Test Rd",
-      city: "Lagos",
-      state: "Lagos",
-      country: "NG",
-      postcode: "100001",
-      maxCapacity: 1000000,
-      establishedYear: "2020",
-    })
-    .returning();
-  return row.id;
+  const depotId = existing
+    ? existing.id
+    : (
+        await db
+          .insert(depots)
+          .values({
+            name: "Truck Depot",
+            code: "TRKD",
+            address: "1 Test Rd",
+            city: "Lagos",
+            state: "Lagos",
+            country: "NG",
+            postcode: "100001",
+            maxCapacity: 1000000,
+            establishedYear: "2020",
+          })
+          .returning()
+      )[0].id;
+
+  const linked = await bankAccountRepo.findAll({ depotId, status: "Active" });
+  if (linked.length === 0) {
+    await bankAccountRepo.create({
+      bankName: "Test Bank",
+      accountName: "Truck Depot Account",
+      accountNumber: `TRKDACC${depotId}`,
+      depotIds: [depotId],
+      status: "Active",
+      isDefault: true,
+    });
+  }
+
+  return depotId;
 }
 
 async function productFixture() {

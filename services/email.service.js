@@ -368,11 +368,11 @@ const sendTicketEmail = async (email, ticketData) => {
                         </tr>
                         ${virtualAccountNumber ? `
                         <tr>
-                          <td style="padding:6px 0;font-size:13px;color:#64748b;">Paid Into DVA Bank</td>
+                          <td style="padding:6px 0;font-size:13px;color:#64748b;">Pay Into Bank</td>
                           <td style="padding:6px 0;text-align:right;font-size:13px;font-weight:600;color:#1e293b;">${escapeHtml(virtualAccountBank)}</td>
                         </tr>
                         <tr>
-                          <td style="padding:6px 0;font-size:13px;color:#64748b;">Paid Into DVA Account</td>
+                          <td style="padding:6px 0;font-size:13px;color:#64748b;">Pay Into Account</td>
                           <td style="padding:6px 0;text-align:right;font-size:13px;font-weight:600;color:#1e293b;font-family:monospace;">${escapeHtml(virtualAccountNumber)}</td>
                         </tr>` : ""}
                         <tr style="border-top:1px solid #e2e8f0;">
