@@ -241,6 +241,19 @@ const bankAccountBase = {
   isDefault: z.boolean({ error: "isDefault must be true or false" }).optional(),
   depotIds: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
   lpgStationIds: z.array(z.union([id("Station id"), z.string(), z.number()])).optional(),
+  /**
+   * Which areas of the app may collect into this account.
+   *
+   * Missing from this schema until now, and a schema here is a whitelist —
+   * unknown keys are stripped before the controller sees them (see
+   * middleware/validate.js). So ticking an account on the Expense Bank
+   * Accounts list sent `{usage: [...]}`, the validator removed it, the PATCH
+   * ran with an empty body, and the API answered 200. The dialog showed
+   * success and nothing had been written. Creating an account from that same
+   * dialog lost its usage tag the same way, so a new account was added and
+   * still did not appear on the list it was added from.
+   */
+  usage: z.array(enumOf("Usage", ["truck_sales", "expenses"])).optional(),
   notes: optionalString("Notes", 1000),
 };
 const createBankAccount = z.object(bankAccountBase);

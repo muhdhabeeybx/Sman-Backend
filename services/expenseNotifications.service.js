@@ -5,12 +5,30 @@ const chain = require("../lib/expenseChain");
 /**
  * Who hears about each stage, by role rather than by name — adding a second
  * officer needs no code change here.
+ *
+ * `includeSubmitter` adds the person who raised the request on top of the
+ * role, for the three middle stages where they would otherwise hear nothing
+ * between submitting it and it being paid or rejected — PAID/REJECTED
+ * already reach them via `participants`, and PENDING doesn't need it because
+ * they are the one who just acted (see the actor filter below).
  */
 const STAGE_RECIPIENTS = {
   [chain.STATUS.PENDING]: { roles: [chain.ROLE.OFFICER], title: "New expense awaiting verification" },
-  [chain.STATUS.VERIFIED]: { roles: [chain.ROLE.CFO], title: "Expense verified — your approval needed" },
-  [chain.STATUS.AUDIT_APPROVED]: { roles: [chain.ROLE.ADMIN], title: "Expense approved — final sign-off needed" },
-  [chain.STATUS.ADMIN_APPROVED]: { roles: [chain.ROLE.OFFICER], title: "Expense authorised — ready to pay" },
+  [chain.STATUS.VERIFIED]: {
+    roles: [chain.ROLE.CFO],
+    includeSubmitter: true,
+    title: "Expense verified — your approval needed",
+  },
+  [chain.STATUS.AUDIT_APPROVED]: {
+    roles: [chain.ROLE.ADMIN],
+    includeSubmitter: true,
+    title: "Expense approved — final sign-off needed",
+  },
+  [chain.STATUS.ADMIN_APPROVED]: {
+    roles: [chain.ROLE.OFFICER],
+    includeSubmitter: true,
+    title: "Expense authorised — ready to pay",
+  },
   // These two go to everyone who touched the request, not to a role.
   [chain.STATUS.PAID]: { participants: true, title: "Expense paid" },
   [chain.STATUS.REJECTED]: { participants: true, title: "Expense rejected" },
@@ -79,7 +97,13 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   let recipients = [];
   if (spec.participants) recipients = participantsOf(expense);
   else if (spec.submitterOnly) recipients = [expense.added_by ?? expense.recorded_by].filter(Boolean).map(Number);
-  else recipients = await staffWithRoles(spec.roles);
+  else {
+    recipients = await staffWithRoles(spec.roles);
+    if (spec.includeSubmitter) {
+      const submitterId = expense.added_by ?? expense.recorded_by;
+      if (submitterId != null) recipients.push(Number(submitterId));
+    }
+  }
 
   // Whoever just acted already knows.
   recipients = [...new Set(recipients)].filter((id) => Number(id) !== Number(actorId));
