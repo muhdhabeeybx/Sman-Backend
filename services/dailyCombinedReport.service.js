@@ -83,8 +83,13 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
     return depotsByNameLength.find((d) => t.includes(d.name.toLowerCase())) || null;
   };
 
-  // ── Group everything by depot id (or a synthetic key for unmatched free text) ──
-  const groups = new Map(); // key -> { name, depotId, staffEntries: Map(type->row), pfis: [...], orders: [...] }
+  // ── Group by depot, not city — Port Harcourt has more than one depot, and
+  // collapsing them into one "PORT HARCOURT" section would mix PFIs and staff
+  // entries that belong to different physical sites. Each depot gets its own
+  // section, named for the depot itself; a depot with several active PFIs
+  // (e.g. Dangote Refinery) just lists them all as separate PFI Stock rows. ──
+  const groups = new Map(); // key -> { name, staffEntries: Map(type->row), pfiIds: Set, orders: [...] }
+  const depotKey = (depot) => `depot:${depot.id}`;
   const ensureGroup = (key, name) => {
     if (!groups.has(key)) groups.set(key, { name, staffEntries: new Map(), pfiIds: new Set(), orders: [] });
     return groups.get(key);
@@ -92,14 +97,14 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
 
   for (const d of depots) {
     if (activePfis.some((p) => p.location_id === d.id)) {
-      ensureGroup(`depot:${d.id}`, d.city.toUpperCase());
+      ensureGroup(depotKey(d), d.name.toUpperCase());
     }
   }
 
   for (const r of reports) {
     const depot = matchDepot(r.location);
-    const key = depot ? `depot:${depot.id}` : `text:${r.location}`;
-    const name = depot ? depot.city.toUpperCase() : String(r.location || "UNKNOWN").toUpperCase();
+    const key = depot ? depotKey(depot) : `text:${r.location}`;
+    const name = depot ? depot.name.toUpperCase() : String(r.location || "UNKNOWN").toUpperCase();
     const group = ensureGroup(key, name);
     // Last one in wins if a role was somehow submitted twice for one location/day —
     // the unique index on (report_type, report_date, location, pfi_number,
@@ -110,13 +115,13 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
   for (const p of activePfis) {
     const depot = depots.find((d) => d.id === p.location_id);
     if (!depot) continue;
-    ensureGroup(`depot:${depot.id}`, depot.city.toUpperCase()).pfiIds.add(p.id);
+    ensureGroup(depotKey(depot), depot.name.toUpperCase()).pfiIds.add(p.id);
   }
 
   for (const o of ordersToday) {
     const depot = depots.find((d) => d.id === o.depot_id);
-    const key = depot ? `depot:${depot.id}` : `depot-orphan:${o.depot_id}`;
-    const name = depot ? depot.city.toUpperCase() : "OTHER";
+    const key = depot ? depotKey(depot) : `depot-orphan:${o.depot_id}`;
+    const name = depot ? depot.name.toUpperCase() : "OTHER";
     const group = ensureGroup(key, name);
     group.orders.push(o);
     if (o.pfi_id) group.pfiIds.add(o.pfi_id);

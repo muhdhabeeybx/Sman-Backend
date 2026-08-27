@@ -24,13 +24,13 @@ const { escapeHtml } = require("./email");
  * in the original, not a bug, so it is kept rather than "fixed".
  */
 
-const NAVY = "#1E3A5F";
+const GREEN = "#1E5F3A";
 const BORDER = "#CCCCCC";
 
 const TBL = "width:100%;border-collapse:collapse;margin-bottom:0;";
 const TH =
   "padding:7px 10px;background:" +
-  NAVY +
+  GREEN +
   ";color:#ffffff;font-weight:600;text-align:left;border:1px solid " +
   BORDER +
   ";text-transform:uppercase;";
@@ -194,13 +194,13 @@ function ordersTable(orders) {
 
 function locationSection(loc) {
   return (
-    `<div style='margin-top:28px;padding:0 0 4px;border-top:2px solid ${NAVY};'>` +
-    `<h3 style='margin:10px 0 4px;font-size:14px;color:${NAVY};'>${escapeHtml(loc.name)}</h3>` +
-    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${NAVY};'>Staff Entries</p>` +
+    `<div style='margin-top:28px;padding:0 0 4px;border-top:2px solid ${GREEN};'>` +
+    `<h3 style='margin:10px 0 4px;font-size:14px;color:${GREEN};'>${escapeHtml(loc.name)}</h3>` +
+    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${GREEN};'>Staff Entries</p>` +
     staffEntriesTable(loc.staffEntries) +
-    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${NAVY};'>PFI Stock</p>` +
+    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${GREEN};'>PFI Stock</p>` +
     pfiStockTable(loc.pfiStock) +
-    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${NAVY};'>Orders</p>` +
+    `<p style='margin:18px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${GREEN};'>Orders</p>` +
     ordersTable(loc.orders) +
     `</div>`
   );
@@ -218,9 +218,9 @@ function combinedReportBody(d) {
     `&nbsp;&bull;&nbsp; &#8358;${amountNaira.toLocaleString("en-NG")} total`;
 
   const header =
-    `<h2 style='margin:0 0 4px;font-size:16px;color:${NAVY};'>Daily Report &mdash; ${plainDate(d.reportDate)}</h2>` +
+    `<h2 style='margin:0 0 4px;font-size:16px;color:${GREEN};'>Daily Report &mdash; ${plainDate(d.reportDate)}</h2>` +
     `<p style='margin:0 0 20px;color:#555;text-transform:uppercase;'>${summary}</p>` +
-    `<hr style='border:none;border-top:2px solid ${NAVY};margin:0;'/>`;
+    `<hr style='border:none;border-top:2px solid ${GREEN};margin:0;'/>`;
 
   return header + d.locations.map(locationSection).join("");
 }
