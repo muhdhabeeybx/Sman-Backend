@@ -109,7 +109,7 @@ const arg = (name, def = null) => {
   }
 
   const recipient = toSmsRecipient(to);
-  const sender = process.env.TERMII_SENDER_ID || "Soroman";
+  const sender = arg("from") || process.env.TERMII_SENDER_ID || "Soroman";
 
   console.log("── Termii live send ──────────────────────────────");
   console.log(`  to (formatted): ${recipient}`);
