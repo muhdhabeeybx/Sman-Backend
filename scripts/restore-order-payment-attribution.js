@@ -193,6 +193,41 @@ async function main() {
       displaced.add(a.order_id);
     }
 
+    /**
+     * And any paid order that took money and got nothing written up.
+     *
+     * A wallet hold is proof the money left the customer's balance. An order
+     * holding one with no allocation behind it was funded from a credit that
+     * allocateOrderFunding could not see — usually because an over-allocated
+     * order had already claimed every naira of it.
+     *
+     * ME11489 is the case: confirmed with a ₦54,450,000 hold against credit
+     * 33118214633, which order 11448 had taken whole (₦100,000,000) despite
+     * needing only ₦45,550,000 of it. Nothing was left to allocate, so the
+     * report fell back to inferring a source and printed the ₦100m credit
+     * against both orders.
+     *
+     * Run cap-over-allocated-orders.js first: it hands the over-claimed
+     * remainder back, and the leftover pass below then has something real to
+     * attribute. Without that this finds nothing for them, which is correct
+     * rather than useful.
+     */
+    const unfunded = (
+      await client.query(`
+        SELECT o.id
+          FROM orders o
+          JOIN wallet_holds h ON h.order_id = o.id
+         WHERE o.payment_status = 'Paid'
+           AND NOT EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.order_id = o.id)
+      `)
+    ).rows;
+    const heldButUnwritten = new Set();
+    for (const row of unfunded) {
+      if (rewriting.has(row.id)) continue;
+      rewriting.add(row.id);
+      heldButUnwritten.add(row.id);
+    }
+
     // ── 3. The orders, and what each actually consumed ────────────────────
     // The wallet hold is the authority on what was taken; orders paid before
     // holds existed fall back to their own total. An unpaid order consumed
@@ -266,7 +301,7 @@ async function main() {
     // credits the statement says are theirs. A displaced order is only
     // entitled to whatever is left after that, which is the entire point of
     // pulling it into the rewrite.
-    const rewriteOrder = [...targetOrderIds, ...displaced];
+    const rewriteOrder = [...targetOrderIds, ...displaced, ...heldButUnwritten];
 
     for (const orderId of rewriteOrder) {
       const order = orderById.get(orderId);
@@ -470,6 +505,7 @@ async function main() {
 
     console.log(`\nOrders with statement evidence : ${targetOrderIds.length}`);
     console.log(`Orders holding another's credit: ${displaced.size}`);
+    console.log(`Paid, held, nothing written up : ${heldButUnwritten.size}`);
     console.log(`Orders whose funding changes   : ${report.length}`);
     console.log(`Allocation rows to be written  : ${planned.length}`);
     console.log(`Deposit remainders to correct  : ${remainderChanges.length}`);

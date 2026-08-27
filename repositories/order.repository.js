@@ -426,12 +426,23 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
     creditsByCustomer.get(c.customerId).push(c);
   }
 
-  /** Newest first until `target` is covered; `[]` if the wallet cannot cover it. */
+  /**
+   * Newest first until `target` is covered; `[]` if the wallet cannot cover it.
+   *
+   * Each entry carries a `take` — how much of that credit the target actually
+   * needed. The last one is almost always partial, and returning it whole is
+   * how ME11489 came to report ₦100,000,000 received against a ₦54,450,000
+   * order: it drew on a ₦100m credit, and the trace printed the credit rather
+   * than the draw. The credit was already fully attributed to another order,
+   * so the same ₦100m appeared twice on one report.
+   */
   const cover = (list, target, exact = false) => {
     const taken = [];
     let running = 0;
     for (const c of list) {
-      taken.push(c);
+      const remaining = target - running;
+      const take = exact ? Number(c.amount || 0) : Math.min(Number(c.amount || 0), Math.max(0, remaining));
+      taken.push({ ...c, take });
       running += Number(c.amount || 0);
       // Fractions of a naira are rounding noise from decimal columns, not a
       // real shortfall.
@@ -489,7 +500,8 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
 
         return {
           depositId: c.depositId,
-          amount: Number(c.amount || 0),
+          // What this order drew, not what the credit was worth — see cover().
+          amount: Number(c.take ?? c.amount ?? 0),
           createdAt: c.createdAt,
           description: c.description || "",
           reference: c.reference || "",
@@ -820,6 +832,8 @@ const findFinanceReport = async ({
    */
   const transfersOut = orderIds.length
     ? await db.execute(sql`
+        -- A recorded overpayment transfer: the credit names the order the
+        -- surplus came off, so the outgoing leg is recoverable from it.
         SELECT
           (substring(d.description from 'received from order #([0-9]+)'))::int AS "orderId",
           d.id AS "depositId",
@@ -838,6 +852,37 @@ const findFinanceReport = async ({
           AND d.description ~ 'received from order #[0-9]+'
           AND (substring(d.description from 'received from order #([0-9]+)'))::int
               IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+
+        UNION ALL
+
+        -- And a later order drawing on the surplus of a credit that, by bank
+        -- match, belongs to an earlier one. No description records this — the
+        -- allocations themselves do: a wallet draw on a deposit whose bank row
+        -- sits on a different order IS money moving between those two orders.
+        --
+        -- ME11448 is the case. It received ₦163,350,000 of bank credit against
+        -- a ₦108,900,000 order, and ME11489 later drew the ₦54,450,000
+        -- difference. Without this leg the surplus showed as an overpayment on
+        -- one order and as money from nowhere on the other, and the same
+        -- ₦54,450,000 was counted twice across the report.
+        SELECT
+          b.order_id AS "orderId",
+          d.id AS "depositId",
+          w.applied_amount AS amount,
+          d.created_at AS "createdAt",
+          d.description,
+          w.order_id AS "toOrderId",
+          o3.company_name AS "toOrderCompany",
+          st2.first_name AS "recorderFirstName",
+          st2.surname AS "recorderSurname"
+        FROM order_deposit_allocations w
+        JOIN order_deposit_allocations b
+          ON b.deposit_id = w.deposit_id AND b.source = 'bank' AND b.order_id <> w.order_id
+        JOIN deposits d ON d.id = w.deposit_id
+        JOIN orders o3 ON o3.id = w.order_id
+        LEFT JOIN staff st2 ON st2.id = d.recorded_by
+        WHERE w.source = 'wallet'
+          AND b.order_id IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
       `)
     : [];
 
