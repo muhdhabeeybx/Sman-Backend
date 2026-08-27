@@ -116,6 +116,56 @@ describe("DELETE /api/orders/:id — hard delete must give the PFI its stock bac
     assert.equal(remainingAllocations.length, 0, "the allocation row is gone too");
   });
 
+  /**
+   * Deleting a paid order used to destroy the customer's money.
+   *
+   * placeHold() takes the amount out of customers.balance, and the hold row is
+   * the only record that it is owed back. The delete removed that row with a
+   * raw DELETE, so the balance stayed short with nothing on the ledger saying
+   * why. Order PU11486 — ₦103,700,000, deleted 2026-08-26 — left its customer
+   * with three unspent credits and a zero balance.
+   *
+   * The assertion is on the BALANCE, not on the hold row: the row is supposed
+   * to be gone afterwards either way, so its absence proves nothing.
+   */
+  test("deleting a paid order gives the customer their money back", async () => {
+    const walletService = require("../services/wallet.service");
+
+    const { order } = await placeOrder({
+      customerId,
+      state: "Lagos",
+      depotId,
+      productId,
+      quantity: 2000,
+      deliveryType: "pickup",
+      trucks: [],
+    });
+    const total = Number(order.totalAmount);
+
+    await walletService.credit({ customerId, amount: total, description: "delete-test funding" });
+    const funded = Number((await customerRepo.findById(customerId)).balance);
+
+    const held = await walletService.placeHold({ customerId, orderId: order.id, amount: total });
+    assert.equal(held.success, true, "the hold must be placed for this test to mean anything");
+    assert.equal(
+      Number((await customerRepo.findById(customerId)).balance),
+      funded - total,
+      "placing the hold took the money out of the balance",
+    );
+
+    const res = await request(app)
+      .delete(`/api/orders/${order.id}`)
+      .set("Authorization", `Bearer ${superStaff.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    assert.equal(
+      Number((await customerRepo.findById(customerId)).balance),
+      funded,
+      "deleting the order returned the held money — it must not vanish with the hold row",
+    );
+  });
+
   test("a non-super-admin cannot delete an order", async () => {
     const { order } = await placeOrder({
       customerId,

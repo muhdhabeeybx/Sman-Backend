@@ -717,6 +717,26 @@ const deleteOrder = asyncHandler(async (req, res) => {
       await pfiRepo.releaseStock(alloc.pfiId, alloc.quantity, tx);
     }
 
+    /**
+     * Hand the customer's money back before the hold row is destroyed.
+     *
+     * placeHold() takes the money out of customers.balance and the hold row is
+     * the only record that it is owed back. Deleting that row outright — which
+     * is what this did — left the balance permanently short with nothing on
+     * the ledger to show why.
+     *
+     * Order PU11486 is how it surfaced: ₦103,700,000, Paid, deleted on
+     * 2026-08-26. Its customer was left holding three unspent credits totalling
+     * exactly that and a balance of zero, so the money could not be put toward
+     * the replacement order and the credits looked lost.
+     *
+     * releaseHold does the whole reversal — credits the balance, marks the hold
+     * released, and returns each deposit's remainingAmount so the credits can
+     * fund something else. It is a no-op on a hold already converted, which is
+     * correct: that money genuinely left, and its debit row says so.
+     */
+    const released = await walletService.releaseHold(orderId, tx);
+
     // The three RESTRICT relations, which would otherwise block the delete.
     const counts = {};
     for (const table of ["tickets", "commissions", "wallet_holds"]) {
@@ -725,6 +745,7 @@ const deleteOrder = asyncHandler(async (req, res) => {
       );
       counts[table] = rows.length ?? rows.rowCount ?? 0;
     }
+    counts.walletReleased = released?.success ? Number(order.totalAmount) : 0;
 
     // Everything else cascades or nulls out via its own constraint.
     await tx.execute(sql`DELETE FROM orders WHERE id = ${orderId}`);
