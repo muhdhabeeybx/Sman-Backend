@@ -1,4 +1,7 @@
 const asyncHandler = require("express-async-handler");
+const { inArray } = require("drizzle-orm");
+const { db } = require("../../config/db");
+const { pfis } = require("../../db/schema");
 const { bankAccountRepo } = require("../../repositories");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
@@ -24,8 +27,28 @@ const getBankAccountById = asyncHandler(async (req, res) => {
   });
 });
 
+
+/**
+ * The locations the chosen PFIs sit in.
+ *
+ * depot_ids is no longer picked by hand — a location is what the assigned
+ * PFIs imply. Deriving it on every save keeps everything still reading it (the
+ * subaccount lookup, staff scope, the accounts list) working, and makes it
+ * impossible for the two to disagree.
+ */
+async function depotsForPfis(pfiIds) {
+  const ids = (Array.isArray(pfiIds) ? pfiIds : []).map(Number).filter((n) => !Number.isNaN(n));
+  if (!ids.length) return { pfiIds: [], depotIds: [] };
+  const rows = await db
+    .select({ locationId: pfis.locationId })
+    .from(pfis)
+    .where(inArray(pfis.id, ids));
+  const depotIds = [...new Set(rows.map((r) => r.locationId).filter((v) => v != null))];
+  return { pfiIds: ids, depotIds };
+}
+
 const createBankAccount = asyncHandler(async (req, res) => {
-  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, depotIds, lpgStationIds, usage, notes } = req.body;
+  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, pfiIds, lpgStationIds, usage, notes } = req.body;
 
   if (!bankName || !accountName || !accountNumber) {
     return res.status(400).json({
@@ -33,6 +56,8 @@ const createBankAccount = asyncHandler(async (req, res) => {
       message: "Bank name, account name, and account number are required",
     });
   }
+
+  const scoped = await depotsForPfis(pfiIds);
 
   const account = await bankAccountRepo.create({
     bankName: bankName.trim(),
@@ -43,7 +68,8 @@ const createBankAccount = asyncHandler(async (req, res) => {
     currency: currency || "NGN",
     status: status || "Active",
     isDefault: Boolean(isDefault),
-    depotIds: Array.isArray(depotIds) ? depotIds : [],
+    pfiIds: scoped.pfiIds,
+    depotIds: scoped.depotIds,
     lpgStationIds: Array.isArray(lpgStationIds) ? lpgStationIds : [],
     usage: Array.isArray(usage) ? usage : [],
     notes: notes || "",
@@ -63,7 +89,17 @@ const updateBankAccount = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Bank account not found" });
   }
 
-  const updatedAccount = await bankAccountRepo.update(req.params.id, req.body);
+  // Same rule as create: the locations follow the PFIs. Only recomputed when
+  // pfiIds is actually part of the update, so a patch changing only the bank
+  // name does not silently clear the assignment.
+  const patch = { ...req.body };
+  if (patch.pfiIds !== undefined) {
+    const scoped = await depotsForPfis(patch.pfiIds);
+    patch.pfiIds = scoped.pfiIds;
+    patch.depotIds = scoped.depotIds;
+  }
+
+  const updatedAccount = await bankAccountRepo.update(req.params.id, patch);
 
   res.json({
     success: true,

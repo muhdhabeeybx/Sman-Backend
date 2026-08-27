@@ -18,6 +18,18 @@ const bankAccounts = pgTable("bank_accounts", {
   currency: varchar("currency", { length: 10 }).default("NGN").notNull(),
   status: varchar("status", { length: 20 }).default("Active").notNull(),
   isDefault: boolean("is_default").default(false).notNull(),
+  /**
+   * Which PFIs collect into this account — the assignment that matters.
+   *
+   * Two PFIs can run out of one location at the same time and need separate
+   * accounts, which a location-level link cannot express. See migration 0012.
+   */
+  pfiIds: jsonb("pfi_ids").default([]).notNull(),
+  /**
+   * Derived from the locations of `pfiIds` on every save, never picked by
+   * hand. Kept so everything already reading it — the subaccount lookup,
+   * staff scope, the accounts list — keeps working unchanged.
+   */
   depotIds: jsonb("depot_ids").default([]).notNull(),
   lpgStationIds: jsonb("lpg_station_ids").default([]).notNull(),
   /** Which areas may collect into this account: "truck_sales", "expenses". */

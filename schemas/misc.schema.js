@@ -239,7 +239,13 @@ const bankAccountBase = {
   currency: optionalString("Currency", 10),
   status: enumOf("Status", ["Active", "Inactive", "Suspended"]).optional(),
   isDefault: z.boolean({ error: "isDefault must be true or false" }).optional(),
-  depotIds: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
+  /**
+   * The PFIs that collect into this account. `depotIds` is derived from their
+   * locations server-side and is not accepted from a client any more — a
+   * location is what the chosen PFIs imply, not a separate choice that could
+   * disagree with them.
+   */
+  pfiIds: z.array(z.union([id("PFI id"), z.string(), z.number()])).optional(),
   lpgStationIds: z.array(z.union([id("Station id"), z.string(), z.number()])).optional(),
   /**
    * Which areas of the app may collect into this account.
