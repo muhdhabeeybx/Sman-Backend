@@ -58,9 +58,9 @@ const resolveOfficerName = async (id) => {
 };
 
 const getPfis = asyncHandler(async (req, res) => {
-  const { search, status, page = 1, limit = 100, location } = req.query;
+  const { search, status, page = 1, limit = 100, location, type } = req.query;
 
-  const result = await pfiRepo.findAll({ search, status, location, scopeUser: req.user, page, limit });
+  const result = await pfiRepo.findAll({ search, status, location, type, scopeUser: req.user, page, limit });
   result.pfis = await withFinancials(result.pfis || []);
 
   res.json({ success: true, data: result });
@@ -82,6 +82,16 @@ const getPfiById = asyncHandler(async (req, res) => {
 
   res.json({ success: true, data: { pfi, expenses, movements } });
 });
+
+/**
+ * "coastal" unless the body explicitly says gantry.
+ *
+ * Anything unrecognised falls back to coastal rather than 400-ing: the column
+ * defaults to coastal, every existing row is coastal, and a client that has not
+ * been taught about types yet must keep creating the kind it always did.
+ */
+const normalisePfiType = (raw) =>
+  String(raw || "").trim().toLowerCase() === "gantry" ? "gantry" : "coastal";
 
 const createPfi = asyncHandler(async (req, res) => {
   const pfi_number = req.body.pfi_number || req.body.pfiNumber;
@@ -105,6 +115,13 @@ const createPfi = asyncHandler(async (req, res) => {
   const vessel_name = req.body.vessel_name || req.body.vesselName;
   const surveyor_name = req.body.surveyor_name || req.body.surveyorName;
   const surveyor_phone = req.body.surveyor_phone || req.body.surveyorPhone;
+  const pfi_type = normalisePfiType(req.body.pfi_type ?? req.body.pfiType);
+  const ticket_count = req.body.ticket_count ?? req.body.ticketCount;
+
+  // A gantry batch has no shipping papers and no vessel. Dropping these here
+  // rather than trusting the client means a form that once sent them cannot
+  // leave a gantry row carrying a BL figure it will then be costed against.
+  const isGantry = pfi_type === "gantry";
 
   if (!pfi_number) {
     return res.status(400).json({ success: false, message: "PFI number is required" });
@@ -154,6 +171,7 @@ const createPfi = asyncHandler(async (req, res) => {
 
   const pfi = await pfiRepo.create({
     pfiNumber: String(pfi_number).trim(),
+    pfiType: pfi_type,
     description: description || "",
     pfiDate: parseDate(pfi_date),
     locationId: location_id_val,
@@ -165,9 +183,13 @@ const createPfi = asyncHandler(async (req, res) => {
     startingQtyLitres: Number(starting_qty_litres) || 0,
     // Left null when not supplied — an unknown BL must not read as zero, or
     // every money figure downstream would silently compute against it.
-    blQtyLitres: bl_qty_litres == null || bl_qty_litres === "" ? null : Number(bl_qty_litres),
-    blQtyMt: bl_qty_mt == null || bl_qty_mt === "" ? null : Number(bl_qty_mt),
-    qtyVolumeMt: Number(qty_volume_mt) || 0,
+    blQtyLitres:
+      isGantry || bl_qty_litres == null || bl_qty_litres === "" ? null : Number(bl_qty_litres),
+    blQtyMt: isGantry || bl_qty_mt == null || bl_qty_mt === "" ? null : Number(bl_qty_mt),
+    qtyVolumeMt: isGantry ? "0" : Number(qty_volume_mt) || 0,
+    // Same "blank means unknown" rule: zero tickets is a real answer nobody
+    // has given yet.
+    ticketCount: ticket_count == null || ticket_count === "" ? null : Number(ticket_count),
     unitPrice: String(Number(unit_price) || 0),
     creditBalance: String(Number(credit_balance) || 0),
     auditOfficerId: audit_officer ? (parseInt(audit_officer, 10) || audit_officer) : null,
@@ -177,10 +199,10 @@ const createPfi = asyncHandler(async (req, res) => {
     commissionOfficerId: commission_officer ? (parseInt(commission_officer, 10) || commission_officer) : null,
     salesManagerId: sales_manager ? (parseInt(sales_manager, 10) || sales_manager) : null,
     ...officerNames,
-    vesselBroker: vessel_broker || "",
-    vesselName: vessel_name || "",
-    surveyorName: surveyor_name || "",
-    surveyorPhone: surveyor_phone || "",
+    vesselBroker: isGantry ? "" : vessel_broker || "",
+    vesselName: isGantry ? "" : vessel_name || "",
+    surveyorName: isGantry ? "" : surveyor_name || "",
+    surveyorPhone: isGantry ? "" : surveyor_phone || "",
   });
 
   // Every PFI becomes an expense category the moment it exists. Without this
@@ -203,7 +225,7 @@ const updatePfi = asyncHandler(async (req, res) => {
 
   const allowedFields = [
     "pfi_number", "description", "pfi_date", "status", "starting_qty_litres",
-    "bl_qty_litres", "bl_qty_mt",
+    "bl_qty_litres", "bl_qty_mt", "ticket_count",
     "qty_volume_mt", "sold_qty_litres", "total_amount", "unit_price", "credit_balance", "product_unit",
     "vessel_broker", "vessel_name", "surveyor_name", "surveyor_phone",
     "closure_date", "total_inflow", "closure_bank", "purchase_cost",
@@ -225,10 +247,35 @@ const updatePfi = asyncHandler(async (req, res) => {
       } else if (field === "bl_qty_mt") {
         // Same "blank means unknown" rule as bl_qty_litres.
         updateData.blQtyMt = value === "" || value === null ? null : Number(value);
+      } else if (field === "ticket_count") {
+        updateData.ticketCount = value === "" || value === null ? null : Number(value);
       } else {
         updateData[camelKey] = value;
       }
     }
+  }
+
+  // Switching a batch to gantry has to clear what stops applying, not just
+  // stop showing it. A leftover BL figure would still be what pfiValue is
+  // computed from, so the batch would keep reporting a cost against a document
+  // it no longer has.
+  const rawType = req.body.pfi_type ?? req.body.pfiType;
+  const pfiType = rawType !== undefined ? normalisePfiType(rawType) : pfi.pfiType;
+  if (rawType !== undefined) updateData.pfiType = pfiType;
+
+  if (pfiType === "gantry") {
+    Object.assign(updateData, {
+      blQtyLitres: null,
+      blQtyMt: null,
+      qtyVolumeMt: "0",
+      vesselBroker: "",
+      vesselName: "",
+      surveyorName: "",
+      surveyorPhone: "",
+    });
+  } else if (rawType !== undefined) {
+    // Coming back the other way, the ticket count is the gantry-only fact.
+    updateData.ticketCount = null;
   }
 
   const customUnit = req.body.product_unit || req.body.productUnit;

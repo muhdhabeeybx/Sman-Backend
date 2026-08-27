@@ -23,6 +23,12 @@ const pfis = pgTable(
   {
     id: serial("id").primaryKey(),
     pfiNumber: varchar("pfi_number", { length: 100 }).notNull(),
+    // "coastal" or "gantry". A coastal batch arrives by sea, so it is billed on
+    // the BL figure and carries vessel and surveyor details; a gantry batch is
+    // an allocation bought at the loading gantry and split into tickets, with
+    // one quantity and none of that. Everything that reads a BL, a surplus or a
+    // vessel is coastal-only — see lib/pfiFinance.js.
+    pfiType: varchar("pfi_type", { length: 20 }).default("coastal").notNull(),
     status: pfiStatusEnum("status").default("active").notNull(),
     description: text("description").default(""),
     pfiDate: timestamp("pfi_date", { withTimezone: true }),
@@ -48,6 +54,10 @@ const pfis = pgTable(
     // represent 19863.55 and would show 19863.549805.
     blQtyMt: decimal("bl_qty_mt", { precision: 14, scale: 2 }),
     qtyVolumeMt: decimal("qty_volume_mt", { precision: 14, scale: 2 }).default("0"),
+    // Gantry only: how many tickets the allocation was split into. Nullable
+    // with no default for the same reason as blQtyLitres — a batch nobody has
+    // counted tickets for is not a batch with zero tickets.
+    ticketCount: integer("ticket_count"),
     soldQtyLitres: integer("sold_qty_litres").default(0).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).default("0"),
     unitPrice: decimal("unit_price", { precision: 15, scale: 2 }).default("0"),
@@ -88,8 +98,11 @@ const pfis = pgTable(
     index("pfis_location_product_status_idx").on(table.locationId, table.productId, table.status),
     index("pfis_lpg_station_idx").on(table.lpgStationId),
     index("pfis_status_idx").on(table.status),
+    index("pfis_pfi_type_idx").on(table.pfiType),
     check("pfis_qty_check", sql`${table.startingQtyLitres} >= 0`),
     check("pfis_sold_qty_check", sql`${table.soldQtyLitres} >= 0`),
+    check("pfis_pfi_type_check", sql`${table.pfiType} IN ('coastal', 'gantry')`),
+    check("pfis_ticket_count_check", sql`${table.ticketCount} IS NULL OR ${table.ticketCount} >= 0`),
   ]
 );
 

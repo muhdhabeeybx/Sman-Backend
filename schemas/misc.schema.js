@@ -80,6 +80,15 @@ const listPfis = pagination.extend({
     .optional()
     .or(z.literal("")),
   location: z.union([z.string(), z.number()]).transform((v) => String(v).trim()).optional().or(z.literal("")),
+  // Coastal and gantry batches now share one list and read nothing alike — a
+  // gantry row has no BL, no surplus and no vessel — so they need separating.
+  type: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .pipe(enumOf("Type", ["coastal", "gantry", "all"]))
+    .optional()
+    .or(z.literal("")),
 });
 
 // --- tickets --------------------------------------------------------------
@@ -537,6 +546,13 @@ const optPfiDate = (label = "Date") =>
 const pfiBase = {
   pfiNumber: z.string().trim().max(100).optional(),
   pfi_number: z.string().trim().max(100).optional(),
+  // Coastal batches arrive by sea and are billed on a BL; gantry batches are
+  // an allocation bought at the loading gantry and split into tickets. Absent
+  // means coastal — the only kind that existed before the distinction did.
+  pfiType: enumOf("PFI type", ["coastal", "gantry"]).optional(),
+  pfi_type: enumOf("PFI type", ["coastal", "gantry"]).optional(),
+  ticketCount: optPfiBlQty("Number of tickets"),
+  ticket_count: optPfiBlQty("Number of tickets"),
   description: optPfiStr("Description", 1000),
   pfiDate: optPfiDate("PFI date"),
   pfi_date: optPfiDate("PFI date"),

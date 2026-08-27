@@ -53,7 +53,7 @@ const findByNumber = async (pfiNumber) => {
   return { ...row, _id: String(row.id) };
 };
 
-const findAll = async ({ search, status, location, scopeUser, page = 1, limit = 100 } = {}) => {
+const findAll = async ({ search, status, location, type, scopeUser, page = 1, limit = 100 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
@@ -81,6 +81,10 @@ const findAll = async ({ search, status, location, scopeUser, page = 1, limit = 
 
   if (status && status !== "all") {
     conditions.push(eq(pfis.status, status));
+  }
+
+  if (type && type !== "all") {
+    conditions.push(eq(pfis.pfiType, type));
   }
 
   if (location) {
