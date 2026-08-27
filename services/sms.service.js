@@ -38,7 +38,14 @@ const sendSMSTermii = async (phone, sms, channel = CHANNELS.GENERIC) => {
   const response = await axios.post(
     // Termii's send endpoint is /api/sms/send. The bare /sms/send path 404s,
     // which is what surfaced as "Termii ... channel error ... status code 404".
-    `${process.env.TERMII_BASE_URL || "https://v3.api.termii.com"}/api/sms/send`,
+    //
+    // Base URL defaults to v4 — Termii assigns each account its own regional
+    // base URL, and this account is on v4. An account whose deployment forgot
+    // to set TERMII_BASE_URL was silently posting to the stale v3 host and
+    // getting 401 Unauthorized (auth, not the key), so real OTPs never sent.
+    // Set TERMII_BASE_URL explicitly per environment; this default is the
+    // safety net, not the source of truth.
+    `${process.env.TERMII_BASE_URL || "https://v4.api.termii.com"}/api/sms/send`,
     {
       to: formatPhoneForTermii(phone),
       from: process.env.TERMII_SENDER_ID || "Soroman",
