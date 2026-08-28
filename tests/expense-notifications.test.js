@@ -70,7 +70,23 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     admin = await make([chain.ROLE.ADMIN], "Admin");
   });
 
+  /**
+   * Take the fixture staff away again.
+   *
+   * They used to be left behind, and that quietly broke this file over time:
+   * every run added four more staff, one of them holding the CFO role, so the
+   * `verified` fan-out grew by one recipient per run — each costing two
+   * preference lookups and an inbox insert. After a few dozen runs the local
+   * test database held twenty finance-role staff and thirty thousand
+   * notification rows, and the 3-second poll below started timing out. The
+   * failure looked exactly like a broken notification path rather than what it
+   * was, which is the expensive part.
+   *
+   * `notifications.staff_id` is ON DELETE CASCADE, so removing the staff takes
+   * their inbox rows with them.
+   */
   after(async () => {
+    await db.delete(staff).where(sql`${staff.email} LIKE ${`notify-%-${RUN}@soroman.test`}`);
     await closeDb();
   });
 
