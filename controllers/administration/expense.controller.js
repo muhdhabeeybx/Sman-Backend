@@ -403,6 +403,28 @@ const createExpense = asyncHandler(async (req, res) => {
   const { actorId, actorName } = await actorFor(req);
   const { vendorId, vendorName } = await vendorFor(req.body);
 
+  /**
+   * Booking money that has ALREADY left the bank, straight in as paid.
+   *
+   * For a standing order, a cash payment made at a depot, a historical cost
+   * being brought onto the books — spending that happened by some other route
+   * and is being written down after the fact. Walking it through four
+   * sign-offs would be approving a payment that has already gone, which is
+   * theatre, and a chain of rubber-stamps makes the real approvals harder to
+   * trust.
+   *
+   * Super admin only, and it still demands the settlement facts: which account
+   * it left and how much actually cleared. Skipping the approval chain is the
+   * point; skipping the evidence is not, and a payment nobody can trace to an
+   * account is a rumour rather than a record.
+   */
+  const directToPaid = req.body.record_as_paid === true || req.body.recordAsPaid === true;
+  if (directToPaid && !chain.canRecordAsPaid(req.user)) {
+    throw httpErr(403, "Only a super admin can record an expense as already paid.");
+  }
+
+  const payment = directToPaid ? paymentFor(req.body, { amount: String(amount) }) : null;
+
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
     category_id: Number(categoryId),
@@ -422,8 +444,22 @@ const createExpense = asyncHandler(async (req, res) => {
     bank_code: pick(req.body, "bank_code", "bankCode") ?? "",
     payee_account_number: req.body.payee_account_number ?? req.body.payeeAccountNumber ?? "",
     payee_account_name: req.body.payee_account_name ?? req.body.payeeAccountName ?? "",
-    // A new request always enters at the start of the chain.
-    status: chain.STATUS.PENDING,
+    // A new request enters at the start of the chain — unless a super admin
+    // is recording money that has already gone, in which case it enters at
+    // the end, with the settlement it arrived with.
+    ...(directToPaid
+      ? {
+          status: chain.STATUS.PAID,
+          ...payment,
+          // The stage stamps the chain would have written on the way past.
+          // Filling them keeps every query that reads "who paid this, and
+          // when" working, rather than leaving a paid row with a blank payer.
+          paid_by: actorId,
+          paid_at: payment.payment_date,
+          reviewed_by: actorId,
+          reviewed_at: new Date().toISOString(),
+        }
+      : { status: chain.STATUS.PENDING }),
     entered_by: actorName,
     recorded_by: actorId,
     added_by: actorId,
@@ -431,15 +467,28 @@ const createExpense = asyncHandler(async (req, res) => {
 
   await pfiExpenseRepo.writeAudit({
     expenseId: expense.id,
-    action: "created",
-    changes: expense,
+    // Named for what it was, not as an ordinary "created". This is the one
+    // record that the approval chain was bypassed, and by whom — the audit row
+    // is deliberately NOT skipped along with the chain and the notifications.
+    // Nobody asked for an untraceable expense, and one entry saying who booked
+    // it and that it never went for approval is what makes the shortcut safe
+    // to leave open.
+    action: directToPaid ? "recorded_as_paid" : "created",
+    changes: directToPaid
+      ? { ...expense, note: "Recorded as already paid by a super admin — approval chain bypassed" }
+      : expense,
     actorId,
     actorName,
   });
 
-  notifyExpenseStage({
-    expense, stage: chain.STATUS.PENDING, note: "", actorId, actorName,
-  }).catch(() => {});
+  // No notification on the direct-to-paid path. There is nobody to tell: the
+  // chain has no next actor, and telling the Expenditure Officer that a
+  // payment they will never action is waiting for them is worse than silence.
+  if (!directToPaid) {
+    notifyExpenseStage({
+      expense, stage: chain.STATUS.PENDING, note: "", actorId, actorName,
+    }).catch(() => {});
+  }
 
   res.status(201).json({
     success: true,

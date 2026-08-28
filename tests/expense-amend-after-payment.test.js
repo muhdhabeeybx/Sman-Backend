@@ -64,6 +64,31 @@ describe("editing a settled expense", () => {
   });
 });
 
+describe("recording an expense that is already paid", () => {
+  test("super admin only", () => {
+    assert.equal(chain.canRecordAsPaid(asRole("super_admin")), true);
+    for (const role of ["admin", "finance", "expenditure_officer", "truck_sales"]) {
+      assert.equal(chain.canRecordAsPaid(asRole(role)), false, `${role} must not bypass the chain`);
+    }
+    assert.equal(chain.canRecordAsPaid(null), false);
+    assert.equal(chain.canRecordAsPaid({}), false, "a user with no roles at all");
+  });
+
+  test("the role is read from either `roles` or a bare `role`", () => {
+    // rolesOf accepts both shapes, and the gate must not depend on which one
+    // the session happens to carry.
+    assert.equal(chain.canRecordAsPaid({ id: 1, role: "super_admin" }), true);
+    assert.equal(chain.canRecordAsPaid({ id: 1, roles: ["admin"], role: "super_admin" }), true);
+  });
+
+  test("it lands the expense at PAID, the end of the chain", () => {
+    // The status the controller writes. Worth pinning: entering anywhere else
+    // would leave a paid-in-reality row sitting in somebody's approval queue.
+    assert.equal(chain.STATUS.PAID, "paid");
+    assert.equal(chain.STATUS_STEP[chain.STATUS.PAID], chain.TOTAL_STEPS);
+  });
+});
+
 // ─── Recomputation ──────────────────────────────────────────────────────────
 
 /**

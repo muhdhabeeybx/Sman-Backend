@@ -414,7 +414,32 @@ const expenseBase = {
   reference: optionalString("Reference", 100),
   notes: optionalString("Notes", 1000),
 };
-const createExpense = z.object(expenseBase);
+
+/**
+ * Booking money that has already left the bank, straight in as paid.
+ *
+ * Super admin only — enforced in the controller against the caller's roles,
+ * which is where the question can actually be answered; the schema's job is
+ * only to let the fields through. The settlement details ride along in the
+ * same body and are validated by the same paymentFor() the mark_paid
+ * transition uses, so a direct booking cannot record less than a normal one.
+ */
+const recordAsPaidFields = {
+  record_as_paid: z.boolean().optional(),
+  recordAsPaid: z.boolean().optional(),
+  amount_paid: optInvoiceMoney("Amount paid"),
+  amountPaid: optInvoiceMoney("Amount paid"),
+  payment_reference: optionalString("Payment reference", 100),
+  paymentReference: optionalString("Payment reference", 100),
+  payment_date: optionalString("Payment date", 40),
+  paymentDate: optionalString("Payment date", 40),
+  payment_method: optionalString("Payment method", 50),
+  paymentMethod: optionalString("Payment method", 50),
+  payment_notes: optionalString("Payment notes", 1000),
+  paymentNotes: optionalString("Payment notes", 1000),
+};
+
+const createExpense = z.object({ ...expenseBase, ...recordAsPaidFields });
 const updateExpense = z.object(expenseBase).partial();
 const categoryBase = {
   name: requiredString("Category name", 255),
