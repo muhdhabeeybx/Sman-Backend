@@ -8,7 +8,7 @@ const {
   staffRepo,
   orderRepo,
 } = require("../../repositories");
-const { computeFinancials } = require("../../lib/pfiFinance");
+const { computeFinancials, explainFinancials } = require("../../lib/pfiFinance");
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
 
@@ -80,7 +80,13 @@ const getPfiById = asyncHandler(async (req, res) => {
     pfiExpenseRepo.listMovements(found.id),
   ]);
 
-  res.json({ success: true, data: { pfi, expenses, movements } });
+  // How each figure was reached, in words, with this batch's own numbers
+  // substituted in. Attached to the DETAIL response only — the list renders
+  // dozens of rows and none of them shows a formula, so carrying it there
+  // would be payload nobody reads.
+  const explain = explainFinancials(pfi, pfi.financials);
+
+  res.json({ success: true, data: { pfi, expenses, movements, explain } });
 });
 
 /**
