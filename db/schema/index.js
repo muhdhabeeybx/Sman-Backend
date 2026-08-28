@@ -70,6 +70,7 @@ const deviceTokenSchema = require("./deviceToken");
 const staffPageOverrideSchema = require("./staffPageOverride");
 // After ./staff — messageTemplate destructures it at load time.
 const messageTemplateSchema = require("./messageTemplate");
+const messageCampaignSchema = require("./messageCampaign");
 
 module.exports = {
   ...enums,
@@ -132,4 +133,5 @@ module.exports = {
   ...deviceTokenSchema,
   ...staffPageOverrideSchema,
   ...messageTemplateSchema,
+  ...messageCampaignSchema,
 };

@@ -127,6 +127,89 @@ function checkSmsEligibility(input) {
   return { ok: true, reason: null, phone: parsed };
 }
 
+/**
+ * The last ten digits — what actually identifies a subscriber however the
+ * number was typed, and the key both `contacts.phone_normalized` and
+ * `customers.phone_normalized` are generated from.
+ *
+ * Kept here so the JS and the SQL cannot drift: two hand-rolled copies of this
+ * rule already existed once (see the note at the top of this file), and the
+ * import path needs to dedupe a spreadsheet in memory before it ever reaches
+ * a generated column.
+ *
+ * @param {string} input
+ * @returns {string} up to 10 digits, or "" for input with none
+ */
+function normalizedKey(input) {
+  return String(input ?? "").replace(/[^0-9]/g, "").slice(-10);
+}
+
+/**
+ * Hygiene verdict for a number already on the book.
+ *
+ * `checkSmsEligibility` answers "may we send an OTP here?", which folds the
+ * country allow-list into its answer and is deliberately terse about why. This
+ * answers a different question — "is this row's number worth keeping?" — for
+ * the review panel and the import preflight, where a human is going to read
+ * the reason and decide.
+ *
+ * The three verdicts are separated because they call for different actions:
+ *
+ *   ok           valid and can receive an SMS. Nothing to do.
+ *   unreachable  a real number, but a landline or a VOIP line. Worth keeping
+ *                as a contact detail; must never be counted as a messaging
+ *                recipient, because every send to one is billed and lost.
+ *   invalid      not a phone number anywhere in the world — "0802121",
+ *                "0000000000", a 12-digit mistype. 115 of 1,380 customer rows
+ *                on the live book are this.
+ *
+ * @param {string} input
+ * @returns {{verdict: "ok"|"unreachable"|"invalid", reason: string, e164: string|null, country: string|null, type: string|null}}
+ */
+function classifyPhone(input) {
+  const raw = String(input ?? "").trim();
+  if (!raw) {
+    return { verdict: "invalid", reason: "No number on file", e164: null, country: null, type: null };
+  }
+
+  const parsed = parsePhone(raw);
+  if (!parsed) {
+    const digits = raw.replace(/[^0-9]/g, "");
+    // The specific complaint, not just "invalid". Someone fixing 115 rows by
+    // hand needs to see at a glance which are truncated and which are typos.
+    const reason =
+      digits.length === 0
+        ? "No digits in this number"
+        : digits.length < 10
+          ? `Too short — only ${digits.length} digit${digits.length === 1 ? "" : "s"}`
+          : /^(\d)\1+$/.test(digits)
+            ? "Placeholder number — the same digit repeated"
+            : digits.length > 14
+              ? `Too long — ${digits.length} digits`
+              : "Not a valid number in any country";
+    return { verdict: "invalid", reason, e164: null, country: null, type: null };
+  }
+
+  if (!parsed.smsCapable) {
+    const kind = parsed.type === "VOIP" ? "a VOIP line" : "a landline";
+    return {
+      verdict: "unreachable",
+      reason: `Valid, but ${kind} — an SMS to it is billed and never arrives`,
+      e164: parsed.e164,
+      country: parsed.country,
+      type: parsed.type,
+    };
+  }
+
+  return {
+    verdict: "ok",
+    reason: "",
+    e164: parsed.e164,
+    country: parsed.country,
+    type: parsed.type,
+  };
+}
+
 module.exports = {
   DEFAULT_COUNTRY,
   SMS_CAPABLE_TYPES,
@@ -135,4 +218,6 @@ module.exports = {
   toE164,
   toSmsRecipient,
   checkSmsEligibility,
+  normalizedKey,
+  classifyPhone,
 };

@@ -3,6 +3,9 @@ module.exports = {
   staffScopeRepo: require("./staffScope.repository"),
   customerRepo: require("./customer.repository"),
   contactRepo: require("./contact.repository"),
+  // Customers and contacts as one list — see the header of the file for why
+  // the two tables stay separate but the two PAGES did not.
+  peopleRepo: require("./people.repository"),
   truckRepo: require("./truck.repository"),
   driverRepo: require("./driver.repository"),
   depotRepo: require("./depot.repository"),

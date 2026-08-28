@@ -58,6 +58,9 @@ app.use("/api/pfis", require("./routes/administration/pfi.route"));
 app.use("/api/expenses", require("./routes/administration/expense.route"));
 app.use("/api/customers", require("./routes/administration/customer.route"));
 app.use("/api/contacts", require("./routes/administration/contact.route"));
+// Customers and contacts as one book. Both routes above stay — they own
+// creating, editing and converting a record; this one owns finding it.
+app.use("/api/people", require("./routes/administration/people.route"));
 app.use("/api/delivery-customers", require("./routes/administration/deliveryCustomer.route"));
 app.use("/api/delivery-inventory", require("./routes/administration/deliveryInventory.route"));
 app.use("/api/delivery-sales", require("./routes/administration/deliverySale.route"));

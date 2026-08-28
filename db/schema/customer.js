@@ -9,6 +9,7 @@ const {
   index,
   uniqueIndex,
 } = require("drizzle-orm/pg-core");
+const { sql } = require("drizzle-orm");
 const { customerStatusEnum, customerCreatedViaEnum } = require("./enums");
 
 const customers = pgTable(
@@ -18,6 +19,19 @@ const customers = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     email: varchar("email", { length: 255 }).default(""),
     phone: varchar("phone", { length: 30 }).notNull(),
+    /**
+     * Last 10 digits, generated and stored — the same key `contacts` is
+     * deduped on, so the two tables identify a person the same way.
+     *
+     * Not unique (yet). `customers_phone_idx` below is unique on the RAW
+     * string, which lets "0803…" and "+234803…" both exist; the live book
+     * already has such pairs. They are surfaced for a human to merge rather
+     * than dropped by a constraint, because a customer row carries orders and
+     * a wallet balance. See migration 0016.
+     */
+    phoneNormalized: varchar("phone_normalized", { length: 20 }).generatedAlwaysAs(
+      sql`RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10)`
+    ),
     companyName: varchar("company_name", { length: 255 }).default(""),
     address: text("address").default(""),
     status: customerStatusEnum("status").default("Active").notNull(),

@@ -40,9 +40,25 @@ const notificationDeliveries = pgTable(
       onDelete: "cascade",
     }),
 
+    // The broadcast this attempt belongs to, when it was one. Null for every
+    // transactional send — an order confirmation has no campaign behind it.
+    campaignId: integer("campaign_id"),
+
     principalType: principalTypeEnum("principal_type"),
     staffId: integer("staff_id"),
     customerId: integer("customer_id"),
+
+    /**
+     * Who it went to, in words.
+     *
+     * staff_id / customer_id cover the principals, but a broadcast to leads
+     * has no principal at all — a contact is addressed by their details — so
+     * the log could only ever show a bare phone number. Denormalised on
+     * purpose: this is an audit log, and the name as it stood when the message
+     * went out is the truthful answer, not what the record was renamed to
+     * afterwards.
+     */
+    recipientName: varchar("recipient_name", { length: 255 }).default("").notNull(),
 
     type: varchar("type", { length: 64 }).notNull(),
     channel: notificationChannelEnum("channel").notNull(),
@@ -57,7 +73,20 @@ const notificationDeliveries = pgTable(
     providerMessageId: varchar("provider_message_id", { length: 255 }).default("").notNull(),
     error: text("error"),
 
+    /**
+     * The provider's own word for the outcome, verbatim — "DELIVERED",
+     * "Rejected", "Expired".
+     *
+     * Kept beside `status` rather than mapped into it: Termii's vocabulary is
+     * finer than our six values, and the difference between "the handset never
+     * came online" and "the network refused it" is exactly what a support
+     * question turns on.
+     */
+    providerStatus: varchar("provider_status", { length: 64 }).default("").notNull(),
+
     sentAt: timestamp("sent_at", { withTimezone: true }),
+    /** When the carrier confirmed it landed. Written by the DLR webhook only. */
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -72,6 +101,11 @@ const notificationDeliveries = pgTable(
     index("notification_deliveries_type_idx").on(table.type, table.createdAt),
     index("notification_deliveries_staff_idx").on(table.staffId, table.createdAt),
     index("notification_deliveries_customer_idx").on(table.customerId, table.createdAt),
+    // "Show me this campaign's recipients", the campaign detail view's query.
+    index("notification_deliveries_campaign_idx").on(table.campaignId, table.createdAt),
+    // The delivery-receipt lookup: a Termii callback carries only its own
+    // message id and has to find the row it belongs to.
+    index("notification_deliveries_provider_message_idx").on(table.providerMessageId),
   ]
 );
 
