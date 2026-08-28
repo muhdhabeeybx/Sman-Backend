@@ -111,6 +111,66 @@ const invoiceFigures = (body) => {
 /** The plain text fields, read in either casing. */
 const pick = (body, snake, camel) => body[snake] ?? body[camel];
 
+/** Was this field actually sent, in either casing? Distinct from "is truthy". */
+const sent = (body, snake, camel) => body[snake] !== undefined || body[camel] !== undefined;
+
+/**
+ * The invoice set, recomputed for an EDIT rather than built for a new row.
+ *
+ * `invoiceFigures` reads the request body alone and only fills a figure that
+ * arrived null. That is right on create, where the body is the whole truth,
+ * and wrong on edit in two ways:
+ *
+ *   · A patch carrying only a corrected ex-VAT figure has no `wht_rate` in it,
+ *     so the rate read as absent and the withholding was silently written to
+ *     zero — a settled schedule quietly losing its deduction.
+ *   · A patch that corrects ex-VAT leaves the OLD VAT and the OLD invoice
+ *     total in place, because both were already non-null and so were never
+ *     re-derived. The three figures stop adding up.
+ *
+ * So: a figure the caller actually sent wins. Anything they did not send is
+ * DERIVED from the new inputs rather than carried forward stale — that is what
+ * makes correcting one number correct the ones that depend on it. The
+ * withholding rate is the one exception and is carried, because it is a policy
+ * choice about the vendor, not a figure computed from the others.
+ */
+const recomputeInvoiceFigures = (existing, body) => {
+  const exVat = sent(body, "amount_ex_vat", "amountExVat")
+    ? money(pick(body, "amount_ex_vat", "amountExVat"))
+    : money(existing.amount_ex_vat);
+
+  const rate = sent(body, "wht_rate", "whtRate")
+    ? money(pick(body, "wht_rate", "whtRate"))
+    : money(existing.wht_rate);
+
+  const vat = sent(body, "vat_amount", "vatAmount")
+    ? money(pick(body, "vat_amount", "vatAmount"))
+    : exVat === null
+      ? null
+      : Math.round(exVat * gl.VAT_RATE * 100) / 100;
+
+  const invoice = sent(body, "invoice_amount", "invoiceAmount")
+    ? money(pick(body, "invoice_amount", "invoiceAmount"))
+    : exVat === null
+      ? null
+      : Math.round((exVat + (vat || 0)) * 100) / 100;
+
+  // Withholding is computed on the ex-VAT value, never the gross.
+  const wht = sent(body, "wht_deduction", "whtDeduction")
+    ? money(pick(body, "wht_deduction", "whtDeduction"))
+    : rate === null || exVat === null
+      ? money(existing.wht_deduction)
+      : Math.round(exVat * (rate / 100) * 100) / 100;
+
+  return {
+    amount_ex_vat: exVat === null ? null : String(exVat),
+    vat_amount: vat === null ? null : String(vat),
+    invoice_amount: invoice === null ? null : String(invoice),
+    wht_deduction: String(wht ?? 0),
+    wht_rate: rate === null ? null : String(rate),
+  };
+};
+
 // ─── Categories ─────────────────────────────────────────────────────────────
 
 /**
@@ -458,7 +518,10 @@ const updateExpense = asyncHandler(async (req, res) => {
     "invoice_amount", "invoiceAmount", "wht_deduction", "whtDeduction",
     "wht_rate", "whtRate",
   ].some((k) => req.body[k] !== undefined);
-  if (touchesInvoice) Object.assign(data, invoiceFigures(req.body));
+  // Recomputed against the row as it stands, not from the patch alone — see
+  // recomputeInvoiceFigures. Correcting the ex-VAT figure moves the VAT, the
+  // invoice total and the withholding with it.
+  if (touchesInvoice) Object.assign(data, recomputeInvoiceFigures(existing, req.body));
 
   if (Object.keys(data).length === 0) {
     return res.json({ success: true, message: "Nothing to update", data: { expense: existing } });
@@ -480,6 +543,15 @@ const updateExpense = asyncHandler(async (req, res) => {
     data.reviewed_at = null;
   }
 
+  // A super admin correcting a settled row does NOT send it back round the
+  // chain — the money has already moved, and re-approving a payment that has
+  // cleared would be theatre. The status, the settlement figures and the
+  // payment date are all left exactly as they are; only the details change.
+  // What DOES change is how it is recorded: the audit entry says amended, so
+  // the trail distinguishes "this was corrected after payment" from an
+  // ordinary edit made while the request was still in flight.
+  const postPayment = gate.postPayment === true;
+
   const updated = await pfiExpenseRepo.updateExpense(existing.id, data);
 
   // Only these fields are worth a diff; the rest is noise in the trail.
@@ -498,8 +570,14 @@ const updateExpense = asyncHandler(async (req, res) => {
 
   await pfiExpenseRepo.writeAudit({
     expenseId: existing.id,
-    action: "updated",
-    changes: diff,
+    // Named apart from an ordinary edit. Anyone reading the trail later needs
+    // to see at a glance that this figure was changed AFTER the bank moved —
+    // the row it produces reconciles against a payment that was made on the
+    // old numbers, and that is a fact about the record, not a detail.
+    action: postPayment ? "amended_after_payment" : "updated",
+    changes: postPayment
+      ? { ...diff, note: "Corrected after settlement by a super admin" }
+      : diff,
     actorId,
     actorName,
   });

@@ -28,6 +28,18 @@ const num = (tag) => `0803${RUN}${tag}`;
  */
 const rowsOf = (result) => result.rows ?? result;
 
+/**
+ * One login for the whole file, shared across every describe.
+ *
+ * Each describe fetching its own token meant three logins from this file
+ * alone, and the auth limiter is shared across the suite — enough extra
+ * pressure to start tipping unrelated tests into 429 when everything runs
+ * together. The token does not change between describes, so fetching it once
+ * is both cheaper and more honest about what is being tested.
+ */
+let tokenPromise = null;
+const sharedToken = () => (tokenPromise ??= staffToken(request, app));
+
 const cleanup = async () => {
   await db.execute(sql`DELETE FROM contacts WHERE phone LIKE ${`%${RUN}%`}`);
   await db.execute(sql`DELETE FROM customers WHERE phone LIKE ${`%${RUN}%`}`);
@@ -73,7 +85,7 @@ describe("people — customers and contacts as one book", () => {
   let token;
 
   before(async () => {
-    token = await staffToken(request, app);
+    token = await sharedToken();
     await cleanup();
   });
 
@@ -256,7 +268,7 @@ describe("csv import — the dry run in front of the decision", () => {
   let token;
 
   before(async () => {
-    token = await staffToken(request, app);
+    token = await sharedToken();
     await cleanup();
     await db.execute(
       sql`INSERT INTO customers (name, phone, status) VALUES ('Already A Customer', ${num("5")}, 'Active')`
