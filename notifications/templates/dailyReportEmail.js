@@ -207,10 +207,11 @@ function locationSection(loc) {
 }
 
 function combinedReportBody(d) {
-  if (d.locations.length === 0) {
+  const locations = d.locations || [];
+  if (locations.length === 0) {
     return "<p>No active locations.</p>";
   }
-  const { staffEntries, orderCount, qtyLitres, amountNaira } = d.totals;
+  const { staffEntries = 0, orderCount = 0, qtyLitres = 0, amountNaira = 0 } = d.totals || {};
   const summary =
     `${plural(staffEntries, "staff entry", "staff entries")} ` +
     `&nbsp;&bull;&nbsp; ${plural(orderCount, "order")} ` +
@@ -222,7 +223,7 @@ function combinedReportBody(d) {
     `<p style='margin:0 0 20px;color:#555;text-transform:uppercase;'>${summary}</p>` +
     `<hr style='border:none;border-top:2px solid ${GREEN};margin:0;'/>`;
 
-  return header + d.locations.map(locationSection).join("");
+  return header + locations.map(locationSection).join("");
 }
 
 function renderDailyReportEmail(d) {
@@ -231,7 +232,7 @@ function renderDailyReportEmail(d) {
 
   const html = `<p>Dear Sir,</p>${combinedReportBody(d)}<p>Best regards,<br/>Soroman System</p>`;
 
-  const { orderCount, qtyLitres, amountNaira } = d.totals;
+  const { orderCount = 0, qtyLitres = 0, amountNaira = 0 } = d.totals || {};
   const text =
     `Dear Sir,\n\n` +
     `Daily Orders report for ${subjectDate}\n\n` +

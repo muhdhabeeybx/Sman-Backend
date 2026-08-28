@@ -400,20 +400,33 @@ const dispatch = async (type, { to, data = {}, channels, force = false } = {}) =
     return { type, recipients: 0, delivered: 0, duplicates: 0, results: [] };
   }
 
+  // Recipients are delivered in bounded-concurrency batches, not one at a
+  // time: each recipient can cost up to two sequential Termii round trips
+  // (see notifications/channels/sms.js's generic→dnd fallback), so a serial
+  // loop over an "allStaff" or large-list broadcast summed those seconds
+  // across every recipient and blew past the dashboard's request timeout —
+  // invisible when SMS_ENABLED=false short-circuited every attempt, real as
+  // soon as it did actual network I/O. The cap keeps a big broadcast from
+  // opening dozens of simultaneous provider connections at once.
+  const DISPATCH_CONCURRENCY = Number(process.env.NOTIFY_DISPATCH_CONCURRENCY || 10);
   const results = [];
-  for (const recipient of resolved) {
-    try {
-      results.push(
-        await deliverToRecipient({ type, entry, data, recipient, override: channels, force })
-      );
-    } catch (err) {
-      // One recipient's failure must not cost the others their notification.
-      console.error(
-        `[notify] delivery to ${recipient.principal ? principalKey(recipient.principal) : recipient.contact.email || recipient.contact.phone} failed for ${type}:`,
-        err.message
-      );
-      results.push({ principal: recipient.principal, error: err.message, channels: {} });
-    }
+  for (let i = 0; i < resolved.length; i += DISPATCH_CONCURRENCY) {
+    const batch = resolved.slice(i, i + DISPATCH_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async (recipient) => {
+        try {
+          return await deliverToRecipient({ type, entry, data, recipient, override: channels, force });
+        } catch (err) {
+          // One recipient's failure must not cost the others their notification.
+          console.error(
+            `[notify] delivery to ${recipient.principal ? principalKey(recipient.principal) : recipient.contact.email || recipient.contact.phone} failed for ${type}:`,
+            err.message
+          );
+          return { principal: recipient.principal, error: err.message, channels: {} };
+        }
+      })
+    );
+    results.push(...batchResults);
   }
 
   return {
