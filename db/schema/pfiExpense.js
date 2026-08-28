@@ -256,7 +256,11 @@ const pfiExpenseAudits = pgTable(
   {
     id: serial("id").primaryKey(),
     expenseId: integer("expense_id").references(() => pfiExpenses.id, { onDelete: "cascade" }),
-    action: varchar("action", { length: 20 }).notNull(),
+    // 40, not 20. The two post-settlement actions — amended_after_payment and
+    // deleted_after_payment — are 21 characters, and the audit write happens
+    // AFTER the change it records, so an overflow here loses the trail entry
+    // while the change itself stands. See migration 0018.
+    action: varchar("action", { length: 40 }).notNull(),
     changes: jsonb("changes").default({}),
     actorId: integer("actor_id").references(() => staff.id, { onDelete: "set null" }),
     actorName: varchar("actor_name", { length: 255 }).default(""),

@@ -176,6 +176,131 @@ describe("recording an expense as already paid", () => {
     assert.match(res.body.message, /super admin/i);
   });
 
+  test("a super admin can delete a paid expense, and its amount comes off", async (t) => {
+    if (!categoryId) return t.skip("no seeded general expense account");
+
+    const create = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        category_id: categoryId,
+        amount: 75000,
+        description: `To delete ${RUN}`,
+        record_as_paid: true,
+        bank_paid_from: "Zenith · 1013456789",
+      });
+    assert.equal(create.status, 201, JSON.stringify(create.body));
+    const id = create.body.data.expense.id;
+    created.push(id);
+
+    const del = await request(app).delete(`${EXPENSES}/${id}`).set("Authorization", `Bearer ${token}`);
+    assert.equal(del.status, 200, JSON.stringify(del.body));
+
+    // Soft-deleted, and therefore out of every sum that reads live rows.
+    const rows = rowsOf(
+      await db.execute(sql`SELECT deleted_at FROM pfi_expenses WHERE id = ${id}`)
+    );
+    assert.ok(rows[0].deleted_at, "the row is marked deleted");
+
+    const audit = rowsOf(
+      await db.execute(sql`SELECT action FROM pfi_expense_audits WHERE expense_id = ${id}`)
+    );
+    assert.ok(
+      audit.some((a) => a.action === "deleted_after_payment"),
+      "and the trail says it was a settled row, not an ordinary withdrawal"
+    );
+  });
+
+  test("deleting a paid expense drops the PFI's total cost and landing cost", async (t) => {
+    if (!categoryId) return t.skip("no seeded general expense account");
+
+    // A cargo account is needed for the expense to attach to a PFI at all.
+    const pfiCat = rowsOf(
+      await db.execute(sql`
+        SELECT id FROM expense_categories
+        WHERE gl_group = 'pfi_direct' AND is_active IS NOT FALSE ORDER BY id LIMIT 1
+      `)
+    )[0];
+    if (!pfiCat) return t.skip("no seeded cargo expense account");
+
+    const [pfi] = rowsOf(
+      await db.execute(sql`
+        INSERT INTO pfis (pfi_number, pfi_type, starting_qty_litres, bl_qty_litres, unit_price)
+        VALUES (${`PFI-DEL-${RUN}`}, 'coastal', 1000000, 1000000, 300) RETURNING id
+      `)
+    );
+
+    const before = await request(app).get(`/api/pfis/${pfi.id}`).set("Authorization", `Bearer ${token}`);
+    const costBefore = before.body.data.pfi.financials.totalCost;
+    const landingBefore = before.body.data.pfi.financials.landingCostPerLitre;
+
+    const create = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        category_id: pfiCat.id,
+        pfi_id: pfi.id,
+        amount: 20_000_000,
+        description: `Cargo cost ${RUN}`,
+        record_as_paid: true,
+        bank_paid_from: "Zenith · 1013456789",
+      });
+    assert.equal(create.status, 201, JSON.stringify(create.body));
+    const id = create.body.data.expense.id;
+    created.push(id);
+
+    const during = await request(app).get(`/api/pfis/${pfi.id}`).set("Authorization", `Bearer ${token}`);
+    assert.equal(
+      during.body.data.pfi.financials.totalCost,
+      costBefore + 20_000_000,
+      "a paid expense lands on the cargo immediately"
+    );
+    assert.ok(
+      during.body.data.pfi.financials.landingCostPerLitre > landingBefore,
+      "and pushes the landing cost up"
+    );
+
+    await request(app).delete(`${EXPENSES}/${id}`).set("Authorization", `Bearer ${token}`).expect(200);
+
+    // The whole point: no manual deduction anywhere. The sum reads live rows
+    // and the deleted one has simply stopped being one of them.
+    const after = await request(app).get(`/api/pfis/${pfi.id}`).set("Authorization", `Bearer ${token}`);
+    assert.equal(after.body.data.pfi.financials.totalCost, costBefore, "the amount comes back off");
+    assert.equal(
+      after.body.data.pfi.financials.landingCostPerLitre,
+      landingBefore,
+      "and the landing cost returns to where it was"
+    );
+
+    await db.execute(sql`DELETE FROM pfis WHERE id = ${pfi.id}`);
+  });
+
+  test("anyone other than a super admin still cannot delete a paid expense", async (t) => {
+    if (!categoryId) return t.skip("no seeded general expense account");
+
+    const create = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        category_id: categoryId,
+        amount: 1500,
+        description: `Protected ${RUN}`,
+        record_as_paid: true,
+        bank_paid_from: "Zenith · 1013456789",
+      });
+    const id = create.body.data.expense.id;
+    created.push(id);
+
+    const res = await request(app).delete(`${EXPENSES}/${id}`).set("Authorization", `Bearer ${weakToken}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /super admin/i);
+
+    const rows = rowsOf(
+      await db.execute(sql`SELECT deleted_at FROM pfi_expenses WHERE id = ${id}`)
+    );
+    assert.equal(rows[0].deleted_at, null, "and the row survives");
+  });
+
   test("an ordinary request still enters the chain at the start", async (t) => {
     if (!categoryId) return t.skip("no seeded general expense account");
 

@@ -1,0 +1,25 @@
+-- Room for an audit action that says what actually happened.
+--
+-- Written by hand in the style of 0002–0017, for the reason set out in 0003:
+-- drizzle-kit has no snapshot of this database. Idempotent — re-running is a
+-- no-op, and widening a varchar is a catalog change with no table rewrite.
+--
+-- `pfi_expense_audits.action` was varchar(20). Every action the chain writes
+-- fits ("created", "updated", "admin_approved", "changes_requested" — 17 at
+-- the longest), so the bound was never hit and never noticed.
+--
+-- The two new post-settlement actions are both 21 characters:
+--
+--   amended_after_payment   a super admin corrected a row after it was paid
+--   deleted_after_payment   a super admin removed a row after it was paid
+--
+-- One over. Both would have thrown "value too long for type character
+-- varying(20)" from writeAudit at the moment of use — and because the audit
+-- write happens AFTER the update or the soft-delete, the change would have
+-- landed with the trail entry lost to a 500. Exactly the wrong half to lose:
+-- these are the two operations whose entire safety rests on being recorded.
+--
+-- Widened to 40 rather than to 21. The point of a bound here is to stop
+-- unbounded junk, not to be a puzzle the next action name has to fit.
+ALTER TABLE "pfi_expense_audits"
+  ALTER COLUMN "action" TYPE varchar(40);

@@ -664,11 +664,19 @@ const updateExpense = asyncHandler(async (req, res) => {
  * "reject" is the reviewer's verb, not the raiser's; it reads as a judgement
  * on the request rather than as taking it back.
  *
- * A paid expense stays undeletable: once the bank has moved, the row is a
- * record of what happened, not a proposal. Same line edit already draws, so
- * the two rules now agree.
+ * A paid expense is deletable by a super admin alone — the same line edit
+ * draws, so the two rules still agree. For everyone else the bank having moved
+ * means the row is a record of what happened rather than a proposal.
+ *
+ * Removing a paid expense takes its money back off whatever it was booked to,
+ * and that is automatic rather than a step: PFI totals are summed from live
+ * expense rows at read time (see pfiExpense.repository's aggregatesFor, which
+ * already filters `deleted_at IS NULL`), so a deleted row simply stops being
+ * counted. The cargo's total cost falls by the amount and its landing cost per
+ * litre falls with it, the next time either is read.
  */
-const isDeletableStatus = (status) => status !== chain.STATUS.PAID;
+const isDeletableStatus = (status, user) =>
+  status !== chain.STATUS.PAID || chain.canRecordAsPaid(user);
 
 const deleteExpense = asyncHandler(async (req, res) => {
   const existing = await pfiExpenseRepo.findExpenseById(req.params.id);
@@ -683,25 +691,40 @@ const deleteExpense = asyncHandler(async (req, res) => {
   if (!isOwner && !chain.canOversee(req.user)) {
     throw httpErr(403, "You can only delete a request you raised");
   }
-  if (!isDeletableStatus(existing.status)) {
+  if (!isDeletableStatus(existing.status, req.user)) {
     throw httpErr(
       400,
-      "This expense is paid and closed — it can no longer be deleted.",
+      "This expense is paid and closed — only a super admin can delete a settled record.",
     );
   }
 
+  const settled = existing.status === chain.STATUS.PAID;
   const deleted = await pfiExpenseRepo.softDeleteExpense(existing.id);
   const { actorId, actorName } = await actorFor(req);
 
   await pfiExpenseRepo.writeAudit({
     expenseId: existing.id,
-    action: "delete",
-    changes: existing,
+    // Named apart from an ordinary withdrawal. Deleting a request nobody has
+    // paid yet takes back a proposal; deleting a settled one takes money off
+    // the books after it left the bank, and the trail has to tell them apart.
+    action: settled ? "deleted_after_payment" : "delete",
+    changes: settled
+      ? { ...existing, note: "Paid expense deleted by a super admin — its amount comes off the PFI" }
+      : existing,
     actorId,
     actorName,
   });
 
-  res.json({ success: true, message: "Expense deleted", data: { expense: deleted } });
+  // Nothing to recompute by hand. PFI totals are summed from live expense rows
+  // at read time and the sum already excludes deleted ones, so the cargo's
+  // total cost and landing cost have both fallen by this amount as of now.
+  const message = settled
+    ? existing.pfi_id
+      ? "Expense deleted — its amount has come off the PFI"
+      : "Paid expense deleted"
+    : "Expense deleted";
+
+  res.json({ success: true, message, data: { expense: deleted } });
 });
 
 
