@@ -1,6 +1,7 @@
 const { eq, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { contacts } = require("../db/schema");
+const { classifyPhone } = require("../utils/phone");
 
 /**
  * The last ten digits of a number, which is what identifies a Nigerian
@@ -206,6 +207,116 @@ const deleteById = async (id) => {
 };
 
 /**
+ * What WOULD happen to each row of a spreadsheet, without touching anything.
+ *
+ * The import has always upserted safely, and the dialog has always said so —
+ * but only in prose, and only about what it would do in general. "480 rows
+ * ready" over a re-uploaded file could mean 480 new people or the same 480
+ * again, and there was no way to find out short of pressing the button and
+ * reading the count afterwards. This is that answer, in front of the decision
+ * instead of behind it.
+ *
+ * Six verdicts, because they call for different choices:
+ *
+ *   new                this number is on neither book
+ *   existing_contact   already a contact — upsert updates them, new-only skips
+ *   existing_customer  already a CUSTOMER. Never imported either way: a
+ *                      contact is by definition someone without an account,
+ *                      and creating one here would put the same person on the
+ *                      book twice, which is the exact bug /api/people exists
+ *                      to end.
+ *   duplicate_in_file  the same number appeared on an earlier line
+ *   invalid            not a phone number anywhere — see utils/phone.js
+ *   incomplete         no name, or no number at all
+ *
+ * One query for the whole file rather than one per row: a 5,000-line
+ * spreadsheet would otherwise be 10,000 round trips.
+ */
+const previewImport = async (rows) => {
+  const keys = [];
+  const prepared = rows.map((row) => {
+    const name = String(row.name || "").trim();
+    const rawPhone = String(row.phone || "").trim();
+    const key = normalizePhone(rawPhone);
+    if (key) keys.push(key);
+    return { row, name, rawPhone, key };
+  });
+
+  // Both books in one pass, so a number can be reported as the customer it
+  // already belongs to rather than just "taken".
+  const existing = new Map();
+  if (keys.length) {
+    const result = await db.execute(sql`
+      WITH k AS (SELECT DISTINCT v FROM jsonb_array_elements_text(${JSON.stringify([...new Set(keys)])}::jsonb) t(v))
+      SELECT 'customer' AS side, c.phone_normalized AS key, c.name
+      FROM customers c JOIN k ON k.v = c.phone_normalized
+      UNION ALL
+      SELECT 'contact', ct.phone_normalized, ct.name
+      FROM contacts ct JOIN k ON k.v = ct.phone_normalized
+    `);
+    for (const hit of result.rows ?? result) {
+      // A customer outranks a contact: if someone is both, the fact that
+      // matters is that they already have an account.
+      if (hit.side === "customer" || !existing.has(hit.key)) {
+        existing.set(hit.key, { side: hit.side, name: hit.name });
+      }
+    }
+  }
+
+  const seenInFile = new Set();
+  const preview = prepared.map(({ row, name, rawPhone, key }, index) => {
+    const base = { line: index + 1, name, phone: rawPhone, companyName: row.companyName || "" };
+
+    if (!name || !rawPhone) {
+      return { ...base, verdict: "incomplete", reason: !name ? "No name on this line" : "No phone number on this line" };
+    }
+
+    const { verdict: phoneVerdict, reason } = classifyPhone(rawPhone);
+    if (phoneVerdict === "invalid") return { ...base, verdict: "invalid", reason };
+
+    if (seenInFile.has(key)) {
+      return { ...base, verdict: "duplicate_in_file", reason: "This number is on an earlier line" };
+    }
+    seenInFile.add(key);
+
+    const hit = existing.get(key);
+    if (hit?.side === "customer") {
+      return { ...base, verdict: "existing_customer", reason: `${hit.name} is already a customer on this number` };
+    }
+    if (hit?.side === "contact") {
+      return { ...base, verdict: "existing_contact", reason: `Already on file as ${hit.name}` };
+    }
+
+    // A landline is imported — it is a real contact detail worth holding —
+    // but it is flagged so nobody expects an SMS to reach it.
+    return {
+      ...base,
+      verdict: "new",
+      reason: phoneVerdict === "unreachable" ? reason : "",
+      unreachable: phoneVerdict === "unreachable",
+    };
+  });
+
+  const counts = preview.reduce((acc, r) => {
+    acc[r.verdict] = (acc[r.verdict] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    rows: preview,
+    counts: {
+      new: counts.new || 0,
+      existing_contact: counts.existing_contact || 0,
+      existing_customer: counts.existing_customer || 0,
+      duplicate_in_file: counts.duplicate_in_file || 0,
+      invalid: counts.invalid || 0,
+      incomplete: counts.incomplete || 0,
+      total: preview.length,
+    },
+  };
+};
+
+/**
  * Import a batch, upserting on the normalised number.
  *
  * A spreadsheet is re-uploaded constantly — with more rows, with corrections,
@@ -221,18 +332,30 @@ const deleteById = async (id) => {
  * either lands or does not — a partial import that stopped on row 400 leaves
  * nobody able to say what was already in.
  */
-const importMany = async (rows, { source = "csv", createdBy = null } = {}) => {
-  if (!rows.length) return { inserted: 0, updated: 0, skipped: 0, contacts: [] };
+const importMany = async (rows, { source = "csv", createdBy = null, mode = "upsert" } = {}) => {
+  if (!rows.length) {
+    return { inserted: 0, updated: 0, skipped: 0, invalid: 0, alreadyCustomers: 0, contacts: [] };
+  }
 
   // De-dupe inside the batch first. Postgres refuses an ON CONFLICT that hits
   // the same row twice in one statement ("cannot affect row a second time"),
   // and a spreadsheet with the same number on two lines is completely normal.
   const seen = new Map();
   let skipped = 0;
+  let invalid = 0;
   for (const r of rows) {
     const key = normalizePhone(r.phone);
-    if (!key || key.length < 7 || !String(r.name || "").trim()) {
+    if (!key || !String(r.name || "").trim()) {
       skipped++;
+      continue;
+    }
+    // A number libphonenumber cannot parse is refused rather than stored.
+    // The old rule was "seven digits or more", which let "0802121" and
+    // "0000000000" onto the book — 115 such rows are already there, and every
+    // send to one is billed and lost. The preview shows the caller exactly
+    // which lines these are before they commit.
+    if (classifyPhone(r.phone).verdict === "invalid") {
+      invalid++;
       continue;
     }
     // A repeat of the same person MERGES with the earlier line rather than
@@ -243,7 +366,38 @@ const importMany = async (rows, { source = "csv", createdBy = null } = {}) => {
     const prev = seen.get(key);
     seen.set(key, prev ? mergeRow(prev, r) : r);
   }
-  if (!seen.size) return { inserted: 0, updated: 0, skipped, contacts: [] };
+  if (!seen.size) {
+    return { inserted: 0, updated: 0, skipped, invalid, alreadyCustomers: 0, contacts: [] };
+  }
+
+  // Anyone who already has an account is dropped, in BOTH modes. A contact is
+  // by definition someone without one, so importing a customer as a contact
+  // would put the same person on the book twice — the exact duplication
+  // /api/people was built to end. In new-only mode, existing contacts are
+  // dropped as well, which is what "just add the ones I don't have" means.
+  const batchKeys = [...seen.keys()];
+  const clash = await db.execute(sql`
+    WITH k AS (SELECT DISTINCT v FROM jsonb_array_elements_text(${JSON.stringify(batchKeys)}::jsonb) t(v))
+    SELECT 'customer' AS side, c.phone_normalized AS key FROM customers c JOIN k ON k.v = c.phone_normalized
+    UNION ALL
+    SELECT 'contact', ct.phone_normalized FROM contacts ct JOIN k ON k.v = ct.phone_normalized
+  `);
+
+  let alreadyCustomers = 0;
+  const drop = new Set();
+  for (const hit of clash.rows ?? clash) {
+    if (hit.side === "customer") {
+      if (!drop.has(hit.key)) alreadyCustomers++;
+      drop.add(hit.key);
+    } else if (mode === "new_only") {
+      drop.add(hit.key);
+    }
+  }
+  for (const key of drop) seen.delete(key);
+
+  if (!seen.size) {
+    return { inserted: 0, updated: 0, skipped, invalid, alreadyCustomers, contacts: [] };
+  }
 
   // The batch travels as one JSON parameter and is unpacked by
   // jsonb_to_recordset, rather than being built into a VALUES list row by
@@ -304,6 +458,8 @@ const importMany = async (rows, { source = "csv", createdBy = null } = {}) => {
     inserted,
     updated: returned.length - inserted,
     skipped,
+    invalid,
+    alreadyCustomers,
     contacts: returned,
   };
 };
@@ -355,6 +511,7 @@ module.exports = {
   create,
   update,
   deleteById,
+  previewImport,
   importMany,
   findForSegment,
   findTags,

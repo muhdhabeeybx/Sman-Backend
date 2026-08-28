@@ -10,6 +10,7 @@ const {
   createContact,
   updateContact,
   deleteContact,
+  previewImport,
   importContacts,
   convertContact,
 } = require("../../controllers/administration/contact.controller");
@@ -20,6 +21,14 @@ router.get("/", verifyStaff, validate({ query: contactSchemas.listContacts }), g
 // "import" would otherwise be swallowed as an :id value and fail id
 // validation rather than reaching their handlers.
 router.get("/tags", verifyStaff, getContactTags);
+// The dry run comes before "/import" as well as before "/:id" — a literal
+// path nested under another literal path still has to be declared first.
+router.post(
+  "/import/preview",
+  verifyStaff,
+  validate({ body: contactSchemas.importContacts }),
+  previewImport
+);
 router.post("/import", verifyStaff, validate({ body: contactSchemas.importContacts }), importContacts);
 
 router.get("/:id", verifyStaff, validate({ params: contactSchemas.idParam }), getContactById);

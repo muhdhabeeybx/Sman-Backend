@@ -47,4 +47,5 @@ module.exports = {
   notificationPreferenceRepo: require("./notificationPreference.repository"),
   notificationDeliveryRepo: require("./notificationDelivery.repository"),
   messageTemplateRepo: require("./messageTemplate.repository"),
+  messageCampaignRepo: require("./messageCampaign.repository"),
 };

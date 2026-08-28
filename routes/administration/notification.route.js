@@ -74,6 +74,14 @@ router.post(
   admin.broadcast
 );
 router.get("/deliveries", verifyStaff, validate({ query: schemas.listDeliveries }), admin.listDeliveries);
+router.get("/sms-balance", verifyStaff, admin.smsBalance);
+router.get("/campaigns", verifyStaff, validate({ query: schemas.listCampaigns }), admin.listCampaigns);
+router.get(
+  "/campaigns/:id",
+  verifyStaff,
+  validate({ params: schemas.campaignIdParam }),
+  admin.getCampaign
+);
 router.get("/health", verifyStaff, admin.health);
 router.get("/entity/:type/:id", verifyStaff, admin.forEntity);
 router.post("/maintenance/run", verifyStaff, admin.runMaintenanceNow);

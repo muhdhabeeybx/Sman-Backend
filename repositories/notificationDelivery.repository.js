@@ -1,4 +1,4 @@
-const { eq, and, desc, count, sql, lt, gte } = require("drizzle-orm");
+const { eq, and, or, desc, count, sql, lt, lte, gte, ilike, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { notificationDeliveries } = require("../db/schema");
 
@@ -25,15 +25,22 @@ const start = async ({
   type,
   channel,
   destination = "",
+  campaignId = null,
+  recipientName = "",
 }) => {
   return safe("start", async () => {
     const [row] = await db
       .insert(notificationDeliveries)
       .values({
         notificationId,
+        campaignId: campaignId ? Number(campaignId) : null,
         principalType: principal?.type || null,
         staffId: principal?.type === "staff" ? Number(principal.id) : null,
         customerId: principal?.type === "customer" ? Number(principal.id) : null,
+        // The name as it stood at send time. A contact has no principal to
+        // look one up from later, and a customer may be renamed afterwards —
+        // an audit log should say who was actually written to.
+        recipientName: String(recipientName || "").slice(0, 255),
         type,
         channel,
         destination: String(destination || "").slice(0, 255),
@@ -109,6 +116,52 @@ const record = async (fields, status, reason = "") => {
   });
 };
 
+/**
+ * A carrier delivery receipt, matched to the send it belongs to.
+ *
+ * This is the other half of "delivered or not". `sent` only ever meant "Termii
+ * accepted it" — the handset may have been off, the number may have been
+ * dead, the network may have refused it — and the log carried 12,084 rows
+ * without a single `delivered` among them because nothing ever wrote one.
+ *
+ * Matched on the provider's own message id, which is why sms.service.js now
+ * keeps it. A receipt for a message we have no record of is ignored rather
+ * than inserted: it is far more likely to be a replay or another system's
+ * traffic on a shared sender id than something worth inventing a row for.
+ *
+ * @param {string} providerMessageId
+ * @param {"delivered"|"failed"} status
+ * @param {string} providerStatus  the provider's own word, kept verbatim
+ * @param {string} [error]         the carrier's reason, when it failed
+ */
+const recordReceipt = async (providerMessageId, status, providerStatus, error = "") => {
+  const id = String(providerMessageId || "").trim();
+  if (!id) return null;
+
+  return safe("recordReceipt", async () => {
+    const [row] = await db
+      .update(notificationDeliveries)
+      .set({
+        status,
+        providerStatus: String(providerStatus || "").slice(0, 64),
+        error: error ? String(error).slice(0, 2000) : null,
+        deliveredAt: status === "delivered" ? new Date() : null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(notificationDeliveries.providerMessageId, id),
+          // A receipt must never resurrect a send we already know was refused,
+          // and Termii can deliver receipts out of order. Only a row we
+          // believe went out is open to being updated by one.
+          inArray(notificationDeliveries.status, ["pending", "sent"])
+        )
+      )
+      .returning();
+    return row || null;
+  });
+};
+
 /** Support view: every channel attempt behind one inbox row. */
 const findForNotification = async (notificationId) => {
   return db
@@ -118,8 +171,25 @@ const findForNotification = async (notificationId) => {
     .orderBy(desc(notificationDeliveries.createdAt));
 };
 
-/** Admin log screen, newest first. */
-const findAll = async ({ channel, status, type, page = 1, limit = 50 } = {}) => {
+/**
+ * Admin log screen, newest first.
+ *
+ * `from`/`to` and `search` were added because the log was 12,000 rows deep
+ * behind two dropdowns and a fixed limit of 50 — enough to see that SMS was
+ * failing, not enough to answer "did this customer get Tuesday's price list?".
+ * `campaignId` narrows it to one broadcast.
+ */
+const findAll = async ({
+  channel,
+  status,
+  type,
+  campaignId,
+  from,
+  to,
+  search,
+  page = 1,
+  limit = 50,
+} = {}) => {
   const pageNum = Math.max(1, parseInt(page) || 1);
   const limitNum = Math.min(200, Math.max(1, parseInt(limit) || 50));
   const offset = (pageNum - 1) * limitNum;
@@ -128,6 +198,27 @@ const findAll = async ({ channel, status, type, page = 1, limit = 50 } = {}) => 
   if (channel && channel !== "all") conditions.push(eq(notificationDeliveries.channel, channel));
   if (status && status !== "all") conditions.push(eq(notificationDeliveries.status, status));
   if (type) conditions.push(eq(notificationDeliveries.type, type));
+  if (campaignId) conditions.push(eq(notificationDeliveries.campaignId, Number(campaignId)));
+  if (from) conditions.push(gte(notificationDeliveries.createdAt, new Date(from)));
+  // `to` is a day, and a day includes the whole of it. Comparing against
+  // midnight would silently exclude everything sent on the end date, which is
+  // the day someone picking a range is most often asking about.
+  if (to) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    conditions.push(lte(notificationDeliveries.createdAt, end));
+  }
+  if (search) {
+    // Name or destination — "who did this go to?" is asked both ways, by the
+    // person's name and by the number support was given over the phone.
+    const pattern = `%${String(search).trim()}%`;
+    conditions.push(
+      or(
+        ilike(notificationDeliveries.recipientName, pattern),
+        ilike(notificationDeliveries.destination, pattern)
+      )
+    );
+  }
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
   const [rows, [{ total }]] = await Promise.all([
@@ -199,6 +290,7 @@ module.exports = {
   markFailed,
   markResolved,
   record,
+  recordReceipt,
   findForNotification,
   findAll,
   statsSince,

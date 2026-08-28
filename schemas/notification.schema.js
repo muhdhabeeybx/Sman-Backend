@@ -1,5 +1,5 @@
 const z = require("zod");
-const { pagination, id, enumOf, requiredString, optionalString } = require("./fields");
+const { pagination, id, enumOf, requiredString, optionalString, numberLike } = require("./fields");
 
 /**
  * Validation for the notification API.
@@ -116,7 +116,23 @@ const listDeliveries = pagination.extend({
   channel: z.enum(["in_app", "push", "email", "sms", "whatsapp", "all"]).optional(),
   status: z.enum(["pending", "sent", "delivered", "failed", "skipped", "suppressed", "all"]).optional(),
   type: z.string().trim().max(64, "Type is too long").optional(),
+  /** Narrow to one broadcast — the campaign detail view's only filter. */
+  campaignId: id("Campaign id").optional(),
+  // A date, not a timestamp. The repository widens `to` to the end of its day,
+  // because a range picked as "the 3rd to the 5th" means all of the 5th.
+  from: z.string().trim().max(30).optional(),
+  to: z.string().trim().max(30).optional(),
+  /** Matched against the recipient's name and the destination alike. */
+  search: z.string().trim().max(120, "Search is too long").optional(),
 });
+
+const listCampaigns = pagination.extend({
+  limit: numberLike("Limit")
+    .pipe(z.number().int().positive().max(100, "Limit cannot exceed 100"))
+    .optional(),
+});
+
+const campaignIdParam = z.object({ id: id("Campaign id") });
 
 /**
  * The admin broadcast. Recipients are an explicit, closed union — an operator
@@ -158,6 +174,24 @@ const broadcast = z
     // when the body still holds shortcodes — a composer that already resolved
     // them sends finished text and this is ignored.
     depotIds: z.array(id("Depot id")).max(100, "Too many depots").optional(),
+    /**
+     * An already-open campaign to file these sends under.
+     *
+     * "Everyone" is two audiences and the composer sends it as two requests —
+     * customers by id, contacts by their details, resolved differently by the
+     * engine. Passing the first call's campaign id back on the second is what
+     * keeps one press of Send showing up in the log as one broadcast.
+     */
+    campaignId: id("Campaign id").optional(),
+    /**
+     * What the audience MEANT, in the words the page used ("Frequent
+     * customers — at least 3 orders in the last 90 days").
+     *
+     * Stored on the campaign because those thresholds are tunable: the preset
+     * id alone would leave a six-month-old campaign whose audience cannot be
+     * reconstructed.
+     */
+    audienceLabel: optionalString("Audience label", 255),
   })
   .refine(
     (v) => v.audience !== "roles" || (v.roles?.length ?? 0) > 0,
@@ -197,6 +231,8 @@ module.exports = {
   registerDevice,
   unregisterDevice,
   listDeliveries,
+  listCampaigns,
+  campaignIdParam,
   broadcast,
   sendTest,
 };

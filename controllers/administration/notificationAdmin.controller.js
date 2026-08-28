@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
-const { notificationDeliveryRepo, notificationRepo } = require("../../repositories");
+const { notificationDeliveryRepo, notificationRepo, messageCampaignRepo } = require("../../repositories");
+const smsService = require("../../services/sms.service");
 const { notifyAndWait } = require("../../notifications");
 const { emitEvent } = require("../../services/events");
 const { staffActor } = require("../../utils/actor");
@@ -24,8 +25,10 @@ const priceList = require("../../services/priceList.service");
  * the same trail as every other business action, with the actor attached.
  */
 const broadcast = asyncHandler(async (req, res) => {
-  const { title, audience, roles, customerIds, staffIds, contacts, channels, priority, actionUrl, imageUrl, depotIds } =
-    req.body;
+  const {
+    title, audience, roles, customerIds, staffIds, contacts, channels, priority,
+    actionUrl, imageUrl, depotIds, campaignId: existingCampaignId, audienceLabel,
+  } = req.body;
 
   // Shortcodes resolve HERE, at send time, not when the template was written.
   // That is the whole point of a saved price template: "{{prices}}" typed once
@@ -54,6 +57,41 @@ const broadcast = asyncHandler(async (req, res) => {
       ...(staffIds || []).map((id) => ({ staffId: id })),
     ];
 
+  const wantsSms = !channels || channels.includes("sms");
+
+  /**
+   * One campaign row for the whole press of Send — including the second call.
+   *
+   * "Everyone" is two audiences and the composer sends it as two requests
+   * (customers by id, contacts by their details, resolved differently by the
+   * engine). Both must land under ONE campaign or the log would show a single
+   * blast as two, so the client passes the id back on the second call and only
+   * the first opens a row.
+   */
+  let campaign = null;
+  if (existingCampaignId) {
+    campaign = { id: Number(existingCampaignId) };
+  } else {
+    // Read before anything is sent. Never blocking: getTermiiBalance swallows
+    // its own failures, and a wallet we cannot read is not a reason to refuse
+    // a broadcast — it is a reason to show a dash beside the compose box.
+    const balance = wantsSms ? await smsService.getTermiiBalance() : { balance: null, currency: "" };
+    campaign = await messageCampaignRepo.start({
+      title,
+      // The RESOLVED body: what recipients actually received. A campaign is a
+      // record of what went out, and "{{prices}}" is not what went out.
+      body,
+      channels: channels || [],
+      audience: audience || "",
+      audienceLabel: audienceLabel || "",
+      recipientCount: recipientTotal(to),
+      smsSegments: Math.max(1, Math.ceil(String(body || "").length / 160)),
+      balanceBefore: balance.balance === null ? null : String(balance.balance),
+      balanceCurrency: balance.currency || "",
+      sentBy: req.user?.id ?? null,
+    });
+  }
+
   const result = await notifyAndWait("system.announcement", {
     to,
     data: {
@@ -67,12 +105,26 @@ const broadcast = asyncHandler(async (req, res) => {
       announcementId: `${Date.now()}-${req.user.id}`,
     },
     channels,
+    // Stamped onto every delivery row the fan-out produces, which is what
+    // makes "show me this campaign's recipients" a query rather than a guess.
+    campaignId: campaign?.id || null,
   });
+
+  // Re-read after the fan-out. The difference is what this blast actually cost
+  // according to Termii's own wallet, rather than an estimate that would drift
+  // from the invoice.
+  if (campaign?.id && !existingCampaignId) {
+    const after = wantsSms ? await smsService.getTermiiBalance() : { balance: null };
+    await messageCampaignRepo.complete(campaign.id, {
+      balanceAfter: after.balance === null ? null : String(after.balance),
+      recipientCount: result.recipients,
+    });
+  }
 
   emitEvent("notification.broadcast", {
     actor: staffActor(req),
     entityType: "notification",
-    entityId: "broadcast",
+    entityId: campaign?.id ? String(campaign.id) : "broadcast",
     audience,
     title,
     channels: channels || null,
@@ -83,6 +135,7 @@ const broadcast = asyncHandler(async (req, res) => {
     success: true,
     message: `Broadcast sent to ${result.recipients} recipient(s)`,
     data: {
+      campaignId: campaign?.id || null,
       recipients: result.recipients,
       delivered: result.delivered,
       duplicates: result.duplicates,
@@ -90,13 +143,59 @@ const broadcast = asyncHandler(async (req, res) => {
   });
 });
 
+/** How many recipients a resolved `to` spec stands for. */
+const recipientTotal = (to) => (Array.isArray(to) ? to.length : 1);
+
+/**
+ * GET /api/notifications/sms-balance — what is left in the Termii wallet.
+ *
+ * Cached for a minute. The messaging page reads this on load and again after
+ * every send, and a live provider call per render would be both slow and rude
+ * to an endpoint that exists to be a courtesy reading.
+ *
+ * 346 sends on the live book failed with "Insufficient balance" while the
+ * dashboard showed nothing at all. This is the fix for that.
+ */
+let balanceCache = { at: 0, value: null };
+const BALANCE_TTL_MS = 60_000;
+
+const smsBalance = asyncHandler(async (req, res) => {
+  const fresh = req.query.refresh === "true";
+  if (!fresh && balanceCache.value && Date.now() - balanceCache.at < BALANCE_TTL_MS) {
+    return res.json({ success: true, data: { ...balanceCache.value, cached: true } });
+  }
+
+  const result = await smsService.getTermiiBalance();
+  balanceCache = { at: Date.now(), value: result };
+  res.json({ success: true, data: { ...result, cached: false } });
+});
+
+/** GET /api/notifications/campaigns — every broadcast, newest first. */
+const listCampaigns = asyncHandler(async (req, res) => {
+  const { page, limit } = req.query;
+  res.json({ success: true, data: await messageCampaignRepo.findAll({ page, limit }) });
+});
+
+/** GET /api/notifications/campaigns/:id — one broadcast and how it landed. */
+const getCampaign = asyncHandler(async (req, res) => {
+  const campaign = await messageCampaignRepo.findById(req.params.id);
+  if (!campaign) {
+    return res.status(404).json({ success: false, message: "Campaign not found" });
+  }
+  res.json({ success: true, data: { campaign } });
+});
+
 /** GET /api/notifications/deliveries — the outbound log, filterable. */
 const listDeliveries = asyncHandler(async (req, res) => {
-  const { channel, status, type, page, limit } = req.query;
+  const { channel, status, type, campaignId, from, to, search, page, limit } = req.query;
   const { rows, pagination } = await notificationDeliveryRepo.findAll({
     channel,
     status,
     type,
+    campaignId,
+    from,
+    to,
+    search,
     page,
     limit,
   });
@@ -170,6 +269,9 @@ const runMaintenanceNow = asyncHandler(async (req, res) => {
 
 module.exports = {
   broadcast,
+  smsBalance,
+  listCampaigns,
+  getCampaign,
   listDeliveries,
   deliveriesForNotification,
   health,

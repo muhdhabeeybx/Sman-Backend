@@ -63,10 +63,58 @@ const sendSMSTermii = async (
   );
 
   if (response.data.message === "Successfully Sent" || response.data.code === "ok") {
-    return { success: true };
+    // Termii's own id for this message, carried back so the delivery row can
+    // hold it. Without it a delivery receipt has nothing to match against, and
+    // "delivered" stays permanently unknowable — which is exactly how the log
+    // ended up with 12,084 rows and not one of them marked delivered.
+    return { success: true, messageId: response.data.message_id || "" };
   }
 
   return { success: false, message: response.data.message || "SMS sending failed" };
+};
+
+/**
+ * The Termii wallet, read straight from the provider.
+ *
+ * The `balance` echoed inside a send response is unreliable — some routes
+ * return 0 — so this is the authoritative figure, and it is a read that bills
+ * nothing. 346 sends on the live book failed with "Insufficient balance"
+ * because nobody could see the wallet from the dashboard; this is what puts it
+ * in front of the person about to press Send.
+ *
+ * Never throws. A balance that cannot be read must not stop a broadcast — it
+ * is a courtesy reading beside the compose box, not a precondition.
+ *
+ * @returns {Promise<{ok: boolean, balance: number|null, currency: string, error: string|null}>}
+ */
+const getTermiiBalance = async () => {
+  const apiKey = process.env.TERMII_API_KEY;
+  if (!apiKey) {
+    return { ok: false, balance: null, currency: "", error: "SMS API key not configured" };
+  }
+
+  try {
+    const base = process.env.TERMII_BASE_URL || "https://v4.api.termii.com";
+    const response = await axios.get(`${base}/api/get-balance`, {
+      params: { api_key: apiKey },
+      timeout: 10_000,
+    });
+    const data = response.data || {};
+    return {
+      ok: true,
+      balance: data.balance === undefined || data.balance === null ? null : Number(data.balance),
+      currency: data.currency || "",
+      error: null,
+    };
+  } catch (error) {
+    // A 401 here means the key is wrong for THIS base URL — Termii assigns
+    // each account its own regional host, and the same key 401s on the others.
+    const detail =
+      error.response?.status === 401
+        ? "Termii rejected the key — check TERMII_BASE_URL matches the account"
+        : error.response?.data?.message || error.message || "Could not reach Termii";
+    return { ok: false, balance: null, currency: "", error: detail };
+  }
 };
 
 /**
@@ -271,4 +319,4 @@ const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) =>
   return { success: false, message: "All Termii channels failed" };
 };
 
-module.exports = { sendSMSTermii, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS };
+module.exports = { sendSMSTermii, getTermiiBalance, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS };

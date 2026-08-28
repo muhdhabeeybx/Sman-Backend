@@ -22,6 +22,9 @@ app.use(logger);
 //     verify callbacks actually fire over the exact bytes the sender signed.
 app.use("/api/webhooks", require("./routes/webhook.route"));
 app.use("/api/whatsapp/webhook", require("./routes/whatsappWebhook.route"));
+// Termii delivery reports. Mounted here with the other webhooks, above the
+// auth middleware — a provider callback carries no session.
+app.use("/api/webhooks/termii", require("./routes/termiiWebhook.route"));
 
 app.use(mobileCorsBypass);
 // Skip cors() for requests already handled by the mobile bypass — otherwise

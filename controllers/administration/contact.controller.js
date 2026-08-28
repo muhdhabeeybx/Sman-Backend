@@ -85,12 +85,32 @@ const deleteContact = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/contacts/import/preview — what this spreadsheet would do.
+ *
+ * A dry run against both books. Nothing is written, so the person choosing the
+ * file finds out that 400 of their 480 rows are already on file, that six are
+ * already customers and that two are not phone numbers at all — before they
+ * commit, not from a summary line afterwards.
+ */
+const previewImport = asyncHandler(async (req, res) => {
+  const rows = req.body.rows.map((r) => ({ ...r, phone: normalizeOrKeep(r.phone) }));
+  res.json({ success: true, data: await contactRepo.previewImport(rows) });
+});
+
+/**
  * POST /api/contacts/import — a parsed spreadsheet.
  *
  * Reports inserted / updated / skipped rather than just a count, because
  * "480 imported" over a re-uploaded file tells nobody whether they added 480
  * people or re-saved the same 480. Skipped rows are the ones with no usable
  * name or number; they are counted, not silently dropped.
+ *
+ * `mode` is the choice the preview exists to inform:
+ *   upsert    (default) correct the people already on file from this sheet
+ *   new_only  leave them alone; add only the numbers not already held
+ *
+ * Rows whose number cannot be parsed are refused in both modes, and so is
+ * anyone who already has a customer account — see importMany for why.
  */
 const importContacts = asyncHandler(async (req, res) => {
   const rows = req.body.rows.map((r) => ({ ...r, phone: normalizeOrKeep(r.phone) }));
@@ -98,11 +118,14 @@ const importContacts = asyncHandler(async (req, res) => {
   const result = await contactRepo.importMany(rows, {
     source: req.body.source || "csv",
     createdBy: req.user?.id ?? null,
+    mode: req.body.mode || "upsert",
   });
 
   const parts = [];
   if (result.inserted) parts.push(`${result.inserted} added`);
   if (result.updated) parts.push(`${result.updated} updated`);
+  if (result.alreadyCustomers) parts.push(`${result.alreadyCustomers} already customers`);
+  if (result.invalid) parts.push(`${result.invalid} bad numbers refused`);
   if (result.skipped) parts.push(`${result.skipped} skipped`);
 
   res.json({
@@ -112,6 +135,8 @@ const importContacts = asyncHandler(async (req, res) => {
       inserted: result.inserted,
       updated: result.updated,
       skipped: result.skipped,
+      invalid: result.invalid,
+      alreadyCustomers: result.alreadyCustomers,
     },
   });
 });
@@ -162,6 +187,7 @@ module.exports = {
   createContact,
   updateContact,
   deleteContact,
+  previewImport,
   importContacts,
   convertContact,
 };

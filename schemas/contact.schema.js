@@ -64,6 +64,14 @@ const listContacts = pagination.extend({
  */
 const importContacts = z.object({
   source: enumOf("Source", SOURCES).optional(),
+  /**
+   * What to do about people already on file.
+   *
+   * `upsert` corrects them from this sheet; `new_only` leaves them untouched
+   * and adds only numbers not already held — the "don't re-import what I
+   * already have" the preview endpoint exists to let someone decide.
+   */
+  mode: enumOf("Mode", ["upsert", "new_only"]).optional(),
   rows: z
     .array(
       z.object({

@@ -241,9 +241,15 @@ const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, ov
 
 // ─── Delivery to one recipient ──────────────────────────────────────────────
 
-const deliverToRecipient = async ({ type, entry, data, recipient, override, force }) => {
+const deliverToRecipient = async ({ type, entry, data, recipient, override, force, campaignId }) => {
   const { principal, contact } = recipient;
   const rendered = render(type, entry, data, recipient);
+
+  // Stamped onto every delivery row this recipient produces. `recipientName`
+  // is denormalised on purpose: a broadcast to leads has no principal at all,
+  // so without it the log can only ever show a bare phone number — which is
+  // what made "who did we message on Tuesday?" unanswerable.
+  const stamp = { campaignId: campaignId || null, recipientName: contact?.name || "" };
 
   let prefs = null;
   let settings = null;
@@ -291,6 +297,7 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
     suppressed.map(({ channel, reason }) =>
       notificationDeliveryRepo.record(
         {
+          ...stamp,
           notificationId: notification?.id || null,
           principal,
           type,
@@ -336,6 +343,7 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
       await Promise.all(
         results.map(async (r) => {
           const opened = await notificationDeliveryRepo.start({
+            ...stamp,
             notificationId: notification?.id || null,
             principal,
             type,
@@ -374,8 +382,12 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
  * @param {object} [opts.data]     the template's data contract
  * @param {string[]} [opts.channels] restrict to these channels
  * @param {boolean} [opts.force]   ignore preferences and quiet hours
+ * @param {number} [opts.campaignId] the broadcast these sends belong to, so
+ *                                 every resulting delivery row can be grouped
+ *                                 back under one campaign. Null for the
+ *                                 transactional types, which have none.
  */
-const dispatch = async (type, { to, data = {}, channels, force = false } = {}) => {
+const dispatch = async (type, { to, data = {}, channels, force = false, campaignId = null } = {}) => {
   const entry = catalog.getTypeOrDefault(type);
   if (!catalog.isKnownType(type)) {
     // Loud, but still delivered: a typo'd type reaches the recipient as a
@@ -415,7 +427,7 @@ const dispatch = async (type, { to, data = {}, channels, force = false } = {}) =
     const batchResults = await Promise.all(
       batch.map(async (recipient) => {
         try {
-          return await deliverToRecipient({ type, entry, data, recipient, override: channels, force });
+          return await deliverToRecipient({ type, entry, data, recipient, override: channels, force, campaignId });
         } catch (err) {
           // One recipient's failure must not cost the others their notification.
           console.error(
