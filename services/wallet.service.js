@@ -53,6 +53,15 @@ const credit = async (
     paystackDetails = null,
     recordedBy = null,
     trackDeposit = true,
+    /**
+     * The value date from the bank statement, where one backs this credit.
+     *
+     * Left null for money that never came off a statement — an internal
+     * wallet transfer, an overpayment carried across — because those have no
+     * banking date, and defaulting it to "now" is precisely the confusion
+     * migration 0017 exists to end.
+     */
+    depositDate = null,
   },
   tx,
 ) => {
@@ -114,6 +123,7 @@ const credit = async (
         recordedBy,
         balanceAfter: asDecimal(updated.balance),
         paystackDetails,
+        depositDate: depositDate || null,
         // Starts fully unclaimed; allocateOrderFunding() draws it down as
         // orders are paid from it.
         remainingAmount: asDecimal(value),
@@ -222,6 +232,13 @@ const creditFromStatementLines = async ({ customerId, bankAccountId, lineIds, st
           // synthetic key that's stable per line (so retrying a failed
           // request is idempotent) rather than per request.
           reference: line.bankRef || `STMT-${line.id}`,
+          // The banking date, stored ON the deposit rather than rediscovered
+          // at read time by joining back to the statement line. That join took
+          // the lowest-id line of however many funded the deposit, and fell
+          // back to created_at when it found none — so a column headed
+          // "Deposit Date" could quietly show the day the row was keyed in.
+          // See migration 0017.
+          depositDate: line.txnDate,
           paystackDetails: {
             paymentMethod: "manual_bank_transfer",
             channel: "manual_bank_transfer",
@@ -796,6 +813,13 @@ const rematchOrderFunding = async (
           description:
             description || `Re-matched payment for order #${orderId}${line.narration ? `: ${line.narration}` : ""}`,
           reference: line.bankRef || `STMT-${line.id}`,
+          // The banking date, stored ON the deposit rather than rediscovered
+          // at read time by joining back to the statement line. That join took
+          // the lowest-id line of however many funded the deposit, and fell
+          // back to created_at when it found none — so a column headed
+          // "Deposit Date" could quietly show the day the row was keyed in.
+          // See migration 0017.
+          depositDate: line.txnDate,
           paystackDetails: {
             paymentMethod: "manual_bank_transfer",
             channel: "manual_bank_transfer",

@@ -21,6 +21,9 @@ const findByIdFull = async (id) => {
       balanceAfter: deposits.balanceAfter,
       paystackDetails: deposits.paystackDetails,
       createdAt: deposits.createdAt,
+      // When the money actually reached the bank, per the statement. Null where
+      // no statement backs the credit — see migration 0017.
+      depositDate: deposits.depositDate,
       updatedAt: deposits.updatedAt,
       customerName: customers.name,
       customerPhone: customers.phone,
@@ -78,6 +81,9 @@ const findAll = async ({ customer, pfiId, page = 1, limit = 50, type = "credit",
         balanceAfter: deposits.balanceAfter,
         paystackDetails: deposits.paystackDetails,
         createdAt: deposits.createdAt,
+        // When the money actually reached the bank, per the statement. Null where
+        // no statement backs the credit — see migration 0017.
+        depositDate: deposits.depositDate,
         updatedAt: deposits.updatedAt,
         customerName: customers.name,
         customerPhone: customers.phone,
@@ -134,6 +140,9 @@ const findCustomerHistory = async ({ customerId, page = 1, limit = 50, dateFrom,
         description: deposits.description,
         balanceAfter: deposits.balanceAfter,
         createdAt: deposits.createdAt,
+        // When the money actually reached the bank, per the statement. Null where
+        // no statement backs the credit — see migration 0017.
+        depositDate: deposits.depositDate,
       })
       .from(deposits)
       .where(whereClause)

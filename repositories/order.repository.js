@@ -399,7 +399,10 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
         st.surname AS "recorderSurname",
         l.depositor AS "statementDepositor",
         l.narration AS "statementNarration",
-        l.txn_date AS "statementTxnDate"
+        -- The stored banking date first; the joined line only as a fallback
+        -- for rows that predate the column. Never created_at — that is when
+        -- the row was keyed in, which is a different fact. See migration 0017.
+        COALESCE(d.deposit_date, l.txn_date) AS "statementTxnDate"
       FROM deposits d
       -- Who keyed the credit in. The allocation path has carried this from
       -- the start; without it here the report's Recorded By column had
@@ -410,7 +413,11 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
         SELECT depositor, narration, txn_date
         FROM bank_statement_lines
         WHERE matched_deposit_id = d.id
-        ORDER BY id LIMIT 1
+        -- By DATE, not by id. A deposit funded from several lines was showing
+        -- whichever had the lowest id — upload order, not banking order — so
+        -- with lines from different days behind it the date shown was
+        -- effectively arbitrary. Earliest banking date, id only to break ties.
+        ORDER BY txn_date ASC, id ASC LIMIT 1
       ) l ON TRUE
       WHERE d.type = 'credit'
         AND d.customer_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
@@ -518,7 +525,11 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
             amount: Number(b.amount || 0),
             depositor: b.statementDepositor || "",
             narration: b.statementNarration || "",
-            txnDate: b.statementTxnDate || b.createdAt,
+            // No `|| createdAt`. A credit with no statement behind it has no
+            // banking date, and substituting the entry date put a number in
+            // the "Deposit Date" column that looked exactly like a real one.
+            // Null reaches the page as "—", which is the truthful answer.
+            txnDate: b.statementTxnDate || null,
             reference: b.reference || "",
             recorderFirstName: b.recorderFirstName || null,
             recorderSurname: b.recorderSurname || null,
@@ -703,13 +714,19 @@ const findFinanceReport = async ({
             statementDepositor: sql`(
               SELECT l.depositor FROM bank_statement_lines l
               WHERE l.matched_deposit_id = ${deposits.id}
-              ORDER BY l.id LIMIT 1
+              -- Same ordering as the date below, so the depositor and the date
+              -- on a row always come from the SAME statement line. Ordered
+              -- differently they could describe two different payments.
+              ORDER BY l.txn_date ASC, l.id ASC LIMIT 1
             )`,
-            statementTxnDate: sql`(
+            // Stored banking date first, the joined line only for rows that
+            // predate the column, and never created_at. Ordered by txn_date
+            // rather than id for the same reason as the query above.
+            statementTxnDate: sql`COALESCE(${deposits.depositDate}, (
               SELECT l.txn_date FROM bank_statement_lines l
               WHERE l.matched_deposit_id = ${deposits.id}
-              ORDER BY l.id LIMIT 1
-            )`,
+              ORDER BY l.txn_date ASC, l.id ASC LIMIT 1
+            ))`,
             // Internal wallet movements — a transfer between customers, or an
             // overpayment carried over from another order — have no statement
             // line and no reference, because no bank payment happened. Their
