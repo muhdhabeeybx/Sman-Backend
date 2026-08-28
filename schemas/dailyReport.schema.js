@@ -102,16 +102,16 @@ const dailyReportQuerySchema = z.object({
   order: z.enum(["asc", "desc"]).optional(),
 });
 
-// The Hub's own "Email report" action: whatever workbook the browser just
-// built for the current filters, sent to whoever the user types in — not the
-// static REPORT_RECIPIENTS list the scheduled script uses.
+// The Hub's own "Email report" action: the same combined report the
+// scheduled job sends, for whatever date the admin is looking at, to whoever
+// they type in — not the static REPORT_RECIPIENTS list the scheduled script
+// uses. filename/attachmentBase64/reportCount/location/pfi are accepted but
+// ignored, so an un-updated client that still builds a workbook doesn't 400.
 const emailReportsHubSchema = z.object({
   recipients: z.array(z.string().email()).min(1).max(25),
   reportDate: z.string().date(),
-  filename: z.string().min(1).max(255),
-  // base64 xlsx — Resend's attachment cap is generous, but nobody is
-  // building a single day's report anywhere near it.
-  attachmentBase64: z.string().min(1),
+  filename: z.string().max(255).optional(),
+  attachmentBase64: z.string().optional(),
   reportCount: z.coerce.number().int().nonnegative().optional(),
   location: z.string().max(255).optional(),
   pfi: z.string().max(50).optional(),

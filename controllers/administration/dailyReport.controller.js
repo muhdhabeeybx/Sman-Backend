@@ -4,6 +4,7 @@ const dailyReportService = require("../../services/dailyReport.service");
 const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
 const { notifyAndWait } = require("../../notifications");
+const { buildCombinedDailyReportData } = require("../../services/dailyCombinedReport.service");
 
 // Roles that manage reports rather than file them — the Reports Hub's own
 // allowed-roles list (see rbac.ts '/admin-reports'). Everyone else only ever
@@ -85,18 +86,20 @@ const deleteDailyReport = asyncHandler(async (req, res) => {
 });
 
 /**
- * The Hub's "Email report" button. The workbook is built in the browser off
- * whatever the admin is currently looking at — this endpoint just relays it
- * to Resend, the same way `scripts/send-daily-report.js` does for the
- * scheduled job, but to a recipient list typed in on the spot rather than a
- * fixed env var.
+ * The Hub's "Email report" button. Builds the same combined report as the
+ * scheduled job (`scripts/send-daily-report.js`) for whatever date the admin
+ * is looking at, and sends it to a recipient list typed in on the spot
+ * rather than a fixed env var. Any workbook/location/PFI filter the client
+ * still sends is ignored — the combined report already covers every depot
+ * for the date in one email.
  */
 const emailDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate, filename, attachmentBase64, reportCount, location, pfi } = req.body;
+  const { recipients, reportDate } = req.body;
 
+  const data = await buildCombinedDailyReportData(reportDate ? new Date(reportDate) : new Date());
   const result = await notifyAndWait("reports.hub_email", {
     to: recipients.map((email) => ({ email })),
-    data: { reportDate, filename, attachmentBase64, reportCount, location, pfi },
+    data,
   });
 
   // notifyAndWait never throws — a provider outage must not read as a 500 —

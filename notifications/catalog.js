@@ -1628,31 +1628,22 @@ const CATALOG = {
       }),
   },
 
-  // Sent on demand from the Reports Hub's "Email report" button — the
-  // workbook is whatever the browser just built for the admin's current
-  // date/location/PFI filters, not a fixed daily job.
+  // Sent on demand from the Reports Hub's "Email report" button — same
+  // combined report as `reports.daily` (buildCombinedDailyReportData() for
+  // the requested date), just triggered by a click instead of the scheduled
+  // job, to a recipient list typed in on the spot rather than a fixed env var.
   //
-  // data: reportDate, filename, attachmentBase64, reportCount, location, pfi
+  // data: reportDate, totals, locations — identical shape to reports.daily.
   "reports.hub_email": {
     audience: "staff",
     category: "reports",
     priority: "normal",
     channels: EMAIL_ONLY,
-    title: (d) => `Reports Hub - ${formatDate(d.reportDate)}`,
-    body: (d) => `${d.reportCount ?? 0} report(s) for ${formatDate(d.reportDate)}.`,
+    title: (d) => `Daily Report - ${formatDate(d.reportDate)}`,
+    body: (d) =>
+      `${d.totals?.orderCount ?? 0} order(s) across ${d.locations?.length ?? 0} location(s).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
-    email: (d) =>
-      reportEmail({
-        subject: `Soroman Reports Hub - ${formatDate(d.reportDate)}`,
-        heading: `Reports Hub — ${formatDate(d.reportDate)}`,
-        rows: [
-          { label: "Reports", value: String(d.reportCount ?? 0) },
-          ...(d.location && d.location !== "all" ? [{ label: "Location", value: d.location }] : []),
-          ...(d.pfi && d.pfi !== "all" ? [{ label: "PFI", value: d.pfi }] : []),
-        ],
-        emptyNote: !d.reportCount ? "No reports filed for this date/filter." : null,
-        d,
-      }),
+    email: (d) => renderDailyReportEmail(d),
   },
 
   // ═══ Delivery / truck flow (SMS) ══════════════════════════════════════════
