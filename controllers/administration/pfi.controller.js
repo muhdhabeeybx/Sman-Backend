@@ -74,10 +74,15 @@ const getPfiById = asyncHandler(async (req, res) => {
   }
 
   // The drawer needs the lines behind the totals, not just the totals.
-  const [pfi, expenses, movements] = await Promise.all([
+  //
+  // `orders` is the sales — payment confirmed, the same rule the revenue and
+  // sold figures use. `movements` is the ticketing ledger, which is a
+  // different fact and stays available for anyone reading loading progress.
+  const [pfi, expenses, movements, orders] = await Promise.all([
     withFinancials(found),
     pfiExpenseRepo.listExpensesForPfi(found.id),
     pfiExpenseRepo.listMovements(found.id),
+    pfiExpenseRepo.listOrdersForPfi(found.id),
   ]);
 
   // How each figure was reached, in words, with this batch's own numbers
@@ -86,7 +91,7 @@ const getPfiById = asyncHandler(async (req, res) => {
   // would be payload nobody reads.
   const explain = explainFinancials(pfi, pfi.financials);
 
-  res.json({ success: true, data: { pfi, expenses, movements, explain } });
+  res.json({ success: true, data: { pfi, expenses, movements, orders, explain } });
 });
 
 /**

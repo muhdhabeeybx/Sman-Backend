@@ -724,8 +724,42 @@ const listMovements = async (pfiId) => {
   `;
 };
 
+/**
+ * The confirmed orders behind a batch — the sales, not the stock movements.
+ *
+ * The drawer's "Orders" list used to be `listMovements`, which is the ticketing
+ * ledger: what has physically left the gantry. Those are different facts and
+ * they diverge routinely. PFI/43/26 has four paid orders worth ₦456m and not a
+ * single movement row, because nothing has been ticketed out yet — so a panel
+ * headed "Orders" read as empty while the batch had made half a billion naira.
+ *
+ * Same rule as `sold` and as the finance report: payment_status = 'Paid'.
+ * Loading progress rides along per order rather than deciding what is listed,
+ * so "paid but not yet loaded" is visible instead of invisible.
+ */
+const listOrdersForPfi = async (pfiId) => {
+  return client`
+    SELECT o.id,
+           o.order_number,
+           o.status::text AS order_status,
+           o.quantity,
+           o.total_amount,
+           o.created_at,
+           COALESCE(NULLIF(TRIM(c.company_name), ''), c.name) AS customer_name,
+           -- What of this order has actually been ticketed out. 0 means paid
+           -- and waiting, which is the state the old list could not show.
+           COALESCE((SELECT SUM(m.qty_litres) FROM pfi_movements m
+                     WHERE m.order_id = o.id AND m.pfi_id = o.pfi_id), 0)::bigint AS loaded_qty
+    FROM orders o
+    LEFT JOIN customers c ON c.id = o.customer_id
+    WHERE o.pfi_id = ${Number(pfiId)} AND o.payment_status = 'Paid'
+    ORDER BY o.created_at DESC
+  `;
+};
+
 module.exports = {
   aggregatesFor,
+  listOrdersForPfi,
   ensureCategoryForPfi,
   renameCategoryForPfi,
   findCategoryById,
