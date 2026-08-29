@@ -103,6 +103,58 @@ describe("landing cost per litre — Total Cost ÷ BL Quantity, always", () => {
   });
 });
 
+describe("where the 'unsold' stock actually is", () => {
+  test("the tank reconciles into sold + awaiting payment + truly unsold", () => {
+    // The shape behind "there's 700k litres unsold and I don't know how":
+    // the stock is spoken for, but the orders holding it have not paid, and
+    // `sold` counts confirmed payment only.
+    const f = computeFinancials(coastal({ startingQtyLitres: 5_000_000, blQtyLitres: 5_000_000 }), {
+      expenses: 10_000_000,
+      soldQty: 4_300_000,
+      unpaidQty: 700_000,
+      unpaidOrderCount: 3,
+    });
+
+    assert.equal(f.sold, 4_300_000);
+    assert.equal(f.remaining, 700_000, "the balance that looks like free stock");
+    assert.equal(f.awaitingPayment, 700_000, "but all of it is on unpaid orders");
+    assert.equal(f.trulyUnsold, 0, "so nothing is actually available");
+
+    // The three parts must add back up to the tank, or the story is wrong.
+    assert.equal(f.sold + f.awaitingPayment + f.trulyUnsold, f.tankQtyLitres);
+  });
+
+  test("a batch with no unpaid orders reports its balance as genuinely free", () => {
+    const f = computeFinancials(coastal({ startingQtyLitres: 1_000_000, blQtyLitres: 1_000_000 }), {
+      expenses: 0,
+      soldQty: 600_000,
+    });
+    assert.equal(f.awaitingPayment, 0);
+    assert.equal(f.trulyUnsold, 400_000, "all of the balance is available");
+  });
+
+  test("the balance line says where the stock went, in words", () => {
+    const pfi = coastal({ startingQtyLitres: 5_000_000, blQtyLitres: 5_000_000 });
+    const f = computeFinancials(pfi, { expenses: 0, soldQty: 4_300_000, unpaidQty: 700_000, unpaidOrderCount: 3 });
+    const balance = explainFinancials(pfi, f).find((e) => e.key === "remaining");
+
+    assert.match(balance.meaning, /NOT all of this is available/);
+    assert.match(balance.meaning, /700,000 Litres/);
+    assert.match(balance.meaning, /3 order\(s\)/);
+  });
+
+  test("over-selling shows as a negative balance rather than being hidden", () => {
+    // More paid than the tank held — a real signal, not something to clamp to
+    // zero and leave someone to discover from a stock count.
+    const f = computeFinancials(coastal({ startingQtyLitres: 1_000_000, blQtyLitres: 1_000_000 }), {
+      expenses: 0,
+      soldQty: 1_100_000,
+    });
+    assert.equal(f.remaining, -100_000);
+    assert.equal(f.sellThrough, 1, "sell-through is still capped at 100% for the bar");
+  });
+});
+
 describe("explaining the figures", () => {
   test("the workings show the actual sum, not the formula in the abstract", () => {
     const pfi = coastal();

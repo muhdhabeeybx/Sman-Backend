@@ -34,12 +34,14 @@ const aggregatesFor = async (ids) => {
     movementQty: 0,
     allocationQty: 0,
     soldQty: 0,
+    unpaidQty: 0,
+    unpaidOrderCount: 0,
     orderCount: 0,
     expenseCount: 0,
   });
   for (const id of list) out.set(id, blank());
 
-  const [expenses, revenue, movements, allocations, sold] = await Promise.all([
+  const [expenses, revenue, movements, allocations, sold, unpaid] = await Promise.all([
     // Soft-deleted lines are excluded from every total.
     //
     // `total` is PAID ONLY — that is the entire point of the approval chain.
@@ -137,6 +139,34 @@ const aggregatesFor = async (ids) => {
       WHERE o.pfi_id = ANY(${list}) AND o.payment_status = 'Paid'
       GROUP BY o.pfi_id
     `,
+    /**
+     * Orders sitting on this batch whose payment is NOT confirmed.
+     *
+     * The counterpart to `sold`, and the answer to the question a stock figure
+     * always raises: "the batch says 700,000 litres are left — where are
+     * they?". Because sold counts confirmed payment only, an order placed and
+     * even loaded out but not yet paid leaves its quantity looking like
+     * unsold stock, and nothing on the page said otherwise.
+     *
+     * Cancelled and expired orders are excluded — they are not stock waiting
+     * on anything, and an expired order has explicitly released its hold.
+     * Everything else that has not cleared payment is here, so tank quantity
+     * reconciles as: sold + awaiting payment + genuinely unsold.
+     *
+     * `status` is an enum, so it is compared as text — COALESCE'ing it against
+     * '' would ask Postgres to read an empty string as an order_status and
+     * fail the whole aggregate.
+     */
+    client`
+      SELECT o.pfi_id,
+             COALESCE(SUM(o.quantity), 0)::bigint AS qty,
+             COUNT(*)::int AS orders
+      FROM orders o
+      WHERE o.pfi_id = ANY(${list})
+        AND o.payment_status <> 'Paid'
+        AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+      GROUP BY o.pfi_id
+    `,
   ]);
 
   for (const r of expenses) {
@@ -166,6 +196,13 @@ const aggregatesFor = async (ids) => {
   for (const r of sold) {
     const row = out.get(Number(r.pfi_id));
     if (row) row.soldQty = Number(r.qty);
+  }
+  for (const r of unpaid) {
+    const row = out.get(Number(r.pfi_id));
+    if (row) {
+      row.unpaidQty = Number(r.qty);
+      row.unpaidOrderCount = r.orders;
+    }
   }
 
   return out;
