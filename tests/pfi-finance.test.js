@@ -21,32 +21,32 @@ const coastal = (over = {}) => ({
 });
 
 describe("landing cost per litre — Total Cost ÷ BL Quantity, always", () => {
-  test("divides the SAME Total Cost the report prints beside it", () => {
+  test("divides the SAME Total Cost every screen prints beside it", () => {
     const f = computeFinancials(coastal(), { expenses: 20_000_000 });
 
     // ₦300 × 1,000,000 = ₦300,000,000 cargo, + ₦20,000,000 expenses.
     assert.equal(f.pfiValue, 300_000_000);
-    assert.equal(f.totalCost, 320_000_000);
+    assert.equal(f.grandTotalCost, 320_000_000);
     assert.equal(f.landingCostPerLitre, 320);
     // The property that matters: the two figures on the page reconcile.
-    assert.equal(f.landingCostPerLitre, f.totalCost / f.costQtyLitres);
+    assert.equal(f.landingCostPerLitre, f.grandTotalCost / f.costQtyLitres);
   });
 
-  test("a credit note does NOT move the headline figure", () => {
-    // This is the change. It used to divide the credit-adjusted total, so on a
-    // batch carrying a credit the landing cost did not divide out against the
-    // Total Cost printed one line above it, and nothing on the page said why.
+  test("a credit note moves BOTH, so they still reconcile", () => {
+    // "Total cost" means after the credit note everywhere it is displayed, and
+    // the landing cost divides that same figure. Anything else leaves two
+    // numbers on one card that cannot be checked against each other.
     const f = computeFinancials(coastal({ creditBalance: "10000000" }), { expenses: 20_000_000 });
 
-    assert.equal(f.totalCost, 320_000_000);
-    assert.equal(f.grandTotalCost, 310_000_000);
-    assert.equal(f.landingCostPerLitre, 320, "headline still divides Total Cost");
-    assert.equal(f.landingCostPerLitreAfterCredit, 310, "the credit-adjusted view is kept alongside");
+    assert.equal(f.totalCost, 320_000_000, "the gross figure is still available");
+    assert.equal(f.grandTotalCost, 310_000_000, "and this is what is shown as Total Cost");
+    assert.equal(f.landingCostPerLitre, 310);
+    assert.equal(f.landingCostPerLitre, f.grandTotalCost / f.costQtyLitres);
   });
 
-  test("with no credit the two views coincide, as they should", () => {
+  test("with no credit the gross and the displayed total are the same number", () => {
     const f = computeFinancials(coastal(), { expenses: 20_000_000 });
-    assert.equal(f.landingCostPerLitre, f.landingCostPerLitreAfterCredit);
+    assert.equal(f.totalCost, f.grandTotalCost);
   });
 
   test("it moves the moment any input moves — nothing is stored", () => {
@@ -176,10 +176,26 @@ describe("explaining the figures", () => {
     const explain = explainFinancials(pfi, f);
 
     const byKey = Object.fromEntries(explain.map((e) => [e.key, e]));
-    assert.equal(byKey.totalCost.value, "₦320,000,000.00");
-    assert.equal(byKey.landingCostPerLitre.value, "₦320.00");
-    assert.equal(byKey.grandTotalCost.value, "₦310,000,000.00");
-    assert.equal(byKey.landingCostPerLitreAfterCredit.value, "₦310.00");
+    // On a batch with a credit note the gross figure is shown first, named for
+    // what it is, and "Total Cost" is the after-credit number the landing cost
+    // divides — so the two can be checked against each other on the page.
+    assert.equal(byKey.grossCost.value, "₦320,000,000.00");
+    assert.equal(byKey.creditBalance.value, "₦10,000,000.00");
+    assert.equal(byKey.totalCost.value, "₦310,000,000.00");
+    assert.equal(byKey.landingCostPerLitre.value, "₦310.00");
+
+    // The workings must show that same division, not a different one.
+    assert.match(byKey.landingCostPerLitre.workings, /₦310,000,000\.00 ÷ 1,000,000 Litres = ₦310\.00/);
+  });
+
+  test("with no credit note there is no gross line to confuse anyone", () => {
+    const pfi = coastal();
+    const f = computeFinancials(pfi, { expenses: 20_000_000 });
+    const keys = explainFinancials(pfi, f).map((e) => e.key);
+
+    assert.ok(!keys.includes("grossCost"), "nothing was reduced, so nothing to show before it");
+    assert.ok(!keys.includes("creditBalance"));
+    assert.ok(keys.includes("totalCost"));
   });
 
   test("a part-sold batch is told, in words, not to trust its profit figure", () => {
