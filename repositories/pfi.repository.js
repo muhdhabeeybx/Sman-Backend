@@ -96,10 +96,16 @@ const findAll = async ({ search, status, location, type, scopeUser, page = 1, li
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select({ pfi: pfis, resolvedLocationName: LOCATION_NAME })
+      .select({ pfi: pfis, resolvedLocationName: LOCATION_NAME, resolvedProductName: products.name })
       .from(pfis)
       .leftJoin(depots, eq(pfis.locationId, depots.id))
       .leftJoin(lpgStations, eq(pfis.lpgStationId, lpgStations.id))
+      // `product_name` is a denormalised copy and is blank on 27 of the 44
+      // batches on the live book — every one of which has a perfectly good
+      // product_id behind it. Joining the real name means stock can be
+      // totalled per fuel instead of most of the book landing in an "unnamed
+      // product" bucket. Same shape as the location join above.
+      .leftJoin(products, eq(pfis.productId, products.id))
       .where(whereClause)
       .orderBy(asc(pfis.status), desc(pfis.createdAt))
       .limit(limitNum)
@@ -110,9 +116,12 @@ const findAll = async ({ search, status, location, type, scopeUser, page = 1, li
       .where(whereClause),
   ]);
 
-  const enrichedRows = rows.map(({ pfi, resolvedLocationName }) => ({
+  const enrichedRows = rows.map(({ pfi, resolvedLocationName, resolvedProductName }) => ({
     ...pfi,
     locationName: resolvedLocationName || pfi.locationName || "",
+    // The stored copy wins where it has one — it records what the batch was
+    // called at the time, which a since-renamed product row would not.
+    productName: pfi.productName || resolvedProductName || "",
     _id: String(pfi.id),
   }));
 
