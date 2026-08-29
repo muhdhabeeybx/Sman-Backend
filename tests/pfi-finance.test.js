@@ -153,6 +153,21 @@ describe("where the 'unsold' stock actually is", () => {
     assert.equal(f.remaining, -100_000);
     assert.equal(f.sellThrough, 1, "sell-through is still capped at 100% for the bar");
   });
+
+  test("an oversold batch is NAMED as oversold, not left as a bare negative", () => {
+    // This is PFI 25B on the live book: 23,931,000 L of paid orders against a
+    // 23,176,609 L tank. Read as "-754,391 L left" it looks like leftover
+    // stock — the exact opposite of what it means — which is how it came to
+    // be reported as "700k litres unsold".
+    const pfi = coastal({ startingQtyLitres: 23_176_609, blQtyLitres: 23_271_455 });
+    const f = computeFinancials(pfi, { expenses: 0, soldQty: 23_931_000 });
+    const balance = explainFinancials(pfi, f).find((e) => e.key === "remaining");
+
+    assert.equal(f.remaining, -754_391);
+    assert.match(balance.meaning, /^OVERSOLD/);
+    assert.match(balance.meaning, /754,391 Litres more than it ever held/);
+    assert.match(balance.meaning, /not leftover stock/);
+  });
 });
 
 describe("explaining the figures", () => {
