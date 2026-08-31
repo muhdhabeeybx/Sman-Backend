@@ -107,6 +107,18 @@ const createMyOrder = z.object({
   trucks: z.array(pickupTruck).max(20, "Too many trucks on one order").optional(),
 });
 
+// Guest checkout: createMyOrder plus the caller's own identity, because there
+// is no token to take it from. The phone is normalised/validated E.164 in the
+// controller (same as /register) rather than here, so the error copy matches
+// the auth flow's. turnstileToken feeds the same bot check /register uses —
+// an unauthenticated order-creating endpoint must not be free to script.
+const createGuestOrder = createMyOrder.extend({
+  name: requiredString("Name", 255),
+  phone: requiredString("Phone number", 30),
+  email: optionalString("Email", 255),
+  turnstileToken: optionalString("Verification token", 5000),
+});
+
 // The customer portal's own-order list filters — the admin listOrders set
 // minus `customer` (the id is forced from the token, never accepted from the
 // query). Search matches the order number; status/date narrow the history.
@@ -250,6 +262,7 @@ const updateTruckLoad = z.object({
 module.exports = {
   createOrder,
   createMyOrder,
+  createGuestOrder,
   listMyOrders,
   listOrders,
   idParam,

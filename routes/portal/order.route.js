@@ -5,6 +5,7 @@ const { requireCsrfForCookieAuth } = require("../../middleware/csrf");
 const validate = require("../../middleware/validate");
 const orderSchemas = require("../../schemas/order.schema");
 const {
+  createGuestOrder,
   createMyOrder,
   listMyOrders,
   getMyOrder,
@@ -15,8 +16,26 @@ const {
   cancelMyOrderByRef,
   updateMyOrderTrucks,
 } = require("../../controllers/portal/order.controller");
+const generateLimiter = require("../../middleware/generateLimiter");
 
-// Every route here is the signed-in customer acting on their OWN orders.
+// Guest checkout — the one unauthenticated route in this file. Identity is a
+// phone number in the body (find-or-create, like /register); the controller
+// runs the Turnstile bot check and returns only what the guest submitted plus
+// the order/payment facts. Rate-limited because it creates rows with no
+// session to anchor abuse to.
+const guestOrderLimiter = generateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: "Too many orders from this connection. Please try again later.",
+});
+router.post(
+  "/guest",
+  guestOrderLimiter,
+  validate({ body: orderSchemas.createGuestOrder }),
+  createGuestOrder
+);
+
+// Every route below is the signed-in customer acting on their OWN orders.
 // authenticateCustomer populates req.customer from the token; requireActiveCustomer
 // blocks a registered-but-unproven (Pending) account from ordering. Placing an
 // order is a cookie-session state change, so it carries CSRF protection.
