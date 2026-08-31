@@ -287,6 +287,20 @@ const findByOrderId = async (orderId) => {
   return row || null;
 };
 
+/**
+ * Re-snapshot a commission whose basis has moved — the later instalments of a
+ * part-paid order, where each payment enlarges the quantity commission is due
+ * on. Only ever called for a still-pending row; see commission.service.
+ */
+const update = async (id, data, tx = db) => {
+  const [row] = await tx
+    .update(commissions)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(commissions.id, id))
+    .returning();
+  return row || null;
+};
+
 const markAsPaid = async (id, paidBy) => {
   const [row] = await db
     .update(commissions)
@@ -339,6 +353,7 @@ module.exports = {
   findById,
   findByOrderId,
   create,
+  update,
   markAsPaid,
   getSummary,
 };

@@ -40,6 +40,15 @@ const orders = pgTable(
     quantity: integer("quantity").notNull(),
     price: decimal("price", { precision: 15, scale: 2 }).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).notNull(),
+    // What has actually been received against this order, across however many
+    // instalments it took. `totalAmount - amountPaid` is the balance still
+    // expected, and `amountPaid / price` is the quantity that may be ticketed
+    // — see releasableQuantity in services/order.service.js.
+    //
+    // Not capped at totalAmount on purpose: an overpayment is a real thing the
+    // finance report reports, and rejecting it here would turn a fact into a
+    // failed request. See db/migrations/0020.
+    amountPaid: decimal("amount_paid", { precision: 15, scale: 2 }).default("0").notNull(),
     deliveryType: orderDeliveryTypeEnum("delivery_type").notNull(),
     // Where the truck goes on a delivery order — free text, the customer's
     // words. Empty for pickup (the depot is the address) and for orders
@@ -93,6 +102,7 @@ const orders = pgTable(
     check("orders_quantity_check", sql`${table.quantity} > 0`),
     check("orders_price_check", sql`${table.price} >= 0`),
     check("orders_total_check", sql`${table.totalAmount} >= 0`),
+    check("orders_amount_paid_check", sql`${table.amountPaid} >= 0`),
   ]
 );
 

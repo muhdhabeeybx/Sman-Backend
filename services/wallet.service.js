@@ -557,6 +557,38 @@ const findDepositsMatchedToOrder = async (customerId, orderId, tx) => {
         SELECT 1 FROM order_deposit_allocations a
         WHERE a.deposit_id = d.id AND a.order_id = ${orderId}
       )
+      -- A reversed credit is not a funding source. reverseDeposit() zeroes
+      -- remainingAmount precisely to cut the original off for future orders,
+      -- and pass 2 of allocateOrderFunding() honours that through its
+      -- remainingAmount > 0 filter — but pass 1 had no equivalent, and it
+      -- records the credit at FACE value rather than at what the order draws
+      -- from it. So a reversal left the husk fully able to match again.
+      --
+      -- That is what happened to order 11562. Its three statement lines were
+      -- unmatched (unmatchStatementDeposit: allocations deleted, credits
+      -- reversed, lines freed) and then re-matched, creating three fresh
+      -- credits. The reversal clears the husk's own reference and re-points
+      -- its statement line, but nothing clears paystack_details->>'orderId'
+      -- — so the OR branch above still matched all three husks, and
+      -- confirming the order wrote six allocation rows instead of three. Both
+      -- trios carried their face value into the amount column, so the finance
+      -- report added them up and reported 48.2m received against a 24.1m
+      -- order: an overpayment of exactly the order's own value, out of one
+      -- payment made once.
+      --
+      -- Matched on the reversal's own REV-<id> reference — the trail
+      -- reverseDeposit() documents as the link back to the original, there
+      -- being no schema column for it. deposits.reference is uniquely indexed
+      -- where non-null, so this identifies at most one row, and it survives
+      -- the husk's own reference being cleared (the REV- debit keeps its
+      -- own). Deliberately not keyed off remainingAmount = 0: a credit
+      -- legitimately spent to zero by other orders must still be reported
+      -- against this one at face value, which is what makes the surplus
+      -- traceable between orders.
+      AND NOT EXISTS (
+        SELECT 1 FROM deposits r
+        WHERE r.type = 'debit' AND r.reference = 'REV-' || d.id
+      )
     ORDER BY d.created_at ASC, d.id ASC
     FOR UPDATE OF d
   `);
@@ -1018,6 +1050,79 @@ const placeHold = async ({ customerId, orderId, amount, description = "" }, tx) 
 };
 
 /**
+ * Commit MORE funds to an order that already has a hold — the second and later
+ * instalments of a part-paid order.
+ *
+ * wallet_holds carries one row per order id, ever, and that index is load-
+ * bearing: it is what makes a retried payment fail closed instead of holding
+ * the same money twice. So an instalment tops the existing row up rather than
+ * placing another one. The invariant is untouched either way —
+ *
+ *   balance = credits - debits - active holds
+ *
+ * — because the balance is debited by exactly what the hold grows by, in the
+ * same transaction. Everything downstream keeps working unchanged: convertHold
+ * writes one debit row for the full accumulated figure when the order
+ * completes, and releaseHold gives all of it back if the order is cancelled.
+ *
+ * Only an ACTIVE hold may be topped up. One already converted or released
+ * belongs to a finished order, and adding to it would either double-count
+ * against a debit row that has already been written or resurrect money the
+ * customer has had back — so the caller is told to place a fresh hold instead.
+ */
+const addToHold = async ({ customerId, orderId, amount, description = "" }, tx) => {
+  const value = money(amount);
+  if (value <= 0) {
+    return { success: false, message: "Top-up amount must be positive" };
+  }
+
+  const run = async (trx) => {
+    const [hold] = await trx
+      .select()
+      .from(walletHolds)
+      .where(eq(walletHolds.orderId, orderId))
+      .for("update")
+      .limit(1);
+
+    if (!hold) return { success: false, noHold: true, message: "No hold exists for this order" };
+    if (hold.status !== "active") {
+      return {
+        success: false,
+        message: `This order's hold has already been ${hold.status} — it cannot be topped up`,
+      };
+    }
+
+    // Same guarded debit every other spend goes through, so an instalment can
+    // no more overdraw the wallet than a first payment can.
+    const updated = await customerRepo.debitBalance(customerId, value, trx);
+    if (!updated) {
+      return { success: false, insufficient: true, message: "Insufficient wallet balance" };
+    }
+
+    const [grown] = await trx
+      .update(walletHolds)
+      .set({
+        amount: sql`${walletHolds.amount} + ${asDecimal(value)}`,
+        ...(description ? { description } : {}),
+      })
+      .where(eq(walletHolds.id, hold.id))
+      .returning();
+
+    // Same additive bookkeeping placeHold does, and failing it must never take
+    // the payment down with it — the balance has already moved by here.
+    try {
+      await allocateOrderFunding(customerId, orderId, value, trx);
+    } catch (err) {
+      console.error(`[wallet] allocateOrderFunding failed for order ${orderId}:`, err.message);
+    }
+
+    return { success: true, hold: grown, customer: updated };
+  };
+
+  return tx ? run(tx) : db.transaction(run);
+};
+
+/**
  * Return held funds to the balance (order cancelled before fulfilment).
  * No ledger rows: the money never actually moved.
  */
@@ -1143,6 +1248,7 @@ module.exports = {
   rematchOrderFunding,
   unmatchStatementDeposit,
   placeHold,
+  addToHold,
   releaseHold,
   convertHold,
   findHoldByOrder,

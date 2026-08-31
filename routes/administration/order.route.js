@@ -87,7 +87,7 @@ router.post(
   "/:id/pay",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required to pay" }),
-  validate({ params: orderSchemas.idParam }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.payOrder }),
   payOrder
 );
 

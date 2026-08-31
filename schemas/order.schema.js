@@ -136,6 +136,20 @@ const cancelOrder = z.object({
   reason: z.string().trim().max(500, "Reason is too long").optional(),
 });
 
+// Confirm a payment against an order. `amount` is the naira actually received
+// now; omit it to settle the whole outstanding balance, which is what every
+// caller did before instalments existed and remains the default.
+//
+// The ceiling (not more than is still owed) is enforced in the service, not
+// here: it depends on what the order has already taken, which this layer
+// cannot see. Only the shape is checked here.
+const payOrder = z.object({
+  amount: z.coerce
+    .number({ invalid_type_error: "Amount must be a number" })
+    .positive("Amount must be greater than zero")
+    .optional(),
+});
+
 // Customer portal: replace the pickup truck declaration on an existing order.
 // Same shape as create — plate/driver optional, quantity required per truck.
 // An empty array is allowed for ≤60k pickups (clear declared loads; capture at
@@ -242,6 +256,7 @@ module.exports = {
   updateOrder,
   refParam,
   cancelOrder,
+  payOrder,
   updateMyTrucks,
   releaseOrder,
   gateIn,

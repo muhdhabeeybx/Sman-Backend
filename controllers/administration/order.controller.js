@@ -767,12 +767,30 @@ const getPayableOrders = asyncHandler(async (req, res) => {
 const payOrder = asyncHandler(async (req, res) => {
   const order = await orderService.payOrder({
     orderId: Number(req.params.id),
+    // Omitted by the plain "Pay" button, which still settles the order in full.
+    // Present when finance is confirming an instalment.
+    amount: req.body?.amount ?? null,
     actor: { type: "staff", staffId: req.user.id },
   });
+
+  const outstanding = Number(order.totalAmount) - Number(order.amountPaid ?? 0);
+  const partPaid = order.paymentStatus === "Part Paid";
+
   res.json({
     success: true,
-    message: `Order ${order.orderNumber} paid successfully from wallet`,
-    data: { order: await withExpiresAt(order) },
+    message: partPaid
+      ? `Part payment of ₦${Number(order.amountPaid).toLocaleString()} confirmed for order ${order.orderNumber}. ₦${outstanding.toLocaleString()} still expected; ${orderService.releasableQuantity(order).toLocaleString()} litres may be ticketed.`
+      : `Order ${order.orderNumber} paid successfully from wallet`,
+    data: {
+      order: await withExpiresAt(order),
+      // What the desk needs next, without a second round trip to work it out.
+      payment: {
+        amountPaid: Number(order.amountPaid ?? 0),
+        outstanding,
+        releasableQuantity: orderService.releasableQuantity(order),
+        fullyPaid: !partPaid,
+      },
+    },
   });
 });
 
@@ -828,16 +846,28 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
     });
 
     // ── Quantity ceiling ──────────────────────────────────────────────────
-    // This backend settles orders in full from the wallet — paymentStatus is
-    // binary, so there is no partial-payment figure to divide by unit price.
-    // The ceiling is therefore the order quantity itself. If split payments
-    // are introduced later, the releasable figure replaces the capacity below.
+    // Only what has been PAID for may be ticketed. On a fully-paid order that
+    // is the order quantity, exactly as before; on a part-paid one it is the
+    // quantity the money received covers, so a customer who has paid for
+    // 50,000 of a 100,000-litre order can load 50,000 and no more. Paying the
+    // balance lifts the ceiling with no other action needed.
     const existing = await orderTruckRepo.findByOrder(orderId, tx);
     const alreadyTicketed = existing.reduce((s, l) => s + Number(l.quantity || 0), 0);
     const incoming = trucks.reduce((s, t) => s + Number(t.quantity), 0);
-    const capacity = Number(order.quantity);
+    const capacity = orderService.releasableQuantity(order);
+    const partPaid = capacity < Number(order.quantity);
 
     if (alreadyTicketed + incoming > capacity) {
+      // Two different problems, and telling them apart is the whole point of
+      // the message: an over-ordered batch is the depot's mistake to fix, an
+      // unpaid balance is finance's. Saying "exceeds order quantity" for the
+      // second would send the desk hunting for a truck that isn't the issue.
+      if (partPaid) {
+        throw httpErr(
+          400,
+          `Exceeds the quantity paid for: ${(alreadyTicketed + incoming).toLocaleString()} requested against ${capacity.toLocaleString()} paid for of ${Number(order.quantity).toLocaleString()} ordered (${alreadyTicketed.toLocaleString()} already ticketed). ₦${(Number(order.totalAmount) - Number(order.amountPaid ?? 0)).toLocaleString()} is still outstanding.`,
+        );
+      }
       throw httpErr(400, `Exceeds order quantity: ${(alreadyTicketed + incoming).toLocaleString()} requested against ${capacity.toLocaleString()} ordered (${alreadyTicketed.toLocaleString()} already ticketed)`);
     }
 
@@ -1108,7 +1138,9 @@ const reconcileOrderEffects = asyncHandler(async (req, res) => {
   const orderId = Number(req.params.id);
   const order = await orderRepo.findById(orderId);
   if (!order) throw httpErr(404, "Order not found");
-  if (order.paymentStatus !== "Paid") {
+  // Part Paid included: it has taken money, so it has a ticket and a commission
+  // to reconcile just as a fully-paid order does.
+  if (order.paymentStatus === "Unpaid") {
     throw httpErr(409, "Only a paid order can have its post-payment effects reconciled");
   }
 
@@ -1137,7 +1169,9 @@ const rematchOrderFunding = asyncHandler(async (req, res) => {
 
   const order = await orderRepo.findById(orderId);
   if (!order) throw httpErr(404, "Order not found");
-  if (order.paymentStatus !== "Paid") {
+  // A Part Paid order has landed money too, and it is just as capable of having
+  // been matched to the wrong statement line.
+  if (order.paymentStatus === "Unpaid") {
     throw httpErr(409, "Only a paid order has a payment to re-match");
   }
 

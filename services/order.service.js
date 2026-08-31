@@ -42,6 +42,58 @@ function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
 
+/** Naira, to the kobo. Keeps instalment arithmetic off binary-float drift. */
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+/**
+ * The statuses an order can take money in.
+ *
+ * Pending is the first payment. Paid/Released/Loading are the later instalments
+ * of a part-paid order — it has already been through releaseOnPayment, so it is
+ * sitting on the ticketing desk with a balance still owing. Completed,
+ * Cancelled and Expired are not here on purpose: an order that has finished,
+ * been called off, or lapsed must not quietly accept more money.
+ */
+const PAYABLE_STATUSES = new Set(["Pending", "Paid", "Released", "Loading"]);
+
+/**
+ * How much of an order may be ticketed, given what has been paid for it.
+ *
+ * The rule the desk asked for: pay for 50,000 of a 100,000-litre order and you
+ * may cut tickets for 50,000 litres, not the whole order. Pay the rest later
+ * and the remainder unlocks. Quantity is the unit trucks are loaded in, so the
+ * money figure has to be converted back through the order's own unit price.
+ *
+ * Two rounding decisions, both deliberate:
+ *
+ *   - Floored to 2dp, never rounded up. order_trucks.quantity is decimal(15,2),
+ *     so 2dp is the finest a load can actually be written at, and rounding up
+ *     would authorise litres nobody has paid for. A part payment of ₦12,000,000
+ *     at ₦241/litre buys 49,792.53 litres, not 49,792.54.
+ *
+ *   - A fully-paid order returns its quantity EXACTLY, rather than the division.
+ *     total_amount is stored, not recomputed, so on an order whose total was
+ *     rounded at creation the division can land a hair under the quantity —
+ *     which would leave the last few litres of a fully-paid order permanently
+ *     unticketable. Nobody would ever find that by reading the number; they
+ *     would just find a truck they could not load.
+ *
+ * Legacy orders are unaffected: migration 0020 backfilled amount_paid =
+ * total_amount for everything already Paid, so this returns their full
+ * quantity, which is exactly the ceiling that was in force before.
+ */
+function releasableQuantity(order) {
+  const quantity = Number(order.quantity);
+  const paid = Number(order.amountPaid ?? 0);
+  const total = Number(order.totalAmount);
+  const price = Number(order.price);
+
+  if (paid >= total) return quantity;
+  if (!(price > 0)) return 0;
+
+  return Math.min(quantity, Math.floor((paid / price) * 100) / 100);
+}
+
 /**
  * Has this order lapsed? Only a still-Pending, still-unpaid order can — once a
  * transfer or wallet settles it, the order is Paid and never expires.
@@ -50,7 +102,11 @@ function isOrderExpired(order, now = Date.now()) {
   return (
     !orderExpiryDisabled() &&
     order.status === "Pending" &&
-    order.paymentStatus !== "Paid" &&
+    // Only a wholly unfunded order may lapse. Tested as "is Unpaid" rather
+    // than "is not Paid" because a Part Paid order HAS been funded — money is
+    // held against it and it may already have been ticketed — and lapsing it
+    // would strand that payment on an expired order.
+    order.paymentStatus === "Unpaid" &&
     now - new Date(order.createdAt).getTime() >= orderExpiryMs()
   );
 }
@@ -64,7 +120,9 @@ function isOrderExpired(order, now = Date.now()) {
  */
 function computeExpiresAt(order) {
   if (orderExpiryDisabled()) return null;
-  if (order.status !== "Pending" || order.paymentStatus === "Paid") return null;
+  // Part Paid counts as funded here, same as Paid: money is held against the
+  // order, so there is no countdown left to show.
+  if (order.status !== "Pending" || order.paymentStatus !== "Unpaid") return null;
   const created = new Date(order.createdAt).getTime();
   return new Date(created + orderExpiryMs()).toISOString();
 }
@@ -93,8 +151,9 @@ async function withExpiresAt(orderOrOrders) {
  * Internal helper: expire an order if past its deadline, then attach expiresAt.
  */
 async function expireAndAttach(order) {
-  // If pending and unpaid, check if deadline has passed
-  if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus !== "Paid") {
+  // If pending and wholly unfunded, check if deadline has passed. A Part Paid
+  // order is funded and must not lapse — see isOrderExpired.
+  if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus === "Unpaid") {
     const deadline = new Date(order.createdAt).getTime() + orderExpiryMs();
     if (Date.now() >= deadline) {
       try {
@@ -1055,21 +1114,34 @@ async function runPostPaymentEffects(orderId, { notifyWhatsApp = true } = {}) {
 }
 
 /**
- * Pay an unpaid order from the customer's wallet balance.
+ * Pay an order from the customer's wallet balance — in full, or in instalments.
  *
- * Places a wallet hold, transitions Pending→Paid, generates a loading ticket,
- * and creates a commission record — all in one transaction. Triggered either by
- * staff (finance) or by the order's own customer from the portal.
+ * Called with no `amount` this settles the whole outstanding balance and
+ * behaves exactly as it always has: hold, Pending→Paid, release, ticket,
+ * commission, one transaction. Called with an `amount` it takes that much, and
+ * the order becomes Part Paid: live, released and ticketable, but only up to
+ * the quantity that money covers (releasableQuantity above), with the rest
+ * still expected.
+ *
+ * The first instalment is what opens the pipeline — it places the hold and runs
+ * the Pending→Paid→Released transitions, because a part-paid order still has to
+ * reach the ticketing desk to be any use. Later instalments top the same hold up
+ * and move only the money columns; the order is already Released, and there is
+ * no status left to change.
  *
  * @param {object} opts
  * @param {number} opts.orderId
  * @param {number} [opts.customerId]  When set, an ownership guard: the order
  *   must belong to this customer or the call 404s. Omitted for staff, who may
  *   pay any order.
+ * @param {number} [opts.amount]  Naira to confirm now. Omitted/null means the
+ *   whole outstanding balance. May not exceed what is still owed — a customer
+ *   with surplus in the wallet leaves it there, where the finance report can
+ *   still see it, rather than over-holding it against one order.
  * @param {{ type: string, staffId?: number, customerId?: number }} opts.actor
  * @returns {object} the updated order
  */
-async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = true }) {
+async function payOrder({ orderId, customerId = null, actor, amount = null, notifyWhatsApp = true }) {
   // Lapsed orders are expired-and-refused, never paid at a stale price. The
   // guard commits the Expired flag first; the transaction below then sees it.
   await expireIfStale({ orderId, customerId });
@@ -1093,7 +1165,9 @@ async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = tr
     if (order.status === "Expired") {
       throw httpError(409, "This order has expired. Please place a new order at current prices.");
     }
-    if (order.status !== "Pending") throw httpError(409, `Cannot pay an order in ${order.status} status`);
+    if (!PAYABLE_STATUSES.has(order.status)) {
+      throw httpError(409, `Cannot pay an order in ${order.status} status`);
+    }
 
     const customer = await customerRepo.findById(order.customerId);
     if (!customer) throw httpError(404, "Customer not found");
@@ -1101,19 +1175,42 @@ async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = tr
     const orderTotal = Number(order.totalAmount);
     if (orderTotal <= 0) throw httpError(400, "Order total is invalid");
 
-    const holdResult = await walletService.placeHold(
-      {
-        customerId: customer.id,
-        orderId: order.id,
-        amount: orderTotal,
-        description: `Payment for Order ${order.orderNumber} (Wallet Balance)`,
-      },
-      tx
-    );
+    const alreadyPaid = Number(order.amountPaid ?? 0);
+    const outstanding = round2(orderTotal - alreadyPaid);
+    if (outstanding <= 0) throw httpError(409, "Order is already paid");
+
+    // No amount named means "settle it" — the whole outstanding balance, which
+    // on an untouched order is the order total. That is what every existing
+    // caller (the portal, the WhatsApp flow, the finance desk's Pay button)
+    // passes, so they keep their exact behaviour.
+    const value = amount == null ? outstanding : round2(amount);
+    if (!Number.isFinite(value) || value <= 0) {
+      throw httpError(400, "Payment amount must be greater than zero");
+    }
+    if (value > outstanding) {
+      throw httpError(
+        400,
+        `That is more than this order still owes. Outstanding: ₦${outstanding.toLocaleString()}, offered: ₦${value.toLocaleString()}. Leave the surplus in the wallet — it stays available for the customer's other orders.`,
+      );
+    }
+
+    // The first instalment places the hold; later ones grow it, because
+    // wallet_holds is one row per order for good (see addToHold).
+    const isFirstPayment = alreadyPaid <= 0;
+    const description = `Payment for Order ${order.orderNumber} (Wallet Balance)`;
+    const holdResult = isFirstPayment
+      ? await walletService.placeHold(
+          { customerId: customer.id, orderId: order.id, amount: value, description },
+          tx,
+        )
+      : await walletService.addToHold(
+          { customerId: customer.id, orderId: order.id, amount: value, description },
+          tx,
+        );
 
     if (!holdResult.success) {
       if (holdResult.insufficient) {
-        throw httpError(400, `Insufficient wallet balance. Required: ₦${orderTotal.toLocaleString()}, Available: ₦${Number(customer.balance).toLocaleString()}`);
+        throw httpError(400, `Insufficient wallet balance. Required: ₦${value.toLocaleString()}, Available: ₦${Number(customer.balance).toLocaleString()}`);
       }
       if (holdResult.alreadyHeld) {
         throw httpError(409, "A payment hold already exists for this order");
@@ -1121,20 +1218,63 @@ async function payOrder({ orderId, customerId = null, actor, notifyWhatsApp = tr
       throw httpError(400, holdResult.message || "Payment failed");
     }
 
-    await orderStatus.transition(order.id, "Paid", {
-      tx,
-      actor,
-      action: "order.paid",
-      set: { paymentConfirmedAt: new Date(), paymentStatus: "Paid" },
-      metadata: { via: "wallet", amount: String(orderTotal) },
-    });
+    const paidAfter = round2(alreadyPaid + value);
+    // Compared at kobo scale rather than with >=, so a total that does not
+    // divide cleanly cannot leave an order a fraction of a kobo short of Paid
+    // and stuck reporting a balance nobody can settle.
+    const fullyPaid = Math.round(paidAfter * 100) >= Math.round(orderTotal * 100);
+    const paymentStatus = fullyPaid ? "Paid" : "Part Paid";
 
-    // Payment IS the release: the order goes straight onto the ticketing desk
-    // rather than waiting for someone to click a button that has no other
-    // condition attached to it.
-    await orderStatus.releaseOnPayment(order.id, { tx, actor, metadata: { via: "wallet" } });
+    if (isFirstPayment) {
+      await orderStatus.transition(order.id, "Paid", {
+        tx,
+        actor,
+        action: "order.paid",
+        set: { paymentConfirmedAt: new Date(), paymentStatus, amountPaid: String(paidAfter) },
+        metadata: {
+          via: "wallet",
+          amount: String(value),
+          amountPaid: String(paidAfter),
+          orderTotal: String(orderTotal),
+          partial: !fullyPaid,
+        },
+      });
 
-    return order;
+      // Payment IS the release: the order goes straight onto the ticketing desk
+      // rather than waiting for someone to click a button that has no other
+      // condition attached to it. A part payment releases it too — capped at
+      // the quantity paid for, which generate-tickets enforces.
+      await orderStatus.releaseOnPayment(order.id, { tx, actor, metadata: { via: "wallet" } });
+    } else {
+      // No status to move — the order was released by its first instalment.
+      // Only the money columns change, and the audit row is written here
+      // rather than through transition() for exactly that reason.
+      await tx
+        .update(orders)
+        .set({ paymentStatus, amountPaid: String(paidAfter), updatedAt: new Date() })
+        .where(eq(orders.id, order.id));
+
+      await auditLogRepo.record(
+        {
+          entityType: "order",
+          entityId: order.id,
+          action: fullyPaid ? "order.paid" : "order.part_paid",
+          prevState: order.paymentStatus,
+          newState: paymentStatus,
+          actor,
+          metadata: {
+            via: "wallet",
+            amount: String(value),
+            amountPaid: String(paidAfter),
+            orderTotal: String(orderTotal),
+            outstanding: String(round2(orderTotal - paidAfter)),
+          },
+        },
+        tx,
+      );
+    }
+
+    return { ...order, amountPaid: String(paidAfter), paymentStatus, instalment: value };
   }).then(async (order) => {
     await runPostPaymentEffects(order.id, { notifyWhatsApp });
 
@@ -1149,6 +1289,7 @@ module.exports = {
   cancelOrder,
   updatePickupTrucks,
   payOrder,
+  releasableQuantity,
   runPostPaymentEffects,
   expireOrder,
   expireIfStale,
