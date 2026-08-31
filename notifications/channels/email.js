@@ -30,6 +30,39 @@ const from = () =>
   process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>";
 
 /**
+ * Resend allows 10 requests a second per account, and the engine dispatches
+ * recipients in concurrent batches — so a batch of ten landed on the limit and
+ * anything sharing the second went over it. That produced 236 "Too many
+ * requests" failures in five days: real, dropped emails, on a limit that is
+ * simply a matter of pacing.
+ *
+ * A gap between sends is enough. Every send waits its turn on one shared
+ * promise chain, so concurrency upstream no longer decides the request rate —
+ * the sends still overlap on the network, they just start far enough apart.
+ * The cap is per account, which is why this lives in the channel rather than
+ * the engine: every caller shares one provider budget.
+ */
+const RATE_LIMIT_PER_SECOND = Number(process.env.EMAIL_RATE_LIMIT_PER_SECOND || 8);
+const MIN_GAP_MS = RATE_LIMIT_PER_SECOND > 0 ? Math.ceil(1000 / RATE_LIMIT_PER_SECOND) : 0;
+
+let sendGate = Promise.resolve();
+let lastSendAt = 0;
+
+/** Resolves when this caller is clear to make its request. */
+const takeSlot = () => {
+  if (MIN_GAP_MS <= 0) return Promise.resolve();
+  const turn = sendGate.then(async () => {
+    const wait = lastSendAt + MIN_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastSendAt = Date.now();
+  });
+  // The queue must keep moving even if a turn rejects, or one failure would
+  // wedge every send behind it for the life of the process.
+  sendGate = turn.catch(() => {});
+  return turn;
+};
+
+/**
  * A very loose check — real validation is the provider's job, and rejecting an
  * address Resend would have accepted is worse than letting it try. This only
  * catches the empty and obviously-not-an-address cases so they are recorded as
@@ -62,6 +95,7 @@ const send = async ({ contact, rendered }) => {
   }
 
   try {
+    await takeSlot();
     const { data, error } = await getClient().emails.send({
       from: from(),
       to,
