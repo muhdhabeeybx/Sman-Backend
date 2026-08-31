@@ -365,7 +365,12 @@ describe("part payment", () => {
     await fund(HALF);
     await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
 
-    const report = await orderRepo.findFinanceReport({ search: String(order.id) });
+    // Searched by the fixture's own unique order number, not by id. An id
+    // search also runs an ILIKE '%<id>%' over every order number, so under the
+    // full suite it pulls in unrelated orders and the totals below stop
+    // describing this one — the assertions passed alone and failed in a full
+    // run, which is the least useful way for a test to fail.
+    const report = await orderRepo.findFinanceReport({ search: order.orderNumber });
     const row = report.orders.find((r) => r.id === order.id);
 
     assert.ok(row, "a part-paid order appears on the report by default, not only once fully paid");
