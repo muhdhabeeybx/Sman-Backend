@@ -88,7 +88,22 @@ function releasableQuantity(order) {
   const total = Number(order.totalAmount);
   const price = Number(order.price);
 
-  if (paid >= total) return quantity;
+  /**
+   * A settled order releases in full — and that is decided by the order's own
+   * declared status FIRST, before any arithmetic on amount_paid.
+   *
+   * paymentStatus is the older, and still the authoritative, statement that an
+   * order has been paid for; amount_paid is a column this change introduced.
+   * Reading only the arithmetic meant any writer that marks an order Paid
+   * without also setting amount_paid produced a releasable quantity of ZERO —
+   * a fully-paid order that could never be ticketed at all. The settlement
+   * sweep in payment.service.js was exactly such a writer (now fixed to set
+   * both), and every test fixture that inserts a paid order directly is
+   * another. Trusting the status closes the whole class: a future writer that
+   * forgets amount_paid degrades to today's behaviour instead of silently
+   * bricking the ticketing desk.
+   */
+  if (order.paymentStatus === "Paid" || paid >= total) return quantity;
   if (!(price > 0)) return 0;
 
   return Math.min(quantity, Math.floor((paid / price) * 100) / 100);

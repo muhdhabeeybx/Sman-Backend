@@ -80,6 +80,10 @@ const FULL_ORDER_COLUMNS = {
   quantity: orders.quantity,
   price: orders.price,
   totalAmount: orders.totalAmount,
+  // What has actually been received against the order, across however many
+  // instalments. Equal to totalAmount on a fully-paid order; the difference is
+  // the balance still expected on a part-paid one.
+  amountPaid: orders.amountPaid,
   deliveryType: orders.deliveryType,
   deliveryAddress: orders.deliveryAddress,
   companyName: orders.companyName,
@@ -545,7 +549,12 @@ const traceWalletSources = async (rows, walletRows, fundingByOrder) => {
 
 const findFinanceReport = async ({
   search,
-  paymentStatus = "Paid",
+  // Null rather than "Paid": the report is every CONFIRMED payment, and a part
+  // payment is a confirmed payment — so the unfiltered view is Paid together
+  // with Part Paid, and an order settling in instalments stays on the report
+  // throughout instead of appearing only once the last kobo lands. An explicit
+  // value still filters to exactly that status, and "all" drops the condition.
+  paymentStatus = null,
   dateFrom,
   dateTo,
   depotId,
@@ -558,6 +567,8 @@ const findFinanceReport = async ({
   if (scope) conditions.push(scope);
   if (paymentStatus && paymentStatus !== "all") {
     conditions.push(eq(orders.paymentStatus, paymentStatus));
+  } else if (!paymentStatus) {
+    conditions.push(inArray(orders.paymentStatus, ["Paid", "Part Paid"]));
   }
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
@@ -607,7 +618,7 @@ const findFinanceReport = async ({
     pfiLocationName: pfis.locationName,
   };
 
-  const [rows, [{ total, totalAmount, totalQuantity }], [{ trackedCount }]] = await Promise.all([
+  const [rows, [{ total, totalAmount, totalQuantity, totalPaid, partPaidCount }], [{ trackedCount }]] = await Promise.all([
     db
       .select(columns)
       .from(orders)
@@ -634,6 +645,12 @@ const findFinanceReport = async ({
         total: count(),
         totalAmount: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
         totalQuantity: sql`COALESCE(SUM(${orders.quantity}), 0)`,
+        // Sales value against money actually received, over the same filtered
+        // set — so the differential on the stat cards is the difference between
+        // two figures the rows below already agree with, rather than a third
+        // number computed somewhere else.
+        totalPaid: sql`COALESCE(SUM(${orders.amountPaid}), 0)`,
+        partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')`,
       })
       .from(orders)
       .leftJoin(customers, eq(orders.customerId, customers.id))
@@ -975,6 +992,23 @@ const findFinanceReport = async ({
       /** A hold exists, so this was paid from wallet balance, tracked or not. */
       walletFunded: wallet != null,
       unattributedAmount: fundingTracked ? Math.max(0, Number(row.totalAmount || 0) - applied) : 0,
+      /**
+       * The balance still expected on a part-paid order — sales value less what
+       * has actually been received.
+       *
+       * Deliberately separate from `unattributedAmount` above, which is the
+       * same subtraction but answers a completely different question. That one
+       * is a gap in the FUNDING TRAIL: money the order was settled with that
+       * the allocation ledger cannot account for, i.e. a bookkeeping hole.
+       * This one is a gap in the MONEY: cash that was never sent and is still
+       * owed. Reporting the second as the first would have the finance desk
+       * hunting a missing statement line for a payment nobody has made yet.
+       */
+      outstandingAmount:
+        row.paymentStatus === "Paid"
+          ? 0
+          : Math.max(0, Number(row.totalAmount || 0) - Number(row.amountPaid || 0)),
+      partPaid: row.paymentStatus === "Part Paid",
       walletBalanceBefore,
       walletBalanceAfter,
     };
@@ -988,6 +1022,12 @@ const findFinanceReport = async ({
       totalQuantity: Number(totalQuantity),
       trackedCount: Number(trackedCount),
       notTrackedCount: total - Number(trackedCount),
+      // Sales value (totalAmount), amount paid, and the differential between
+      // them. On a set with no part payments totalPaid equals totalAmount and
+      // the differential is zero, exactly as before this existed.
+      totalPaid: Number(totalPaid),
+      totalOutstanding: Number(totalAmount) - Number(totalPaid),
+      partPaidCount: Number(partPaidCount),
     },
   };
 };
@@ -1065,11 +1105,23 @@ const countByPfi = async (pfiId) => {
   return total;
 };
 
+/**
+ * Orders whose customer is holding enough to settle them right now.
+ *
+ * Part Paid orders belong here too: they still owe a balance, and the desk
+ * wants the same one-click settle once the customer has funded the rest. Both
+ * the status and the affordability test are therefore written against what is
+ * STILL OWED rather than the order total — on an Unpaid order those are the
+ * same figure, so this lists exactly what it always did, plus the part-paid
+ * orders that can now be finished off.
+ */
 const findPayableOrders = async (scopeUser) => {
   const conditions = [
-    eq(orders.paymentStatus, "Unpaid"),
-    eq(orders.status, "Pending"),
-    sql`${customers.balance} >= ${orders.totalAmount}`,
+    inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
+    // A part-paid order has already been released, so restricting to Pending
+    // would exclude every one of them.
+    inArray(orders.status, ["Pending", "Paid", "Released", "Loading"]),
+    sql`${customers.balance} >= (${orders.totalAmount} - ${orders.amountPaid})`,
   ];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);

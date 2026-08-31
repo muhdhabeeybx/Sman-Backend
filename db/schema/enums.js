@@ -51,9 +51,20 @@ const orderDeliveryTypeEnum = pgEnum("order_delivery_type", [
   "pickup",
 ]);
 
+// Money received, as distinct from where the order is in the pipeline below.
+// 'Part Paid' means some of the total has landed and a balance is still
+// expected: the order is live and ticketable, but only up to the quantity that
+// amount covers (see releasableQuantity in services/order.service.js).
+//
+// Listed in the database's own order, not the logical one. ALTER TYPE ADD VALUE
+// appends, so migration 0020 put 'Part Paid' after 'Paid' in every database
+// that already existed — and enum sort order is what an ORDER BY on this column
+// actually follows. Writing the logical Unpaid → Part Paid → Paid here would
+// describe a type nothing has.
 const orderPaymentStatusEnum = pgEnum("order_payment_status", [
   "Unpaid",
   "Paid",
+  "Part Paid",
 ]);
 
 // Pipeline: Pending → Paid → Released → Loading → Completed, with Cancelled as

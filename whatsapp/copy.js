@@ -356,8 +356,11 @@ const orderCreated = (order) => {
     `To pay by bank transfer, send to the account for this order:\n` +
     `Bank: ${order.virtualAccountBank}\n` +
     `Account Number: *${order.virtualAccountNumber}*\n` +
-    `Account Name: ${order.virtualAccountName}\n\n` +
-    "Once Soroman confirms your transfer, tap *Pay now* below to confirm your order."
+    `Account Name: ${order.virtualAccountName}`
+    // Dropped: "Once Soroman confirms your transfer, tap *Pay now* below to
+    // confirm your order." The trailing \n\n above went with it — it existed
+    // only to separate the account block from that sentence, and left in place
+    // it would end every one of these messages on two blank lines.
   );
 };
 

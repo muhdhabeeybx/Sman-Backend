@@ -381,7 +381,15 @@ const processUnpaidOrdersForCustomer = async (customerId) => {
           tx,
           actor: { type: "system" },
           action: "order.paid",
-          set: { paymentConfirmedAt: new Date(), paymentStatus: "Paid" },
+          // amountPaid alongside the status: this sweep settles the order in
+          // full, and the finance report reads that column for what was
+          // received. Left at its 0 default it would report the whole order
+          // value as still outstanding on an order that is fully paid.
+          set: {
+            paymentConfirmedAt: new Date(),
+            paymentStatus: "Paid",
+            amountPaid: String(orderTotal),
+          },
           metadata: { via: "settlement", amount: String(orderTotal) },
         });
 
