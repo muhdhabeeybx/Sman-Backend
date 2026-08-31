@@ -124,6 +124,28 @@ const listDeliveries = pagination.extend({
   to: z.string().trim().max(30).optional(),
   /** Matched against the recipient's name and the destination alike. */
   search: z.string().trim().max(120, "Search is too long").optional(),
+  /**
+   * One classified failure reason — "every send that died on an empty wallet".
+   *
+   * Not an enum: the codes live in utils/deliveryReason.js and a schema copy
+   * would be a second list to keep in step. An unknown code is harmless, it
+   * simply matches nothing.
+   */
+  reason: z.string().trim().max(40, "Reason is too long").optional(),
+});
+
+/**
+ * The log rolled up per day or per broadcast.
+ *
+ * Same filters as the list, deliberately: the summary and the rows beneath it
+ * must describe the same set, or the counts stop reconciling the moment
+ * somebody narrows the log.
+ */
+const deliverySummary = listDeliveries.extend({
+  groupBy: z.enum(["day", "campaign"]).optional().default("day"),
+  limit: numberLike("Limit")
+    .pipe(z.number().int().positive().max(365, "Limit cannot exceed 365"))
+    .optional(),
 });
 
 const listCampaigns = pagination.extend({
@@ -221,6 +243,7 @@ const sendTest = z.object({
 });
 
 module.exports = {
+  deliverySummary,
   CATEGORIES,
   PLATFORMS,
   listNotifications,

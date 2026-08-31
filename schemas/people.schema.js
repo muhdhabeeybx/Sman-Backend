@@ -38,7 +38,7 @@ const listPeople = pagination.extend({
   activity: enumOf("Activity", ["all", "frequent", "occasional", "dormant", "never"]).optional(),
   hasBalance: enumOf("Has balance", ["yes", "no"]).optional(),
   numberStatus: enumOf("Number status", NUMBER_STATUSES).optional(),
-  sort: enumOf("Sort", ["active", "newest", "oldest", "name", "company", "value"]).optional(),
+  sort: enumOf("Sort", ["top", "active", "newest", "oldest", "name", "company", "value"]).optional(),
 });
 
 const listHygiene = z.object({

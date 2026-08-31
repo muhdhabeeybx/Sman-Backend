@@ -168,7 +168,8 @@ const verifyPin = async ({ phone, email, pin }) => {
   let customer = null;
   if (typeof phone === "string" && phone.trim()) {
     const e164 = toE164(phone);
-    customer = e164 ? await customerRepo.findByPhone(e164) : null;
+    // Any number on the account resolves it — see customerRepo.findByAnyPhone.
+    customer = e164 ? (await customerRepo.findByAnyPhone(e164))?.customer || null : null;
   } else if (typeof email === "string" && email.trim()) {
     customer = await customerRepo.findByEmail(email.trim().toLowerCase());
   }
@@ -291,7 +292,7 @@ const registerWithProvider = async ({ registrationToken, phone, name }, { reques
     return { success: false, message: "This sign-in is already linked to an account. Just sign in." };
   }
 
-  let customer = await customerRepo.findByPhone(e164);
+  let customer = (await customerRepo.findByAnyPhone(e164))?.customer || null;
   if (!customer) {
     const displayName = (typeof name === "string" && name.trim()) || claim.name || "Customer";
     customer = await customerRepo.create({
@@ -315,7 +316,12 @@ const registerWithProvider = async ({ registrationToken, phone, name }, { reques
     });
   }
 
-  const result = await otpService.issueAndSend(customer, { action: "register", requestIp });
+  // To the number they gave, which may be an alternate already on the account.
+  const result = await otpService.issueAndSend(customer, {
+    action: "register",
+    requestIp,
+    sendTo: e164,
+  });
   if (!result.sent) {
     console.warn(`[identity] register-with-provider: no code sent (${result.reason})`);
   }

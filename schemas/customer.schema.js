@@ -31,6 +31,24 @@ const createCustomer = z.object({
  */
 const updateCustomer = createCustomer.partial();
 
+/**
+ * The extra numbers a customer signs in on.
+ *
+ * `phone` is presence-checked only, exactly as createCustomer's is and for the
+ * same reason: valid-phone-ness is a libphonenumber question that `toE164` in
+ * the controller already answers, and a regex here would be a second source of
+ * truth free to disagree with it.
+ */
+const addCustomerPhone = z.object({
+  phone: requiredString("Phone number", 30),
+  // The desk's own word for the number — "Warehouse", "Director". Free text
+  // because the useful labels belong to the customer, not to a list we can
+  // write out in advance.
+  label: optionalString("Label", 60),
+});
+
+const phoneIdParam = z.object({ id: id("Customer id"), phoneId: id("Phone id") });
+
 const listCustomers = pagination.extend({
   // The shared pagination cap (500) is tuned for paged UI lists; customer
   // pickers (manual deposit, messaging) want the whole book in one request.
@@ -74,4 +92,7 @@ const segmentCustomers = z.object({
   limit: numberLike("Limit").optional(),
 });
 
-module.exports = { createCustomer, updateCustomer, listCustomers, idParam, segmentCustomers };
+module.exports = { createCustomer, updateCustomer, listCustomers, idParam, segmentCustomers,
+  addCustomerPhone,
+  phoneIdParam,
+};

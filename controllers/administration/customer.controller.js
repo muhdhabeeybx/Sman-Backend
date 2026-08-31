@@ -1,5 +1,5 @@
 const asyncHandler = require("express-async-handler");
-const { customerRepo, orderRepo, depositRepo } = require("../../repositories");
+const { customerRepo, customerPhoneRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
 
 const getCustomers = asyncHandler(async (req, res) => {
@@ -62,11 +62,16 @@ const createCustomer = asyncHandler(async (req, res) => {
   // "That phone is taken" leaves the desk guessing whether they are looking at
   // a duplicate of their own customer or somebody else's; the row itself
   // answers it, and `existingCustomer` lets the form offer to open them.
-  const phoneOwner = await customerRepo.findByPhone(normalizedPhone);
+  // Across BOTH tables — the number may already be somebody's alternate rather
+  // than their primary, and a customer created on it would be a second account
+  // that the same person can sign in to. Matched on the normalised key, so
+  // "0803…" is refused when "+234803…" is what is on file.
+  const owner = await customerPhoneRepo.findOwner(normalizedPhone);
+  const phoneOwner = owner ? await customerRepo.findById(owner.customerId) : null;
   if (phoneOwner) {
     return res.status(409).json({
       success: false,
-      message: `${phoneOwner.name}${phoneOwner.companyName ? ` (${phoneOwner.companyName})` : ""} already uses ${normalizedPhone}`,
+      message: `${phoneOwner.name}${phoneOwner.companyName ? ` (${phoneOwner.companyName})` : ""} already uses ${owner.phone}${owner.isPrimary ? "" : " as one of their numbers"}`,
       data: {
         existingCustomer: {
           id: phoneOwner.id,
@@ -150,10 +155,15 @@ const updateCustomer = asyncHandler(async (req, res) => {
 
   if (req.body.phone) {
     const normalizedPhone = toE164(req.body.phone);
-    if (await customerRepo.existsByPhone(normalizedPhone, customer.id)) {
+    // Same cross-table check as create: another customer's ALTERNATE is just
+    // as much a clash as their primary, because both sign in.
+    const clash = await customerPhoneRepo.findOwner(normalizedPhone, {
+      exceptCustomerId: customer.id,
+    });
+    if (clash) {
       return res.status(409).json({
         success: false,
-        message: `Another customer with phone ${normalizedPhone} already exists`,
+        message: `${clash.name} already uses ${clash.phone}${clash.isPrimary ? "" : " as one of their numbers"}`,
       });
     }
   }

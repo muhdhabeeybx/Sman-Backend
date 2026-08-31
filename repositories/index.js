@@ -2,6 +2,9 @@ module.exports = {
   staffRepo: require("./staff.repository"),
   staffScopeRepo: require("./staffScope.repository"),
   customerRepo: require("./customer.repository"),
+  // The alternate numbers a customer can also sign in on. The primary stays
+  // on customers.phone — see db/migrations/0019_customer_phone_numbers.sql.
+  customerPhoneRepo: require("./customerPhone.repository"),
   contactRepo: require("./contact.repository"),
   // Customers and contacts as one list — see the header of the file for why
   // the two tables stay separate but the two PAGES did not.

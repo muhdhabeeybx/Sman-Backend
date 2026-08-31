@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, desc, count, ne, gte, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { customers, orders } = require("../db/schema");
+const { normalizedKey } = require("../utils/phone");
 
 const findById = async (id, tx = db) => {
   const [row] = await tx.select().from(customers).where(eq(customers.id, id)).limit(1);
@@ -14,6 +15,62 @@ const findByPhone = async (phone) => {
     .where(eq(customers.phone, phone))
     .limit(1);
   return row || null;
+};
+
+/**
+ * The customer this number reaches — primary OR any alternate on file.
+ *
+ * This is the login lookup. `findByPhone` above compares `customers.phone`
+ * exactly, which is right for "is this exact string taken?" but wrong for
+ * "who is signing in?": a customer with three numbers on the account can only
+ * be found by one of them, so the other two dead-end at "no such account"
+ * despite being numbers the desk deliberately recorded as theirs.
+ *
+ * Matched on the last ten digits rather than the raw string, so the caller
+ * gets the same answer whichever way the number was typed — the two tables
+ * generate that key identically (migrations 0016 and 0019) and both index it.
+ *
+ * Returns the customer plus HOW it was matched, because the caller usually
+ * needs to know: an OTP must go to the number that was typed, not to the
+ * primary, or a customer signing in on their second line never receives a
+ * code and has no way to tell why.
+ *
+ * @param {string} phone any format
+ * @returns {Promise<{customer: object, matchedPhone: string, isPrimary: boolean}|null>}
+ */
+const findByAnyPhone = async (phone) => {
+  const key = normalizedKey(phone);
+  if (!key) return null;
+
+  // One statement rather than "try the primary, then try the alternates":
+  // two round trips on the hot path of every login, and a second chance to
+  // get the ordering wrong. The primary sorts first so an account that
+  // somehow holds the number both ways resolves to the primary, which is the
+  // record the rest of the system reads.
+  const result = await db.execute(sql`
+    SELECT c.id, c.phone AS "matchedPhone", true AS "isPrimary", 0 AS rank
+    FROM customers c
+    WHERE c.phone_normalized = ${key}
+
+    UNION ALL
+
+    SELECT cp.customer_id, cp.phone, false, 1
+    FROM customer_phones cp
+    WHERE cp.phone_normalized = ${key}
+
+    ORDER BY rank
+    LIMIT 1
+  `);
+  const row = (result.rows ?? result)[0];
+  if (!row) return null;
+
+  const customer = await findById(Number(row.id));
+  if (!customer) return null;
+  return {
+    customer,
+    matchedPhone: row.matchedPhone,
+    isPrimary: Boolean(row.isPrimary),
+  };
 };
 
 const findByEmail = async (email) => {
@@ -441,6 +498,7 @@ const findForSegment = async ({
 module.exports = {
   findById,
   findByPhone,
+  findByAnyPhone,
   findByEmail,
   findByVirtualAccount,
   findByPaystackCustomerId,

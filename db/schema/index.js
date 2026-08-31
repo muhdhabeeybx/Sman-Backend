@@ -1,6 +1,8 @@
 const enums = require("./enums");
 const staffSchema = require("./staff");
 const customerSchema = require("./customer");
+// After ./customer and ./staff — customerPhone destructures both at load time.
+const customerPhoneSchema = require("./customerPhone");
 const contactSchema = require("./contact");
 const driverSchema = require("./driver");
 // Before its dependents: orderTruck, driverTruckHistory and deliveryInventory
@@ -76,6 +78,7 @@ module.exports = {
   ...enums,
   ...staffSchema,
   ...customerSchema,
+  ...customerPhoneSchema,
   ...contactSchema,
   ...driverSchema,
   ...depotSchema,

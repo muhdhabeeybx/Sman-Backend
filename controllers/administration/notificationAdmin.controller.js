@@ -9,6 +9,7 @@ const fcm = require("../../notifications/fcm");
 const sse = require("../../notifications/sse");
 const { runMaintenance } = require("../../notifications/worker");
 const priceList = require("../../services/priceList.service");
+const { REASON_CATALOG } = require("../../utils/deliveryReason");
 
 /**
  * Admin-only notification operations: broadcasting, and seeing what the engine
@@ -187,12 +188,13 @@ const getCampaign = asyncHandler(async (req, res) => {
 
 /** GET /api/notifications/deliveries — the outbound log, filterable. */
 const listDeliveries = asyncHandler(async (req, res) => {
-  const { channel, status, type, campaignId, from, to, search, page, limit } = req.query;
+  const { channel, status, type, campaignId, reason, from, to, search, page, limit } = req.query;
   const { rows, pagination } = await notificationDeliveryRepo.findAll({
     channel,
     status,
     type,
     campaignId,
+    reason,
     from,
     to,
     search,
@@ -200,6 +202,38 @@ const listDeliveries = asyncHandler(async (req, res) => {
     limit,
   });
   res.json({ success: true, data: { data: rows, pagination } });
+});
+
+/**
+ * GET /api/notifications/delivery-summary — the log rolled up.
+ *
+ * The per-row log answers "did this one person get it?". This answers the
+ * question the desk actually opens the page with — "what went out on Tuesday,
+ * how many failed, why, and what did it cost?" — which 12,000 rows behind a
+ * paginator cannot add up to on their own.
+ *
+ * `groupBy=day` for the running record, `groupBy=campaign` for per-blast. The
+ * reason catalogue ships with the response so the client renders a label for
+ * every code without keeping its own copy of the mapping.
+ */
+const deliverySummary = asyncHandler(async (req, res) => {
+  const { groupBy, channel, status, type, campaignId, reason, from, to, search, limit } = req.query;
+  const buckets = await notificationDeliveryRepo.summarise({
+    groupBy,
+    channel,
+    status,
+    type,
+    campaignId,
+    reason,
+    from,
+    to,
+    search,
+    limit,
+  });
+  res.json({
+    success: true,
+    data: { groupBy: groupBy || "day", buckets, reasons: REASON_CATALOG },
+  });
 });
 
 /** GET /api/notifications/:id/deliveries — every channel attempt for one row. */
@@ -273,6 +307,7 @@ module.exports = {
   listCampaigns,
   getCampaign,
   listDeliveries,
+  deliverySummary,
   deliveriesForNotification,
   health,
   forEntity,

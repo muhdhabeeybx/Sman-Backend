@@ -74,6 +74,12 @@ router.post(
   admin.broadcast
 );
 router.get("/deliveries", verifyStaff, validate({ query: schemas.listDeliveries }), admin.listDeliveries);
+router.get(
+  "/delivery-summary",
+  verifyStaff,
+  validate({ query: schemas.deliverySummary }),
+  admin.deliverySummary
+);
 router.get("/sms-balance", verifyStaff, admin.smsBalance);
 router.get("/campaigns", verifyStaff, validate({ query: schemas.listCampaigns }), admin.listCampaigns);
 router.get(

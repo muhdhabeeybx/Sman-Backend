@@ -128,7 +128,9 @@ const handlePasswordStepUpVerify = asyncHandler(async (req, res) => {
 
   const e164 = toE164(phone);
   if (!e164) return reject();
-  const customer = await customerRepo.findByPhone(e164);
+  // Any number on the account — the step-up code was issued against whichever
+  // one the customer typed, so verification has to resolve the same way.
+  const customer = (await customerRepo.findByAnyPhone(e164))?.customer || null;
   if (!customer || customer.status === "Inactive") return reject();
 
   const verified = await otpService.verifyCode(customer.id, code, otpService.PURPOSE_AUTH);
@@ -189,7 +191,7 @@ const handlePinLogin = asyncHandler(async (req, res) => {
   let candidate = null;
   if (typeof phone === "string" && phone.trim()) {
     const e164Check = toE164(phone);
-    candidate = e164Check ? await customerRepo.findByPhone(e164Check) : null;
+    candidate = e164Check ? (await customerRepo.findByAnyPhone(e164Check))?.customer || null : null;
   } else if (typeof email === "string" && email.trim()) {
     candidate = await customerRepo.findByEmail(email.trim().toLowerCase());
   }

@@ -189,12 +189,27 @@ function smsBody(action, code) {
  *
  * @returns {{sent: boolean, reason: string|null, capped?: boolean}}
  */
-async function issueAndSend(customer, { action, requestIp }) {
+async function issueAndSend(customer, { action, requestIp, sendTo } = {}) {
   const purpose = ACTION_PURPOSE[action];
   if (!purpose) throw new TypeError(`otp.service: unknown action ${JSON.stringify(action)}`);
 
-  const useDemoAccount = isDemoAccount(customer.phone);
-  const eligibility = checkSmsEligibility(customer.phone);
+  /**
+   * The handset this code goes to.
+   *
+   * Defaults to the primary, but a customer may hold several numbers and any
+   * of them signs in (db/migrations/0019_customer_phone_numbers.sql). Someone
+   * who typed their second line must receive the code THERE — sending to the
+   * primary instead leaves them waiting on a phone they may not be holding,
+   * with nothing on screen to explain why.
+   *
+   * Every eligibility, demo and rate-limit check below reads this rather than
+   * `customer.phone`, so an alternate that cannot receive an SMS is refused on
+   * its own merits instead of being waved through on the primary's.
+   */
+  const destination = sendTo || customer.phone;
+
+  const useDemoAccount = isDemoAccount(destination);
+  const eligibility = checkSmsEligibility(destination);
   // Demo numbers skip the SMS-capability gate: the reviewer never receives a
   // message, and a landline/VOIP misclassification must not strand review.
   if (!eligibility.ok && !useDemoAccount) return { sent: false, reason: eligibility.reason };
@@ -248,7 +263,7 @@ async function issueAndSend(customer, { action, requestIp }) {
   // it is rejected by the carrier (delivered "Successfully Sent" but a rejected
   // DLR). Termii's shared "N-Alert" is DND-approved; override per env once
   // "Soroman" itself is whitelisted for DND.
-  const result = await sendSMSWithFallback(customer.phone, smsBody(action, code), {
+  const result = await sendSMSWithFallback(destination, smsBody(action, code), {
     from: process.env.TERMII_OTP_SENDER_ID || "N-Alert",
   });
 

@@ -1,5 +1,5 @@
 const asyncHandler = require("express-async-handler");
-const { customerRepo, sessionRepo } = require("../../repositories");
+const { customerRepo, customerPhoneRepo, sessionRepo } = require("../../repositories");
 const otpService = require("../../services/otp.service");
 const botCheck = require("../../services/botCheck.service");
 const sessionService = require("../../services/session.service");
@@ -88,7 +88,12 @@ const handleRegister = asyncHandler(async (req, res) => {
     });
   }
 
-  let customer = await customerRepo.findByPhone(e164);
+  // Any of the customer's numbers, not just the primary. Someone registering
+  // on a line the desk already recorded against their account must land in
+  // that account, not open a second one on the same person — which is exactly
+  // how the duplicate groups on the live book were created.
+  const match = await customerRepo.findByAnyPhone(e164);
+  let customer = match?.customer || null;
   if (!customer) {
     const eligibility = checkSmsEligibility(e164);
     if (eligibility.ok) {
@@ -109,6 +114,10 @@ const handleRegister = asyncHandler(async (req, res) => {
     const result = await otpService.issueAndSend(customer, {
       action: "register",
       requestIp: req.ip,
+      // To the number they typed. On a fresh account that is the primary; on
+      // an existing one it may be their second line, and the code has to
+      // arrive on the handset in their hand.
+      sendTo: e164,
     });
     if (!result.sent) {
       console.warn(`[portal/auth] register: no code sent (${result.reason})`);
@@ -133,10 +142,15 @@ const handleRequestOtp = asyncHandler(async (req, res) => {
   }
 
   const e164 = toE164(phone);
-  const customer = e164 ? await customerRepo.findByPhone(e164) : null;
+  // Resolved across every number on the account. A customer whose account
+  // holds three numbers could previously sign in with exactly one of them;
+  // the other two answered like an unknown number, which is indistinguishable
+  // from having no account at all.
+  const match = e164 ? await customerRepo.findByAnyPhone(e164) : null;
+  const customer = match?.customer || null;
 
   if (customer) {
-    if (!otpService.isDemoAccount(customer.phone) && (await otpService.isOverDailyCap())) {
+    if (!otpService.isDemoAccount(match.matchedPhone) && (await otpService.isOverDailyCap())) {
       return res.status(503).json({
         success: false,
         message: "Verification is temporarily unavailable. Please try again later.",
@@ -145,6 +159,8 @@ const handleRequestOtp = asyncHandler(async (req, res) => {
     const result = await otpService.issueAndSend(customer, {
       action: "login",
       requestIp: req.ip,
+      // The number that matched, which is the one being signed in with.
+      sendTo: match.matchedPhone,
     });
     if (!result.sent) {
       console.warn(`[portal/auth] request-otp: no code sent (${result.reason})`);
@@ -172,7 +188,8 @@ const handleVerifyOtp = asyncHandler(async (req, res) => {
   const e164 = toE164(phone);
   if (!e164) return reject();
 
-  const customer = await customerRepo.findByPhone(e164);
+  const match = await customerRepo.findByAnyPhone(e164);
+  const customer = match?.customer || null;
   if (!customer) return reject();
 
   // A deactivated account must not be able to authenticate at all. Checked
@@ -189,10 +206,20 @@ const handleVerifyOtp = asyncHandler(async (req, res) => {
   //
   // Only Pending is promoted. `Inactive` is a staff decision and is refused
   // above; passing an OTP must never undo a deactivation.
-  const patch = { phoneVerifiedAt: new Date(), lastLoginAt: new Date() };
+  //
+  // `phoneVerifiedAt` on the customer row describes the PRIMARY number, so it
+  // is only stamped when the primary is what was proven. A code passed on an
+  // alternate proves that alternate, and is recorded against its own row —
+  // otherwise verifying a second line would silently claim the primary had
+  // been verified when nobody had answered on it.
+  const patch = { lastLoginAt: new Date() };
+  if (match.isPrimary) patch.phoneVerifiedAt = new Date();
   if (customer.status === "Pending") patch.status = "Active";
 
   const updated = await customerRepo.update(customer.id, patch);
+  if (!match.isPrimary) {
+    await customerPhoneRepo.markVerifiedByKey(customer.id, match.matchedPhone);
+  }
 
   const { accessToken, refreshToken } = await sessionService.issue(
     REALM,

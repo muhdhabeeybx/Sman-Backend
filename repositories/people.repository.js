@@ -56,11 +56,27 @@ const SORTS = {
   oldest: sql`p."createdAt" ASC NULLS LAST`,
   name: sql`p.name ASC`,
   company: sql`p."companyName" ASC NULLS LAST`,
-  // Customers with recent orders first, then everyone else. The default,
-  // because "who should I be calling?" is the question the page is opened to
-  // answer far more often than "who was added last?".
   active: sql`p."lastOrderAt" DESC NULLS LAST, p."createdAt" DESC`,
   value: sql`p."lifetimeValue" DESC NULLS LAST`,
+  /**
+   * The default: best customers first, then everybody else newest first.
+   *
+   * Two questions are asked of this page and they want opposite orders — "who
+   * matters most?" and "who just came in?". Sorting by either alone answers
+   * one and buries the other, so this answers both in sequence: everyone who
+   * has actually spent money, ranked by how much, and behind them the rest of
+   * the book with the newest arrivals at the top.
+   *
+   * The CASE is what makes the second half meaningful. Ranking purely by
+   * lifetime value would leave every lead and every never-ordered customer
+   * tied on zero and ordered arbitrarily; splitting on "has spent anything"
+   * first lets `createdAt` take over cleanly below the line.
+   */
+  top: sql`
+    (CASE WHEN p.kind = 'customer' AND COALESCE(p."lifetimeValue", 0) > 0 THEN 0 ELSE 1 END),
+    p."lifetimeValue" DESC NULLS LAST,
+    p."createdAt" DESC NULLS LAST
+  `,
 };
 
 /**
@@ -113,7 +129,12 @@ const UNIFIED = sql`
     COALESCE(lead.stage::text, '')        AS stage,
     COALESCE(lead.source::text, '')        AS source,
     COALESCE(lead.notes, '')              AS notes,
-    (lead.id IS NOT NULL)                 AS "cameInAsLead"
+    (lead.id IS NOT NULL)                 AS "cameInAsLead",
+    -- The other numbers this customer signs in on. Shown on the row because
+    -- the desk searches by whichever number the customer called from, and a
+    -- list that only ever displays the primary makes the match look wrong.
+    COALESCE(alt.phones, '{}'::text[])    AS "extraPhones",
+    COALESCE(alt.keys, '{}'::text[])      AS "extraPhoneKeys"
   FROM customers c
   LEFT JOIN stats s ON s.customer_id = c.id
   LEFT JOIN depots d ON d.id = s.primary_depot_id
@@ -124,6 +145,13 @@ const UNIFIED = sql`
     ORDER BY ct.id
     LIMIT 1
   ) lead ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT
+      array_agg(cp.phone ORDER BY cp.id)            AS phones,
+      array_agg(cp.phone_normalized ORDER BY cp.id) AS keys
+    FROM customer_phones cp
+    WHERE cp.customer_id = c.id
+  ) alt ON TRUE
 
   UNION ALL
 
@@ -149,7 +177,11 @@ const UNIFIED = sql`
     ct.stage::text                        AS stage,
     ct.source::text                       AS source,
     ct.notes,
-    false                                 AS "cameInAsLead"
+    false                                 AS "cameInAsLead",
+    -- A contact has one number by definition; extra numbers are a property of
+    -- an account, and a contact does not have one.
+    '{}'::text[]                          AS "extraPhones",
+    '{}'::text[]                          AS "extraPhoneKeys"
   FROM contacts ct
   LEFT JOIN depots dep ON dep.id = ct.location_id
   -- The dedupe. A lead who has since signed up is one person, and they are
@@ -234,7 +266,7 @@ const findAll = async ({
   activity,
   hasBalance,
   numberStatus,
-  sort = "active",
+  sort = "top",
   page = 1,
   limit = 50,
 } = {}) => {
@@ -249,10 +281,18 @@ const findAll = async ({
     // Numbers are searched the way the searcher writes them, which is rarely
     // how they were stored — "0803…" has to find a row held as "+234803…".
     const digits = String(search).replace(/[^0-9]/g, "");
+    // Every number on the account, not just the primary. Someone searching the
+    // number a customer just rang from must find them whichever of their lines
+    // it is — otherwise the alternate numbers exist for the login and nowhere
+    // the desk can see them.
     const byNumber =
-      digits.length >= 4 ? sql` OR p."phoneKey" LIKE ${`%${digits.slice(-10)}%`}` : sql``;
+      digits.length >= 4
+        ? sql` OR p."phoneKey" LIKE ${`%${digits.slice(-10)}%`}
+               OR EXISTS (SELECT 1 FROM unnest(p."extraPhoneKeys") k WHERE k LIKE ${`%${digits.slice(-10)}%`})`
+        : sql``;
     where.push(
-      sql`(p.name ILIKE ${pattern} OR p.phone ILIKE ${pattern} OR p.email ILIKE ${pattern} OR p."companyName" ILIKE ${pattern}${byNumber})`
+      sql`(p.name ILIKE ${pattern} OR p.phone ILIKE ${pattern} OR p.email ILIKE ${pattern} OR p."companyName" ILIKE ${pattern}
+           OR EXISTS (SELECT 1 FROM unnest(p."extraPhones") ep WHERE ep ILIKE ${pattern})${byNumber})`
     );
   }
 
@@ -297,7 +337,7 @@ const findAll = async ({
   }
 
   const whereSql = where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
-  const orderBySql = SORTS[sort] || SORTS.active;
+  const orderBySql = SORTS[sort] || SORTS.top;
 
   const [rowsResult, summaryResult] = await Promise.all([
     db.execute(sql`
@@ -339,6 +379,11 @@ const findAll = async ({
       numberStatus: verdict,
       numberReason: reason,
       hasDuplicate: hygiene.duplicates.has(row.phoneKey),
+      extraPhones: row.extraPhones || [],
+      // Dropped from the payload — it exists only so the SQL above can search
+      // on it, and shipping a second copy of every number to the browser in a
+      // form nothing displays is dead weight on a 50-row page.
+      extraPhoneKeys: undefined,
     };
   });
 
