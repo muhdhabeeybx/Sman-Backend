@@ -1643,7 +1643,24 @@ const CATALOG = {
     body: (d) =>
       `${d.totals?.orderCount ?? 0} order(s) across ${d.locations?.length ?? 0} location(s).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
-    email: (d) => renderDailyReportEmail(d),
+    // The scheduled report's email, plus the Hub's own workbook attached. The
+    // Hub builds that workbook in the browser to offer "Download report", uploads
+    // it with the send, and until now the server dropped it on the floor — so
+    // the dialog promised "the same workbook Download report produces" and
+    // delivered an HTML summary with nothing attached.
+    email: (d) => {
+      const rendered = renderDailyReportEmail(d);
+      if (!d.attachmentBase64) return rendered;
+      return {
+        ...rendered,
+        attachments: [
+          {
+            filename: d.attachmentFilename || `daily-report-${d.reportDate || "export"}.xlsx`,
+            content: d.attachmentBase64,
+          },
+        ],
+      };
+    },
   },
 
   // ═══ Delivery / truck flow (SMS) ══════════════════════════════════════════
