@@ -89,21 +89,17 @@ const deleteDailyReport = asyncHandler(async (req, res) => {
  * The Hub's "Email report" button. Builds the same combined report as the
  * scheduled job (`scripts/send-daily-report.js`) for whatever date the admin
  * is looking at, and sends it to a recipient list typed in on the spot
- * rather than a fixed env var. The location/PFI filter is ignored — the
- * combined report already covers every depot for the date in one email — but
- * the workbook the client built for its own "Download report" button is
- * attached, which is what the dialog tells the operator will happen.
+ * rather than a fixed env var. The email is the readable summary and nothing
+ * else — no attachment, and the location/PFI filter is ignored, since the
+ * combined report already covers every depot for the date in one email.
  */
 const emailDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate, attachmentBase64, filename } = req.body;
+  const { recipients, reportDate } = req.body;
 
   const data = await buildCombinedDailyReportData(reportDate ? new Date(reportDate) : new Date());
   const result = await notifyAndWait("reports.hub_email", {
     to: recipients.map((email) => ({ email })),
-    // The email body is the combined report the scheduled job sends; the
-    // workbook the Hub built in the browser rides along as the attachment, so
-    // the recipient gets the same file the operator could have downloaded.
-    data: { ...data, attachmentBase64, attachmentFilename: filename },
+    data,
   });
 
   // notifyAndWait never throws — a provider outage must not read as a 500 — so

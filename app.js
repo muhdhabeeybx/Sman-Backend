@@ -34,12 +34,15 @@ app.use((req, res, next) => {
   if (req._mobileCorsBypassed) return next();
   corsMiddleware(req, res, next);
 });
-// The Reports Hub uploads the workbook it built in the browser so the server
-// can attach it to the email. express.json()'s 100kb default rejects that with
-// a 413 before any route runs — invisible from the client, which only sees the
-// send fail. Parsed here, ahead of the global parser, so the larger limit
-// applies to this one endpoint and nothing else: once a body is parsed,
-// express.json() below sees req._body and passes it through untouched.
+// The Reports Hub's "Email report" used to base64 its whole workbook into the
+// request body, and express.json()'s 100kb default rejected that with a 413
+// before any route ran — invisible from the client, which only saw the send
+// fail. The client no longer sends it, but a tab opened before the deploy
+// still will, so the larger limit stays: the body is accepted and the
+// attachment ignored rather than the send breaking mid-rollout. Parsed here,
+// ahead of the global parser, so it applies to this endpoint and nothing else
+// — once a body is parsed, express.json() below sees req._body and passes it
+// through untouched.
 app.use("/api/daily-reports/email", express.json({ limit: "25mb" }));
 app.use(express.json());
 // `res.cookie` is built in, but `req.cookies` is not and never was — parsing
