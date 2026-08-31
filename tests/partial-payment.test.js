@@ -159,6 +159,23 @@ describe("part payment", () => {
     assert.equal(orderService.releasableQuantity(awkward), 33333);
   });
 
+  test("an order marked Paid releases in full even if amount_paid was never set", () => {
+    // The regression this exists for: releasableQuantity originally read only
+    // the arithmetic, so any writer that marks an order Paid WITHOUT also
+    // setting amount_paid produced a ceiling of zero — a fully-paid order that
+    // could not be ticketed at all. The settlement sweep in payment.service.js
+    // was exactly that writer, and it would have bricked the ticketing desk for
+    // every order it settled.
+    const order = {
+      quantity: QUANTITY,
+      price: String(PRICE),
+      totalAmount: String(TOTAL),
+      amountPaid: "0",
+      paymentStatus: "Paid",
+    };
+    assert.equal(orderService.releasableQuantity(order), QUANTITY);
+  });
+
   test("part-paid litres are floored, never rounded up", () => {
     // ₦12,000,000 at ₦241/litre is 49,792.531... litres. Rounding up would
     // authorise a litre nobody paid for.
