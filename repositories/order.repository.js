@@ -541,7 +541,30 @@ const findFinanceReport = async ({
                WHEN p.source = 'transfer_in'  THEN t.from_order_id END AS "counterpartOrderId",
           CASE WHEN p.source = 'transfer_out' THEN o_to.company_name
                WHEN p.source = 'transfer_in'  THEN o_from.company_name END AS "counterpartCompany",
-          t.reason AS "transferReason"
+          t.reason AS "transferReason",
+          /**
+           * What the money on a transfer leg originally was, at the bank.
+           *
+           * A transfer leg has no statement line of its own — no date, no
+           * payer, no reference — so next to real statement rows it rendered
+           * as a row of blanks and read as corrupt data. It is not: the money
+           * arrived on the OTHER order's bank line, and that is recoverable.
+           *
+           * Both legs look it up on the order the surplus came FROM (the
+           * source of the money in both directions), and only when that order
+           * has exactly one payer — with several, naming one of them would be
+           * a guess, and the leg falls back to naming the order alone.
+           */
+          (
+            SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
+            FROM order_payments sp
+            WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+          ) AS "originDepositor",
+          (
+            SELECT string_agg(DISTINCT sp.bank_ref, ', ')
+            FROM order_payments sp
+            WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+          ) AS "originBankRefs"
         FROM order_payments p
         LEFT JOIN staff st ON st.id = p.recorded_by
         LEFT JOIN order_payment_transfers t ON t.id = p.transfer_id

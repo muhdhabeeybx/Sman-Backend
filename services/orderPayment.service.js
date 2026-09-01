@@ -515,7 +515,20 @@ const listForOrder = async (orderId, tx = db) => {
       CASE WHEN p.source = 'transfer_out' THEN t.to_order_id
            WHEN p.source = 'transfer_in'  THEN t.from_order_id END AS "counterpartOrderId",
       CASE WHEN p.source = 'transfer_out' THEN o_to.order_number
-           WHEN p.source = 'transfer_in'  THEN o_from.order_number END AS "counterpartOrderNumber"
+           WHEN p.source = 'transfer_in'  THEN o_from.order_number END AS "counterpartOrderNumber",
+      t.reason AS "transferReason",
+      -- The bank payment a transfer leg's money originally arrived as. See the
+      -- same subqueries in order.repository.findFinanceReport for why.
+      (
+        SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
+        FROM order_payments sp
+        WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+      ) AS "originDepositor",
+      (
+        SELECT string_agg(DISTINCT sp.bank_ref, ', ')
+        FROM order_payments sp
+        WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+      ) AS "originBankRefs"
     FROM order_payments p
     LEFT JOIN staff st ON st.id = p.recorded_by
     LEFT JOIN order_payment_transfers t ON t.id = p.transfer_id
