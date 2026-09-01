@@ -79,7 +79,12 @@ const findAll = async ({
       .select()
       .from(deliverySales)
       .where(whereClause)
-      .orderBy(desc(deliverySales.createdAt))
+      // `id` breaks the tie. Ordering by a timestamp alone is not a total
+      // order — 17 rows here share a created_at with another — and OFFSET
+      // paging over a non-deterministic order can hand the same row to two
+      // pages and skip a third entirely. A caller walking the pages to
+      // assemble the whole table would silently lose rows.
+      .orderBy(desc(deliverySales.createdAt), desc(deliverySales.id))
       .limit(limitNum)
       .offset(offset),
     db

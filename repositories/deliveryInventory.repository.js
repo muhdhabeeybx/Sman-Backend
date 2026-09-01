@@ -60,7 +60,9 @@ const findAll = async ({
       .select()
       .from(deliveryInventory)
       .where(whereClause)
-      .orderBy(desc(deliveryInventory.createdAt))
+      // A total order, so OFFSET paging cannot repeat or skip a row — see the
+      // same note in deliverySale.repository.js.
+      .orderBy(desc(deliveryInventory.createdAt), desc(deliveryInventory.id))
       .limit(limitNum)
       .offset(offset),
     db
