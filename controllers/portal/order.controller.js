@@ -1,5 +1,7 @@
 const asyncHandler = require("express-async-handler");
-const { orderRepo } = require("../../repositories");
+const { orderRepo, customerRepo } = require("../../repositories");
+const botCheck = require("../../services/botCheck.service");
+const { toE164 } = require("../../utils/phone");
 const { placeOrder, updatePickupTrucks, payOrder, cancelOrder, withExpiresAt } = require("../../services/order.service");
 const {
   buildReached,
@@ -63,6 +65,126 @@ const withOwnerDetail = async (order) => {
  * bank transfer the Paystack webhook confirms, the customer paying from wallet
  * balance (POST /:id/pay), or staff settling it from finance.
  */
+/**
+ * POST /api/customer/orders/guest — place an order with just a phone number,
+ * no session. The OTP stays where the stakes are: seeing history or spending
+ * a wallet still requires a verified sign-in; creating an unpaid order that
+ * only becomes real when money arrives in the depot's account does not.
+ *
+ * The phone find-or-creates a customer the same way /register does
+ * (findByAnyPhone, so a desk-recorded second line lands on the right
+ * account). When the person later registers with this phone and passes OTP,
+ * they sign into that same row and these orders are already in their history.
+ *
+ * Deliberately narrow:
+ *  - The response is hand-built. The full order row joins the customer's
+ *    stored name/email/balance — returning that would let anyone read another
+ *    customer's details by typing their phone. A guest gets back only what
+ *    they themselves submitted plus the order/payment facts.
+ *  - No wallet involvement. placeOrder never touches balances, and the
+ *    wallet-pay endpoint stays behind authentication.
+ *  - Turnstile (same bot check as /register) + a route rate limit, because an
+ *    unauthenticated order-creating endpoint must not be scriptable for free.
+ */
+const createGuestOrder = asyncHandler(async (req, res) => {
+  const {
+    name,
+    phone,
+    email,
+    state,
+    depot: depotId,
+    product: productId,
+    quantity,
+    deliveryType,
+    deliveryAddress,
+    companyName,
+    trucks,
+    turnstileToken,
+  } = req.body;
+
+  const bot = await botCheck.verify(turnstileToken, req.ip);
+  if (!bot.ok) {
+    return res.status(400).json({ success: false, message: "Verification failed. Please try again." });
+  }
+
+  const e164 = toE164(phone);
+  if (!e164) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Enter a valid phone number. International numbers must include a country code, e.g. +447400123456",
+    });
+  }
+
+  const match = await customerRepo.findByAnyPhone(e164);
+  let customer = match?.customer || null;
+  if (customer && customer.status === "Inactive") {
+    // Same closed door the signed-in flow shows an Inactive account.
+    return res.status(403).json({
+      success: false,
+      message: "This account cannot place orders at the moment. Please contact support.",
+    });
+  }
+  if (!customer) {
+    // Pending, like /register: the phone hasn't been proven. Ordering doesn't
+    // need it proven; signing in later does, and that OTP flips them Active.
+    customer = await customerRepo.create({
+      name: name.trim(),
+      phone: e164,
+      email: typeof email === "string" ? email.trim().toLowerCase() : "",
+      companyName: companyName.trim(),
+      status: "Pending",
+      createdVia: "portal",
+    });
+  }
+
+  const { order, payment } = await placeOrder({
+    customerId: customer.id,
+    state,
+    depotId,
+    productId,
+    quantity,
+    deliveryType,
+    deliveryAddress,
+    companyName,
+    trucks,
+    actor: { type: "customer", customerId: customer.id },
+  });
+
+  const withDeadline = await withExpiresAt(order);
+  res.status(201).json({
+    success: true,
+    message: "Order placed. Transfer the total to the account shown to have it released.",
+    data: {
+      // Only the order's own facts — never the joined customer columns.
+      order: {
+        id: withDeadline.id,
+        orderNumber: withDeadline.orderNumber,
+        quantity: withDeadline.quantity,
+        price: withDeadline.price,
+        totalAmount: withDeadline.totalAmount,
+        status: withDeadline.status,
+        paymentStatus: withDeadline.paymentStatus,
+        deliveryType: withDeadline.deliveryType,
+        state: withDeadline.state,
+        deliveryAddress: withDeadline.deliveryAddress,
+        companyName: withDeadline.companyName,
+        depotId: withDeadline.depotId,
+        depotName: withDeadline.depotName,
+        productName: withDeadline.productName,
+        productUnit: withDeadline.productUnit,
+        productCategory: withDeadline.productCategory,
+        createdAt: withDeadline.createdAt,
+        expiresAt: withDeadline.expiresAt ?? null,
+        virtualAccountNumber: withDeadline.virtualAccountNumber,
+        virtualAccountBank: withDeadline.virtualAccountBank,
+        virtualAccountName: withDeadline.virtualAccountName,
+      },
+      payment,
+    },
+  });
+});
+
 const createMyOrder = asyncHandler(async (req, res) => {
   const {
     state,
@@ -303,6 +425,7 @@ const updateMyOrderTrucks = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  createGuestOrder,
   createMyOrder,
   listMyOrders,
   getMyOrder,
