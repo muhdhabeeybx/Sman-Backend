@@ -3,6 +3,46 @@ const { virtualAccountName } = require("../utils/helpers");
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+/**
+ * Every send in this file goes through here.
+ *
+ * These templates bypassed the notification engine — they are transactional
+ * documents rendered by hand — and with it they bypassed the engine's kill
+ * switch and its delivery log. So the test suite, which drives real order and
+ * ticket flows against fixture addresses, sent real mail on the production
+ * Resend key: 100 emails to @soroman.test in one run, which is the entire free
+ * tier's daily quota. Nothing in the product could send for the rest of the
+ * day, and nothing recorded why, because these sends are not in
+ * notification_deliveries either.
+ *
+ * Two guards, because either alone has a hole. EMAIL_ENABLED=false is how the
+ * test script and any dry run turn sending off; the reserved-domain check is
+ * what saves us when someone forgets, since a .test or .example address is
+ * reserved by RFC 2606 and can never belong to a real person.
+ */
+const RESERVED_RECIPIENT =
+  /@([^@]*\.)?(test|example|invalid|localhost)$|@([^@]*\.)?example\.(com|net|org)$/i;
+
+const emailEnabled = () =>
+  process.env.EMAIL_ENABLED !== "false" && Boolean((process.env.RESEND_API_KEY || "").trim());
+
+const sendMail = async (payload) => {
+  const to = Array.isArray(payload.to) ? payload.to : [payload.to];
+
+  if (!emailEnabled()) {
+    console.log(`[email] EMAIL_ENABLED=false — not sending "${payload.subject}" to ${to.join(", ")}`);
+    return { skipped: true };
+  }
+
+  const reserved = to.filter((address) => RESERVED_RECIPIENT.test(String(address || "").trim()));
+  if (reserved.length) {
+    console.warn(`[email] refusing a reserved-domain recipient: ${reserved.join(", ")}`);
+    return { skipped: true };
+  }
+
+  return resend.emails.send(payload);
+};
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -64,7 +104,7 @@ const sendOrderInvoiceEmail = async (email, orderData) => {
     })
     : "N/A";
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `Invoice for Order ${orderNumber} - Soroman`,
@@ -260,7 +300,7 @@ const sendTicketEmail = async (email, ticketData) => {
 
   const formattedDelivery = deliveryType === "delivery" ? "Company Delivery" : "Self Pickup";
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `Your Soroman Ticket Receipt - ${ticketNumber}`,
@@ -415,7 +455,7 @@ const sendDangoteRequestReceivedEmail = async (email, requestData) => {
     deliveryState,
   } = requestData;
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `Dangote Delivery Order Request Received - ${requestNumber}`,
@@ -554,7 +594,7 @@ const sendDangoteOrderConfirmedEmail = async (email, requestData) => {
     minimumFractionDigits: 2,
   }).format(deliveryPrice || 0);
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `Dangote Delivery Order Confirmed - ${requestNumber}`,
@@ -750,7 +790,7 @@ const sendLpgRequestReceivedEmail = async (email, requestData) => {
     deliveryState,
   } = requestData;
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `LPG Cooking Gas Order Request Received - ${requestNumber}`,
@@ -889,7 +929,7 @@ const sendLpgOrderConfirmedEmail = async (email, requestData) => {
 
   const totalWeightKg = Number(cylinderSizeKg) * Number(cylinderQuantity);
 
-  await resend.emails.send({
+  await sendMail({
     from: process.env.EMAIL_FROM || "Soroman Dashboard <onboarding@resend.dev>",
     to: email,
     subject: `LPG Cooking Gas Order Confirmed - ${requestNumber}`,
