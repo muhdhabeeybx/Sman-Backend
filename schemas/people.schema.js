@@ -1,5 +1,6 @@
 const z = require("zod");
 const { id, enumOf, searchTerm, pagination, numberLike } = require("./fields");
+const { MAX_SOURCES: MAX_MERGE_SOURCES } = require("../services/peopleMerge.service");
 
 /**
  * The merged customers-and-contacts book.
@@ -38,6 +39,15 @@ const listPeople = pagination.extend({
   activity: enumOf("Activity", ["all", "frequent", "occasional", "dormant", "never"]).optional(),
   hasBalance: enumOf("Has balance", ["yes", "no"]).optional(),
   numberStatus: enumOf("Number status", NUMBER_STATUSES).optional(),
+  /**
+   * "Show me the rows that look like the same person twice."
+   *
+   * Separate from `numberStatus` on purpose. That filter answers "is this
+   * number usable?", and a name held by two records is not a problem with a
+   * number — it is the commonest duplicate there is, one man opened twice
+   * under two different lines, and it was previously unfindable.
+   */
+  duplicates: enumOf("Duplicates", ["name", "number", "any"]).optional(),
   sort: enumOf("Sort", ["top", "active", "newest", "oldest", "name", "company", "value"]).optional(),
 });
 
@@ -68,4 +78,37 @@ const deleteReviewed = z.object({
     .max(200, "Remove at most 200 records at a time"),
 });
 
-module.exports = { listPeople, listHygiene, deleteReviewed, KINDS, NUMBER_STATUSES };
+/**
+ * Two rows that are one person, folded together.
+ *
+ * `target` is the record that survives and `sources` are the ones absorbed
+ * into it — named that way round on purpose, because "merge A and B" leaves
+ * open which one keeps the customer id every order in the ledger points at,
+ * and that is the only part of this operation that cannot be undone.
+ *
+ * Capped at the service's own limit rather than the delete endpoint's 200:
+ * merging is a per-person judgement made in front of a list of records, not a
+ * batch, and a request asking to fold twenty accounts into one is far more
+ * likely to be a mistake than an intention.
+ */
+const personRef = z.object({
+  kind: enumOf("Record type", ["customer", "contact"]),
+  id: id("Record id"),
+});
+
+const mergePeople = z.object({
+  target: personRef,
+  sources: z
+    .array(personRef)
+    .min(1, "Choose at least one record to merge in")
+    .max(MAX_MERGE_SOURCES, `Merge at most ${MAX_MERGE_SOURCES} records at a time`),
+});
+
+module.exports = {
+  listPeople,
+  listHygiene,
+  deleteReviewed,
+  mergePeople,
+  KINDS,
+  NUMBER_STATUSES,
+};

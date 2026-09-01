@@ -266,6 +266,7 @@ const findAll = async ({
   activity,
   hasBalance,
   numberStatus,
+  duplicates,
   sort = "top",
   page = 1,
   limit = 50,
@@ -315,9 +316,47 @@ const findAll = async ({
   if (hasBalance === "yes") where.push(sql`p.balance > 0`);
   if (hasBalance === "no") where.push(sql`COALESCE(p.balance, 0) <= 0`);
 
+  /**
+   * "Show me the rows that look like the same person twice."
+   *
+   * The number half of this was already answerable — `numberStatus=duplicate`
+   * runs off the hygiene scan. The NAME half was not, and it is the half the
+   * desk actually trips over: the commonest duplicate is one man opened twice
+   * under two different lines, so the two rows share a name and share nothing
+   * else. Sorted by name (which the page switches to when this is on) the
+   * pairs land next to each other, ready to be ticked and merged.
+   *
+   * Grouped once over the whole book rather than compared row against row: a
+   * correlated `EXISTS` over the same CTE is O(n²) on a list that is only
+   * going to get longer, and this is one pass either way.
+   *
+   * Case- and space-insensitive, because "ALH. MUSA" and "Alh. Musa " are the
+   * duplicate — a comparison that called them different would miss precisely
+   * the rows somebody came here to find.
+   */
   let hygiene = null;
+  if (duplicates) {
+    const sameName = sql`
+      lower(btrim(p.name)) IN (
+        SELECT lower(btrim(p2.name)) FROM people p2
+        WHERE btrim(p2.name) <> ''
+        GROUP BY 1 HAVING COUNT(*) > 1
+      )
+    `;
+    let sameNumber = sql`false`;
+    if (duplicates !== "name") {
+      hygiene = await scanPhoneHygiene();
+      const keys = [...hygiene.duplicates];
+      if (keys.length) sameNumber = keyMatch(keys);
+    }
+    // "any" is OR, not a second AND — a row matching either test is one of
+    // the rows somebody came here to look at.
+    if (duplicates === "name") where.push(sameName);
+    else if (duplicates === "number") where.push(sameNumber);
+    else where.push(sql`(${sameName} OR ${sameNumber})`);
+  }
   if (numberStatus && numberStatus !== "all") {
-    hygiene = await scanPhoneHygiene();
+    hygiene ||= await scanPhoneHygiene();
     const keysFor = {
       invalid: [...hygiene.invalid.keys()],
       unreachable: [...hygiene.unreachable.keys()],

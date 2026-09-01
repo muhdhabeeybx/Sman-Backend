@@ -1,6 +1,22 @@
 const asyncHandler = require("express-async-handler");
 const { peopleRepo, contactRepo, customerRepo } = require("../../repositories");
 const { emitEvent } = require("../../services/events");
+const peopleMerge = require("../../services/peopleMerge.service");
+
+/**
+ * A refusal from the merge service, as something the error handler honours.
+ *
+ * `res.status()` before a throw is not enough: errorHandler reads the status
+ * off the ERROR (`err.status`), because by the time it runs the response has
+ * not been sent and any status set on it is discarded. Setting it on the
+ * response and throwing turned every one of these considered refusals — "keep
+ * the customer, not the lead" — into a bare 500.
+ */
+const refusal = ({ status, message }) => {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+};
 const { staffActor } = require("../../utils/actor");
 
 /**
@@ -15,12 +31,12 @@ const { staffActor } = require("../../utils/actor");
 const getPeople = asyncHandler(async (req, res) => {
   const {
     search, kind, converted, locationId, tag, optedOut, status,
-    activity, hasBalance, numberStatus, sort, page = 1, limit = 50,
+    activity, hasBalance, numberStatus, duplicates, sort, page = 1, limit = 50,
   } = req.query;
 
   const result = await peopleRepo.findAll({
     search, kind, converted, locationId, tag, optedOut, status,
-    activity, hasBalance, numberStatus, sort, page, limit,
+    activity, hasBalance, numberStatus, duplicates, sort, page, limit,
   });
 
   res.json({ success: true, data: result });
@@ -108,4 +124,63 @@ const deleteReviewed = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getPeople, getHygiene, deleteReviewed };
+/**
+ * POST /api/people/merge/preview — what folding these records together does.
+ *
+ * A dry run, and the reason the merge screen can be honest: the desk is about
+ * to move somebody's whole order history onto another row, and "are you sure?"
+ * is not an answer to "what exactly is going to happen?". This returns the
+ * counts, the wallet arithmetic, the numbers that come across and the things
+ * worth knowing before the button is pressed — from the same code the merge
+ * runs, so the two cannot tell different stories.
+ *
+ * Nothing is written, so it sits behind the ordinary staff gate.
+ */
+const previewMerge = asyncHandler(async (req, res) => {
+  const result = await peopleMerge.previewMerge({
+    target: req.body.target,
+    sources: req.body.sources,
+  });
+  if (!result.ok) throw refusal(result);
+  res.json({ success: true, data: result });
+});
+
+/**
+ * POST /api/people/merge — fold the chosen records into one.
+ *
+ * Admin-gated for the same reason the hygiene delete is: customer rows go
+ * away. What makes this the safer of the two is that nothing they were
+ * carrying goes with them — every order, deposit and naira is re-pointed at
+ * the survivor first, inside one transaction.
+ */
+const mergePeople = asyncHandler(async (req, res) => {
+  const result = await peopleMerge.mergePeople({
+    target: req.body.target,
+    sources: req.body.sources,
+    actorId: req.user?.id || null,
+  });
+  if (!result.ok) throw refusal(result);
+
+  // The scan is memoised for a minute, and a merge changes which numbers are
+  // duplicated — which is the whole reason somebody came here.
+  peopleRepo.invalidateHygieneCache();
+
+  emitEvent("people.records_merged", {
+    actor: staffActor(req),
+    entityType: "people",
+    entityId: `${result.target.kind}:${result.target.id}`,
+    target: result.target,
+    sources: result.sources,
+    moved: result.moved,
+    balance: result.balance,
+  });
+
+  const merged = result.sources.length;
+  const orders = result.moved.orders;
+  const parts = [`${merged} record${merged === 1 ? "" : "s"} merged into ${result.target.name}`];
+  if (orders) parts.push(`${orders} order${orders === 1 ? "" : "s"} moved across`);
+
+  res.json({ success: true, message: parts.join(" — "), data: result });
+});
+
+module.exports = { getPeople, getHygiene, deleteReviewed, previewMerge, mergePeople };

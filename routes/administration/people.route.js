@@ -4,7 +4,13 @@ const verifyStaff = require("../../middleware/verifyStaff");
 const { requireRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const schemas = require("../../schemas/people.schema");
-const { getPeople, getHygiene, deleteReviewed } = require("../../controllers/administration/people.controller");
+const {
+  getPeople,
+  getHygiene,
+  deleteReviewed,
+  previewMerge,
+  mergePeople,
+} = require("../../controllers/administration/people.controller");
 
 /**
  * The merged customers-and-contacts book.
@@ -12,7 +18,8 @@ const { getPeople, getHygiene, deleteReviewed } = require("../../controllers/adm
  * Reading it is an ordinary desk activity, so `verifyStaff` — the same gate
  * /api/customers and /api/contacts already sit behind. Deleting records off
  * the back of the hygiene review is not: it removes customer rows, so it takes
- * the admin gate the broadcast endpoint uses.
+ * the admin gate the broadcast endpoint uses. Merging removes customer rows
+ * too and is gated the same way, while its PREVIEW writes nothing and is not.
  */
 router.get("/", verifyStaff, validate({ query: schemas.listPeople }), getPeople);
 
@@ -24,6 +31,17 @@ router.post(
   requireRole("admin", "super_admin"),
   validate({ body: schemas.deleteReviewed }),
   deleteReviewed
+);
+
+// Folding duplicate records into one. The preview is read-only; the merge
+// deletes customer rows, so it takes the admin gate.
+router.post("/merge/preview", verifyStaff, validate({ body: schemas.mergePeople }), previewMerge);
+router.post(
+  "/merge",
+  verifyStaff,
+  requireRole("admin", "super_admin"),
+  validate({ body: schemas.mergePeople }),
+  mergePeople
 );
 
 module.exports = router;
