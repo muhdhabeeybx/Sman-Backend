@@ -6,6 +6,9 @@ const {
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { scopeCondition } = require("../lib/scopeFilter");
 
+/** The two payment sources that are a movement between orders, not money in. */
+const TRANSFER_SOURCES = new Set(["transfer_in", "transfer_out"]);
+
 const formatOrderRow = (row) => {
   if (!row) return null;
   const company = row.companyName || row.customerCompanyName || "";
@@ -477,6 +480,25 @@ const findFinanceReport = async ({
         total: count(),
         totalAmount: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
         totalQuantity: sql`COALESCE(SUM(${orders.quantity}), 0)`,
+        // Money PAID IN at the bank's own figure — transfer legs excluded, so
+        // this totals the same column the rows below it show and a
+        // reconciliation against the statement adds up. See amountPaidIn.
+        totalAmountPaidIn: sql`COALESCE(SUM((
+          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op
+          WHERE op.order_id = ${orders.id} AND op.source NOT IN ('transfer_in', 'transfer_out')
+        )), 0)`,
+        // Movement between orders, netted. Zero over any window holding both
+        // ends of every transfer in it — which is what makes it a useful check.
+        totalNetTransfers: sql`COALESCE(SUM((
+          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op
+          WHERE op.order_id = ${orders.id} AND op.source IN ('transfer_in', 'transfer_out')
+        )), 0)`,
+        // Only the outgoing side, unsigned — "how much money moved", which
+        // netting to zero would hide entirely.
+        totalTransferredOut: sql`COALESCE(SUM((
+          SELECT COALESCE(SUM(-op.amount), 0) FROM order_payments op
+          WHERE op.order_id = ${orders.id} AND op.source = 'transfer_out'
+        )), 0)`,
         totalReceived: sql`COALESCE(SUM((
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         )), 0)`,
@@ -591,18 +613,64 @@ const findFinanceReport = async ({
   const decorated = rows.map((row) => {
     const rowPayments = paymentsByOrder.get(row.id) || [];
     const total = Number(row.totalAmount || 0);
-    const received = rowPayments.reduce((sum, p) => sum + p.amount, 0);
+
+    /**
+     * Money PAID IN against this order, at the figure the bank statement
+     * carries — never reduced by a transfer that happened afterwards.
+     *
+     * This is the column the report gets checked against a statement, so it
+     * has to be the statement's own number and nothing else. It used to be
+     * netted: an order that received ₦163,350,000 and later moved ₦54,450,000
+     * to another order showed ₦108,900,000 here, a figure appearing on no
+     * statement anywhere, and the person reconciling had to work backwards
+     * through a transfer to find out why the two disagreed.
+     *
+     * A transfer is a later, separate event. It gets its own columns below.
+     */
+    const amountPaidIn = rowPayments
+      .filter((p) => !TRANSFER_SOURCES.has(p.source))
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    const transferredIn = rowPayments
+      .filter((p) => p.source === "transfer_in")
+      .reduce((sum, p) => sum + p.amount, 0);
+    // Already negative on the row — kept negative, so `netTransfers` is a
+    // plain sum and the column shows direction without a separate flag.
+    const transferredOut = rowPayments
+      .filter((p) => p.source === "transfer_out")
+      .reduce((sum, p) => sum + p.amount, 0);
+    const netTransfers = transferredIn + transferredOut;
+
+    /** What the order actually holds now: paid in, plus what moved. */
+    const received = amountPaidIn + netTransfers;
 
     return {
       ...row,
       payments: rowPayments,
-      /** What the order got, net of any surplus it has since given away. */
+      /**
+       * The bank statement figure. What "Amount Paid" shows, and what a
+       * reconciliation ticks off line by line.
+       */
+      amountPaidIn,
+      /** Sales value against the bank figure — before any transfer. */
+      differential: total - amountPaidIn,
+      transferredIn,
+      transferredOut,
+      /** Signed: negative where this order gave money away. */
+      netTransfers,
+      /**
+       * What is left once both are taken into account. Zero on a settled
+       * order, whichever route its money took — this is the column that
+       * should read as a dash all the way down a clean day.
+       */
+      balance: total - received,
+      /** What the order holds now, after transfers. */
       received,
       /** What settled the order's value. Never more than the value. */
       applied: Math.min(received, total),
-      /** Money on this order beyond its value, still sitting on it. */
+      /** Money the order still holds beyond its value — after transfers. */
       surplus: Math.max(0, received - total),
-      /** Money still owed on it. */
+      /** Money the order still needs — after transfers. */
       shortfall: Math.max(0, total - received),
       /**
        * At least one bank statement line stands behind this order.
@@ -634,8 +702,20 @@ const findFinanceReport = async ({
       count: total,
       totalAmount: Number(totalsRow.totalAmount),
       totalQuantity: Number(totalsRow.totalQuantity),
-      /** Money actually received against the listed orders. */
+      /**
+       * The bank statement total — what "Amount Paid" sums to, and what a
+       * reconciliation against the statement is checked against.
+       */
+      totalAmountPaidIn: Number(totalsRow.totalAmountPaidIn),
+      /** Sales value against the bank figure, before any transfer. */
+      totalDifferential: Number(totalsRow.totalAmount) - Number(totalsRow.totalAmountPaidIn),
+      /** Movement between orders: netted, and the outgoing side unsigned. */
+      totalNetTransfers: Number(totalsRow.totalNetTransfers),
+      totalTransferredOut: Number(totalsRow.totalTransferredOut),
+      /** What the listed orders hold once transfers are taken into account. */
       totalReceived: Number(totalsRow.totalReceived),
+      /** What is left after both — zero on a fully settled window. */
+      totalBalance: Number(totalsRow.totalAmount) - Number(totalsRow.totalReceived),
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),

@@ -445,6 +445,52 @@ describe("order payments", () => {
     );
   });
 
+  test("Amount Paid stays the bank figure after a transfer; Balance absorbs it", async () => {
+    /**
+     * The rule the finance desk asked for: what the report calls Amount Paid
+     * must be what the bank statement says, whatever happened afterwards.
+     *
+     * It used to be netted — an order that received a line and later moved
+     * part of it away displayed the remainder, a figure printed on no
+     * statement anywhere. The transfer is a separate, later event and belongs
+     * in its own column, with Balance holding the two together.
+     */
+    const { orderRepo } = require("../repositories");
+    const line = await makeLine(12000000, "BANK FIGURE PAYER");
+    const from = await makeOrder(9000000);
+    const to = await makeOrder(3000000);
+    await confirm(from, [line.id]);
+    await orderPaymentService.transferSurplus({
+      fromOrderId: from.id,
+      toOrderId: to.id,
+      amount: 3000000,
+      reason: "the rest was for the next load",
+      staffId: null,
+    });
+
+    const report = await orderRepo.findFinanceReport({ paymentStatus: "all" });
+    const src = report.orders.find((r) => r.id === from.id);
+    const dst = report.orders.find((r) => r.id === to.id);
+
+    // Source: the statement line at face value, untouched by the transfer.
+    assert.equal(src.amountPaidIn, 12000000, "the bank line, not what was left of it");
+    assert.equal(src.differential, 9000000 - 12000000, "against the bank, before the transfer");
+    assert.equal(src.netTransfers, -3000000);
+    assert.equal(src.balance, 0, "bank figure and transfer together settle it");
+
+    // Destination: no bank money of its own, and it says so.
+    assert.equal(dst.amountPaidIn, 0, "no statement line was matched to this order");
+    assert.equal(dst.differential, 3000000, "short against the bank, which is true");
+    assert.equal(dst.netTransfers, 3000000);
+    assert.equal(dst.balance, 0);
+
+    // And the three identities hold on both rows.
+    for (const r of [src, dst]) {
+      assert.equal(Number(r.totalAmount) - r.amountPaidIn, r.differential);
+      assert.equal(r.differential - r.netTransfers, r.balance);
+    }
+  });
+
   test("every order's amount_paid equals the sum of its payment rows", async () => {
     // The invariant the finance report and every order screen both rely on.
     const rows = await db.execute(`

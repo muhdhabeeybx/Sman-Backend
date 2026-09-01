@@ -414,6 +414,12 @@ describe("part payment", () => {
 
     assert.ok(row, "a part-paid order appears on the report by default, not only once fully paid");
     assert.equal(Number(row.totalAmount), TOTAL, "sales value");
+    // Amount Paid is the bank statement's own figure, never netted by a
+    // transfer made later — see amountPaidIn in order.repository.
+    assert.equal(row.amountPaidIn, HALF, "the bank statement figure");
+    assert.equal(row.differential, TOTAL - HALF, "against the bank, before any transfer");
+    assert.equal(row.netTransfers, 0);
+    assert.equal(row.balance, TOTAL - HALF, "nothing moved, so balance equals differential");
     assert.equal(row.received, HALF, "what actually arrived");
     assert.equal(row.applied, HALF);
     assert.equal(row.shortfall, TOTAL - HALF, "still expected");
@@ -426,6 +432,10 @@ describe("part payment", () => {
     assert.equal(row.payments[0].depositor, "PART PAY FIXTURE");
     assert.ok(row.payments[0].bankRef, "the teller reference is on the report");
 
+    assert.equal(report.totals.totalAmountPaidIn, HALF, "the bank statement total");
+    assert.equal(report.totals.totalDifferential, TOTAL - HALF);
+    assert.equal(report.totals.totalNetTransfers, 0);
+    assert.equal(report.totals.totalBalance, TOTAL - HALF);
     assert.equal(report.totals.totalReceived, HALF);
     assert.equal(report.totals.totalShortfall, TOTAL - HALF);
     assert.equal(report.totals.totalSurplus, 0);
