@@ -582,10 +582,23 @@ const findFinanceReport = async ({
             FROM order_payments sp
             WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
           ) AS "originDepositor",
+          /**
+           * Only where the source order has exactly ONE statement line.
+           *
+           * This used to string_agg every reference on the source order, so
+           * the three transfers out of AM11589 each printed the same four
+           * references — implying each had come from all four lines, when in
+           * truth nothing records which line a transfer came out of. A
+           * transfer moves surplus, and surplus is not attributable to a
+           * particular line. Where there is exactly one, saying so is a fact;
+           * where there are several, the honest answer is nothing, and the
+           * transfer is identified by its own id instead.
+           */
           (
-            SELECT string_agg(DISTINCT sp.bank_ref, ', ')
+            SELECT MIN(sp.bank_ref)
             FROM order_payments sp
             WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+            HAVING COUNT(*) = 1
           ) AS "originBankRefs"
         FROM order_payments p
         LEFT JOIN staff st ON st.id = p.recorded_by
