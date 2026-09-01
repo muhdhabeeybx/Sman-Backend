@@ -71,6 +71,16 @@ const takeSlot = () => {
 const looksLikeEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
 
 /**
+ * RFC 2606 reserves these for documentation and testing, so an address on one
+ * can never reach a person — but the provider still accepts it, still bills it
+ * and still counts it against the daily quota. The test suite's fixture
+ * accounts live on @soroman.test, and one run of it spent an entire day's
+ * sending allowance, after which nothing real could go out.
+ */
+const RESERVED_RECIPIENT =
+  /@([^@]*\.)?(test|example|invalid|localhost)$|@([^@]*\.)?example\.(com|net|org)$/i;
+
+/**
  * @returns {Promise<Array<{destination, status, providerMessageId, error}>>}
  */
 const send = async ({ contact, rendered }) => {
@@ -87,6 +97,9 @@ const send = async ({ contact, rendered }) => {
         error: apiKey() ? "Email disabled (EMAIL_ENABLED=false)" : "RESEND_API_KEY is not configured",
       },
     ];
+  }
+  if (RESERVED_RECIPIENT.test(to)) {
+    return [{ destination: to, status: "skipped", error: "Reserved domain — not a deliverable address" }];
   }
 
   const email = rendered.email;
