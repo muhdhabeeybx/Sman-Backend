@@ -5,6 +5,7 @@ const passkeyService = require("../../services/passkey.service");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
 const otpService = require("../../services/otp.service");
+const botCheck = require("../../services/botCheck.service");
 const { toE164 } = require("../../utils/phone");
 const { publicCustomer } = require("../../utils/publicCustomer");
 
@@ -178,7 +179,7 @@ const handleSetPin = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "PIN set" });
 });
 
-/** POST /login/pin — { phone, pin, deviceToken } — trusted device REQUIRED. */
+/** POST /login/pin — { phone|email, pin, deviceToken? } — device token optional; see below. */
 const handlePinLogin = asyncHandler(async (req, res) => {
   const { phone, email, pin, deviceToken } = req.body || {};
   // One message for every failure — distinguishing 'unknown email' from 'wrong
@@ -197,13 +198,122 @@ const handlePinLogin = asyncHandler(async (req, res) => {
   }
   if (!candidate) return fail();
 
-  const trusted = await identityService.isTrustedDevice(candidate.id, deviceToken);
-  if (!trusted) return fail();
+  // A presented device token must still be valid — a client that claims a
+  // trusted device and is wrong is a stronger signal of abuse than one that
+  // never claimed anything, so it fails rather than falling through.
+  //
+  // Absent entirely, the PIN stands alone. That is what the mobile app does:
+  // it never runs an OTP, so it has no way to obtain a device token. The
+  // remaining protections are bcrypt storage, the uniform failure message
+  // above, and the 5-attempt / 15-minute lockout in identityService.verifyPin.
+  // The web keeps sending its token and keeps the device-bound check.
+  if (typeof deviceToken === "string" && deviceToken.trim()) {
+    const trusted = await identityService.isTrustedDevice(candidate.id, deviceToken);
+    if (!trusted) return fail();
+  }
 
   const result = await identityService.verifyPin({ phone, email, pin });
   if (!result.success) return fail();
 
   await issueSessionResponse(req, res, result.customer);
+});
+
+/**
+ * POST /api/customer/auth/register/pin — OTP-free sign-up for the mobile app.
+ *
+ * The PIN replaces the OTP as the activation gate, so the account is created
+ * `Active` and usable for ordering immediately (`requireActiveCustomer` rejects
+ * `Pending`). The trade is explicit: nothing here proves the phone belongs to
+ * the person registering.
+ *
+ * That makes claiming an EXISTING row the dangerous case — desk-created
+ * customers carry real phone numbers, and letting a stranger set a PIN on one
+ * would hand over its history and wallet. So an existing row is claimable only
+ * when there is nothing to steal:
+ *   - no linked identity (no PIN, password, or social) — someone already owns
+ *     an account that has one, and they must sign in, not re-register;
+ *   - no wallet balance.
+ * Prior ORDERS deliberately do not block the claim: a guest checkout creates
+ * exactly this kind of row, and folding those orders into the account the
+ * customer then makes is the intended path (see createGuestOrder).
+ *
+ * Anything else answers 409 ACCOUNT_EXISTS, which routes the client to sign-in
+ * or to PIN reset — the one flow that still goes through an OTP.
+ */
+const handlePinRegister = asyncHandler(async (req, res) => {
+  const { name, phone, email, companyName, pin, turnstileToken } = req.body || {};
+
+  const bot = await botCheck.verify(turnstileToken, req.ip);
+  if (!bot.ok) {
+    return res.status(400).json({ success: false, message: "Verification failed. Please try again." });
+  }
+
+  const e164 = toE164(phone);
+  if (!e164) {
+    return res.status(400).json({
+      success: false,
+      message:
+        "Enter a valid phone number. International numbers must include a country code, e.g. +447400123456",
+    });
+  }
+
+  const existingEmail = await customerRepo.findByEmail(String(email).trim().toLowerCase());
+  const match = await customerRepo.findByAnyPhone(e164);
+  let customer = match?.customer || null;
+
+  // The email is a sign-in identifier too, so it cannot silently land on a
+  // second row pointing at someone else's address.
+  if (existingEmail && (!customer || existingEmail.id !== customer.id)) {
+    return res.status(409).json({
+      success: false,
+      code: "ACCOUNT_EXISTS",
+      message: "An account already uses that email address. Sign in instead.",
+    });
+  }
+
+  if (customer) {
+    if (customer.status === "Inactive") {
+      return res.status(403).json({
+        success: false,
+        message: "This account cannot be used at the moment. Please contact support.",
+      });
+    }
+
+    const identities = await customerIdentityRepo.listByCustomer(customer.id);
+    const claimable = identities.length === 0 && !(Number(customer.balance || 0) > 0);
+    if (!claimable) {
+      return res.status(409).json({
+        success: false,
+        code: "ACCOUNT_EXISTS",
+        message: "An account already exists for that number. Sign in with your PIN instead.",
+      });
+    }
+
+    customer = await customerRepo.update(customer.id, {
+      status: "Active",
+      // Fill only what the row is missing — never overwrite details the desk
+      // recorded with what an unverified caller typed.
+      ...(customer.name ? {} : { name: String(name).trim() }),
+      ...(customer.email ? {} : { email: String(email).trim().toLowerCase() }),
+      ...(customer.companyName || !companyName ? {} : { companyName: String(companyName).trim() }),
+    });
+  } else {
+    customer = await customerRepo.create({
+      name: String(name).trim(),
+      phone: e164,
+      email: String(email).trim().toLowerCase(),
+      companyName: typeof companyName === "string" ? companyName.trim() : "",
+      status: "Active",
+      createdVia: "portal",
+    });
+  }
+
+  const result = await identityService.setPin(customer, { pin });
+  if (!result.success) {
+    return res.status(400).json({ success: false, message: result.message });
+  }
+
+  await issueSessionResponse(req, res, customer, { message: "Account created" });
 });
 
 // ── Google / Apple ───────────────────────────────────────────────────────────
@@ -319,6 +429,7 @@ module.exports = {
   handlePasswordStepUpVerify,
   handleSetPin,
   handlePinLogin,
+  handlePinRegister,
   handleProviderLogin,
   handleProviderRegister,
   handleLinkProvider,

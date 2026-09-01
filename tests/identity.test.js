@@ -114,19 +114,21 @@ describe("customer identity — password, PIN, provider login", () => {
     assert.equal(trusted.body.stepUpRequired, undefined);
   });
 
-  test("PIN: cannot be used without a trusted device, even with the correct PIN", async () => {
+  test("PIN: a device token that was never issued is refused outright", async () => {
     const setRes = await request(app)
       .post(`${BASE}/pin`)
       .set("Authorization", `Bearer ${accessToken}`)
       .send({ pin: "482913" });
     assert.equal(setRes.status, 200);
 
-    // Correct PIN, no device token at all: refused. A 6-digit PIN alone is
-    // never a sufficient remote credential.
-    const noDevice = await request(app)
+    // Correct PIN, but a device token that was never issued: refused. A client
+    // that claims a trusted device and is wrong is a stronger abuse signal than
+    // one that never claimed anything, so it fails rather than falling through
+    // to the PIN-alone path the next test covers.
+    const badDevice = await request(app)
       .post(`${BASE}/login/pin`)
       .send({ phone: customer.phone, pin: "482913", deviceToken: "not-a-real-token" });
-    assert.equal(noDevice.status, 401);
+    assert.equal(badDevice.status, 401);
 
     // Establish a trusted device via the password step-up flow. Issue a
     // fresh code directly rather than depending on another test having
@@ -152,6 +154,24 @@ describe("customer identity — password, PIN, provider login", () => {
       .post(`${BASE}/login/pin`)
       .send({ phone: customer.phone, pin: "000000", deviceToken });
     assert.equal(wrongPin.status, 401);
+  });
+
+  test("PIN: signs in with no device token at all — the mobile app's path", async () => {
+    // The app never runs an OTP, so it has no way to obtain a device token.
+    // Omitting the field entirely must succeed: only a *presented* token that
+    // fails to validate is refused (the test above). Sets its own PIN rather
+    // than leaning on the previous test having run.
+    const setRes = await request(app)
+      .post(`${BASE}/pin`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ pin: "482913" });
+    assert.equal(setRes.status, 200);
+
+    const res = await request(app)
+      .post(`${BASE}/login/pin`)
+      .send({ phone: customer.phone, pin: "482913" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(res.body.data.accessToken);
   });
 
   test("identities directory reflects what's linked", async () => {

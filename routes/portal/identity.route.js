@@ -8,6 +8,7 @@ const {
   passwordLoginSchema,
   passwordStepUpVerifySchema,
   setPinSchema,
+  pinRegisterSchema,
   pinLoginSchema,
   providerParamSchema,
   providerLoginSchema,
@@ -54,7 +55,15 @@ router.post(
   identity.handlePasswordStepUpVerify
 );
 
-// ── PIN (trusted devices only) ────────────────────────────────────────────────
+// ── PIN ───────────────────────────────────────────────────────────────────────
+// Sign-up without an OTP: creates the account, sets the PIN, returns a session.
+// Rate-limited as a registration endpoint, not a login one — it creates rows.
+router.post(
+  "/register/pin",
+  registerLimiter,
+  validate({ body: pinRegisterSchema }),
+  identity.handlePinRegister
+);
 router.post("/pin", authenticateCustomer, validate({ body: setPinSchema }), identity.handleSetPin);
 router.post(
   "/login/pin",

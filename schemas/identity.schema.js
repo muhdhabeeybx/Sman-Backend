@@ -25,6 +25,18 @@ const passwordStepUpVerifySchema = z.object({
 
 const setPinSchema = z.object({ pin: pinSchema });
 
+// Mobile's OTP-free sign-up: the PIN is set at registration and is what
+// activates the account, so every field the customer row needs is required here
+// (an account created this way must be immediately usable for ordering).
+const pinRegisterSchema = z.object({
+  name: z.string().trim().min(2, "Enter your full name").max(255),
+  phone: phoneSchema,
+  email: emailSchema,
+  companyName: z.string().trim().max(255).optional(),
+  pin: pinSchema,
+  turnstileToken: z.string().max(5000).optional(),
+});
+
 const pinLoginSchema = z
   .object({
     // Either identifier resolves the same account. Both optional at the field
@@ -32,7 +44,10 @@ const pinLoginSchema = z
     phone: phoneSchema.optional(),
     email: z.string().trim().toLowerCase().email("Enter a valid email address").max(255).optional(),
     pin: z.string().min(1).max(6),
-    deviceToken: z.string().min(1, "This device is not trusted for PIN sign-in").max(200),
+    // Optional since the mobile app signs in with a PIN alone (no OTP step to
+    // mint a trusted-device token). The web still sends one and still gets the
+    // stronger device-bound check — see handlePinLogin.
+    deviceToken: z.string().min(1).max(200).optional(),
   })
   .refine((v) => Boolean(v.phone || v.email), {
     message: "Enter your phone number or email address",
@@ -71,6 +86,7 @@ module.exports = {
   passwordLoginSchema,
   passwordStepUpVerifySchema,
   setPinSchema,
+  pinRegisterSchema,
   pinLoginSchema,
   providerParamSchema,
   providerLoginSchema,
