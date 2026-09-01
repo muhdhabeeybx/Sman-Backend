@@ -89,9 +89,9 @@ const deleteDailyReport = asyncHandler(async (req, res) => {
  * The Hub's "Email report" button. Builds the same combined report as the
  * scheduled job (`scripts/send-daily-report.js`) for whatever date the admin
  * is looking at, and sends it to a recipient list typed in on the spot
- * rather than a fixed env var. Any workbook/location/PFI filter the client
- * still sends is ignored — the combined report already covers every depot
- * for the date in one email.
+ * rather than a fixed env var. The email is the readable summary and nothing
+ * else — no attachment, and the location/PFI filter is ignored, since the
+ * combined report already covers every depot for the date in one email.
  */
 const emailDailyReports = asyncHandler(async (req, res) => {
   const { recipients, reportDate } = req.body;
@@ -102,27 +102,38 @@ const emailDailyReports = asyncHandler(async (req, res) => {
     data,
   });
 
-  // notifyAndWait never throws — a provider outage must not read as a 500 —
-  // so success is judged from what actually delivered, not from the call
-  // returning at all. This is the one place that distinction matters: a
-  // scheduled report going quiet is invisible, but a click that claims
-  // "sent" while delivering nothing is the same bug the CLI script's own
-  // refusal-with-no-recipients guard exists to avoid.
-  const delivered = result?.delivered ?? 0;
-  const failed = (result?.results || []).filter((r) => r.error);
-  if (result?.error || delivered === 0) {
+  // notifyAndWait never throws — a provider outage must not read as a 500 — so
+  // success is judged from what the email channel actually did.
+  //
+  // `result.delivered` cannot answer that. It counts recipients the engine got
+  // through without throwing, and a provider refusal is not a throw: Resend
+  // rejecting every address for an unverified sending domain still produced
+  // delivered === 1, so this endpoint answered "Sent to 1 recipient" while the
+  // delivery log recorded the refusal and nothing reached anyone. A click that
+  // claims "sent" and delivers nothing is worse than an honest failure, which
+  // is the whole reason this endpoint waits for the dispatch at all.
+  const rows = result?.results || [];
+  const sent = rows.filter((r) => r.channels?.email === "sent" || r.channels?.email === "partial");
+  const problems = rows
+    .filter((r) => !sent.includes(r))
+    .map((r) => r.error || r.channelErrors?.email || (r.suppressed || []).find((s) => s.channel === "email")?.reason)
+    .filter(Boolean);
+
+  if (result?.error || sent.length === 0) {
     return res.status(502).json({
       success: false,
-      message: result?.error || failed[0]?.error || "The report could not be sent",
+      // The provider's own words. "The report could not be sent" is only
+      // reached when nothing said anything at all.
+      message: result?.error || problems[0] || "The report could not be sent",
     });
   }
 
   res.json({
     success: true,
     message:
-      delivered < recipients.length
-        ? `Sent to ${delivered} of ${recipients.length} recipients — ${failed.map((f) => f.error).join("; ")}`
-        : `Sent to ${delivered} recipient${delivered === 1 ? "" : "s"}`,
+      sent.length < recipients.length
+        ? `Sent to ${sent.length} of ${recipients.length} recipients — ${[...new Set(problems)].join("; ")}`
+        : `Sent to ${sent.length} recipient${sent.length === 1 ? "" : "s"}`,
   });
 });
 

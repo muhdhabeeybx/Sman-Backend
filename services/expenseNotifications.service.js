@@ -6,26 +6,60 @@ const chain = require("../lib/expenseChain");
  * Who hears about each stage, by role rather than by name — adding a second
  * officer needs no code change here.
  *
+ * The role lists are READ OFF THE TRANSITIONS rather than repeated here. A
+ * stage notification answers exactly one question — "who has to act next?" —
+ * and lib/expenseChain.js already holds that answer; keeping a second copy of
+ * it meant the two could disagree, and they did: `verify` was widened to admit
+ * an admin while `pending` went on naming the Expenditure Officer alone, so
+ * the role that could clear the queue was never told a queue existed. Derived,
+ * a role added to a transition starts being notified in the same commit that
+ * grants it the power to act.
+ *
  * `includeSubmitter` adds the person who raised the request on top of the
  * role, for the three middle stages where they would otherwise hear nothing
  * between submitting it and it being paid or rejected — PAID/REJECTED
  * already reach them via `participants`, and PENDING doesn't need it because
  * they are the one who just acted (see the actor filter below).
  */
+
+/**
+ * A stage's role recipients: whoever may perform the transition that leaves it,
+ * minus the super admin.
+ *
+ * The subtraction is the whole point and has to be deliberate. Super admin can
+ * perform EVERY transition in the chain, so deriving verbatim would put every
+ * super admin on every stage of every request — an override role paged about
+ * work that is not its own, four times per expense. They stay reachable as
+ * `participants` on anything they actually touched, which is the difference
+ * between "you may step in" and "this is yours to do".
+ *
+ * This is also why an empty result is a real possibility and not a defect to
+ * code around: `expense.pending` resolved to nobody for the whole life of the
+ * system because ROLE.OFFICER was assigned to no staff member, and
+ * notifyExpenseStage returned before notify() was ever reached. That is a
+ * staffing gap to fix in the roles table, not here — the code correctly says
+ * "no one holds this job".
+ */
+const stageRoles = (action) =>
+  chain.TRANSITIONS[action].roles.filter((role) => role !== chain.ROLE.SUPER);
+
 const STAGE_RECIPIENTS = {
-  [chain.STATUS.PENDING]: { roles: [chain.ROLE.OFFICER], title: "New expense awaiting verification" },
+  [chain.STATUS.PENDING]: {
+    roles: stageRoles("verify"),
+    title: "New expense awaiting verification",
+  },
   [chain.STATUS.VERIFIED]: {
-    roles: [chain.ROLE.CFO],
+    roles: stageRoles("audit_approve"),
     includeSubmitter: true,
     title: "Expense verified — your approval needed",
   },
   [chain.STATUS.AUDIT_APPROVED]: {
-    roles: [chain.ROLE.ADMIN],
+    roles: stageRoles("admin_approve"),
     includeSubmitter: true,
     title: "Expense approved — final sign-off needed",
   },
   [chain.STATUS.ADMIN_APPROVED]: {
-    roles: [chain.ROLE.OFFICER],
+    roles: stageRoles("mark_paid"),
     includeSubmitter: true,
     title: "Expense authorised — ready to pay",
   },

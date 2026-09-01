@@ -318,6 +318,14 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
 
   // Outbound channels run concurrently — a slow Termii call must not delay the
   // email, and neither can fail the other.
+  //
+  // `channelErrors` carries the provider's own words back to the caller. The
+  // outcome strings alone say "failed" without saying why, so a caller that
+  // reports the result to a person — the Reports Hub's "Email report" button —
+  // had nothing to show but a generic apology, while the real answer ("the
+  // soromannl.com domain is not verified") sat in the delivery log where
+  // nobody was looking.
+  const channelErrors = {};
   const outbound = allowed.filter((c) => c !== "in_app");
   await Promise.all(
     outbound.map(async (channel) => {
@@ -339,6 +347,9 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
         : results.some((r) => r.status === "sent")
           ? "partial"
           : results[0]?.status || "failed";
+
+      const firstError = results.find((r) => r.error)?.error;
+      if (firstError) channelErrors[channel] = firstError;
 
       await Promise.all(
         results.map(async (r) => {
@@ -365,7 +376,7 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
     })
   );
 
-  return { principal, duplicate: false, notification, channels: outcomes };
+  return { principal, duplicate: false, notification, channels: outcomes, channelErrors, suppressed };
 };
 
 // ─── Public API ─────────────────────────────────────────────────────────────

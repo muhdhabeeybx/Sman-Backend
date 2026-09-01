@@ -155,11 +155,16 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     assert.ok(!recipients2.includes(cfo.id), "the actor-submitter is excluded, even as the role holder");
   });
 
-  test("pending and paid are unchanged: pending stays officer-only, paid still reaches every participant", async () => {
+  test("pending reaches everyone who can verify, not the officer alone; paid still reaches every participant", async () => {
     const pendingExpense = baseExpense();
     await notifyExpenseStage({ expense: pendingExpense, stage: chain.STATUS.PENDING, actorId: submitter.id, actorName: "Submitter" });
-    const pendingRecipients = await waitForRecipients("expense.pending", pendingExpense.id, [officer.id]);
+    const pendingRecipients = await waitForRecipients("expense.pending", pendingExpense.id, [officer.id, admin.id]);
     assert.ok(pendingRecipients.includes(officer.id));
+    // The stage's recipients are read off TRANSITIONS.verify, so admin — who
+    // may verify — is told there is something to verify. Held as a separate
+    // list this is precisely what drifted: the role that could act on the
+    // queue was never told the queue existed.
+    assert.ok(pendingRecipients.includes(admin.id), "admin can verify, so admin hears about a new request");
     assert.ok(!pendingRecipients.includes(submitter.id), "pending doesn't add the submitter — they are the one who just acted");
 
     const paidExpense = baseExpense();

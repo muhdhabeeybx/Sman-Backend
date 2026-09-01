@@ -1643,6 +1643,10 @@ const CATALOG = {
     body: (d) =>
       `${d.totals?.orderCount ?? 0} order(s) across ${d.locations?.length ?? 0} location(s).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
+    // The same readable summary the scheduled report sends, with no attachment
+    // — deliberately. The Hub's xlsx is for the operator who wants to work the
+    // numbers, and that is what "Download report" is for; the email is for
+    // reading.
     email: (d) => renderDailyReportEmail(d),
   },
 
