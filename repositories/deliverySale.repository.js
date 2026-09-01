@@ -67,8 +67,40 @@ const findAll = async ({
         ilike(deliverySales.location, pattern),
         ilike(deliverySales.depotLoaded, pattern),
         ilike(deliverySales.payerName, pattern),
-        ilike(deliverySales.remarks, pattern)
+        ilike(deliverySales.remarks, pattern),
+        // The allocation code is how this table is actually talked about —
+        // "the 19B loadings", "everything under 25C" — and it was the one
+        // identifier the search could not reach, while the sibling
+        // deliveryInventory.findAll had searched it all along. Its absence did
+        // not return the wrong rows, it returned none: with 1,363 rows against
+        // a 500-row page, a whole PFI's history sat past the end of the first
+        // page and searching for it by name was the only way back to it.
+        ilike(deliverySales.allocationCode, pattern)
       )
+    );
+  }
+
+  /**
+   * Both bounds were accepted by the schema, destructured here, and then
+   * silently dropped — so a date-ranged request returned the same unfiltered
+   * newest-500 as an unranged one, and narrowing to the month you wanted
+   * appeared to do nothing.
+   *
+   * `date_loaded` is a varchar of ISO dates, so a lexicographic comparison is
+   * the correct one. LEFT(...,10) mirrors cycleStanding, which already
+   * normalises this column rather than trusting it to be exactly ten
+   * characters. A blank date sorts below every bound and so drops out of a
+   * ranged query, which is right: a payment with no load date is in no period.
+   */
+  if (date_from) {
+    conditions.push(
+      sql`LEFT(COALESCE(${deliverySales.dateLoaded}, ''), 10) >= ${String(date_from).slice(0, 10)}`
+    );
+  }
+
+  if (date_to) {
+    conditions.push(
+      sql`LEFT(COALESCE(${deliverySales.dateLoaded}, ''), 10) <= ${String(date_to).slice(0, 10)}`
     );
   }
 
