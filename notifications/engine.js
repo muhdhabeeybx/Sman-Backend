@@ -176,6 +176,39 @@ const QUIET_HOURS_CHANNELS = new Set(["push", "sms"]);
  * were dropped. Returns `{ allowed: [...], suppressed: [{channel, reason}] }`
  * so the suppressions can be recorded rather than vanishing.
  */
+/**
+ * Staff email, paused.
+ *
+ * Every order and every payment emailed all twelve staff, which came to ~580
+ * emails a day against a plan that allows 100 — so the allowance was gone by
+ * mid-morning and everything after it, including the Reports Hub's own send,
+ * came back "daily sending quota exceeded". Customers were losing their mail
+ * to a queue of internal notices.
+ *
+ * Off by default rather than behind an env var someone has to remember to set,
+ * because the point is that it takes effect in production today. Set
+ * STAFF_EMAIL_ENABLED=true to bring it back.
+ *
+ * Two things keep emailing staff regardless:
+ *
+ *   - anything `mandatory` — the password setup and reset mails. Nobody can be
+ *     invited or recover an account without them, and they are two sends a
+ *     week, not two thousand.
+ *   - the `reports` category — the daily report and the Reports Hub button are
+ *     a person asking for an email and expecting it to arrive.
+ *
+ * Staff lose no information: in-app and push are untouched, so the dashboard
+ * bell still shows every order and payment. Only the mailbox copy stops.
+ */
+const STAFF_EMAIL_ALWAYS = new Set(["reports"]);
+const staffEmailEnabled = () => process.env.STAFF_EMAIL_ENABLED === "true";
+
+const staffEmailPaused = (entry, principal) =>
+  principal?.type === "staff" &&
+  !entry.mandatory &&
+  !STAFF_EMAIL_ALWAYS.has(entry.category) &&
+  !staffEmailEnabled();
+
 const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, override, force }) => {
   const requested = override?.length ? override : entry.channels || [];
   const allowed = [];
@@ -194,6 +227,12 @@ const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, ov
     }
     if (channel === "email" && !contact?.email) {
       suppressed.push({ channel, reason: "No email address on file" });
+      continue;
+    }
+    // Recorded, not silently dropped: "why did I stop getting these?" has to
+    // be answerable from the delivery log.
+    if (channel === "email" && staffEmailPaused(entry, principal)) {
+      suppressed.push({ channel, reason: "Staff email paused (STAFF_EMAIL_ENABLED)" });
       continue;
     }
     if (channel === "sms" && !contact?.phone) {
@@ -465,6 +504,7 @@ module.exports = {
   dispatch,
   render,
   gateChannels,
+  staffEmailPaused,
   inQuietHours,
   minutesInZone,
   defaultSmsText,
