@@ -401,22 +401,22 @@ const promptFor = (state, session, context) => {
 };
 
 /**
- * The Pay now / Cancel buttons for an unpaid order. Pay now is always offered
- * so the customer has a single obvious way to confirm: after their transfer
- * lands in the depot's account and staff record the deposit (wallet funding
- * is manual now — Paystack DVAs and their webhook are retired), the tap
- * settles the order from the credited wallet. A tap before the deposit is
- * recorded can't overspend — PAY_ORDER re-checks and, if the balance still
- * falls short, replies with the "transfer first" copy. Cancel is always
- * offered. Always ≤ 3 buttons (WhatsApp's limit).
+ * The buttons on an unpaid order. Cancel only, now.
+ *
+ * "Pay now" used to settle the order from the customer's wallet balance. It is
+ * gone with the rest of the wallet payment path (db/migrations/0021): an order
+ * is confirmed by the finance desk against the bank statement line that paid
+ * for it, so there is nothing for a customer to tap — the transfer itself is
+ * the action, and the confirmation follows it.
+ *
+ * The button did more harm than the convenience was worth even before that. It
+ * invited a tap the moment a transfer was sent, which either failed for want
+ * of a recorded deposit or succeeded against unrelated balance and left the
+ * finance report unable to say which payment had settled which order.
  */
-const awaitPaymentButtonDefs = (cart, context) => {
-  const total = Number(cart.awaiting?.totalAmount) || 0;
-  const defs = {};
-  if (total > 0) defs.paynow = copy.payNowButton();
-  defs.cancelorder = copy.awaitPaymentCancelButton();
-  return defs;
-};
+const awaitPaymentButtonDefs = (cart, context) => ({
+  cancelorder: copy.awaitPaymentCancelButton(),
+});
 
 const cancelOrderConfirmReply = (session) =>
   buttons(copy.cancelOrderConfirm(session.cart.awaiting?.orderNumber), copy.cancelOrderButtons());
@@ -903,13 +903,11 @@ const reduceInner = (session, inbound, ctx, expired) => {
 };
 
 const handleAwaitPayment = (session, ctx, value) => {
-  // Pay now: settle the unpaid order from wallet balance. The engine only
-  // shows this button when the balance covers the total; the effect (and
-  // payOrder itself) re-check, so a stale tap can't overspend.
+  // "Pay now" is no longer offered (see awaitPaymentButtonDefs), but a session
+  // that rendered the old buttons can still deliver the tap. Answer it with the
+  // transfer instructions rather than an unknown-input fallthrough.
   if (value === "paynow" && session.lastOrderId) {
-    return done(session, [], [
-      { type: EFFECTS.PAY_ORDER, payload: { orderId: session.lastOrderId, customerId: session.customerId } },
-    ]);
+    return done(session, [text(copy.payNowWithdrawn())]);
   }
   // Cancelling an unpaid order: confirm first, then a real effect.
   if (value === "cancelorder" && session.lastOrderId) {

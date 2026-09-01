@@ -16,7 +16,7 @@ const {
   auditLogRepo,
   bankAccountRepo,
 } = require("../repositories");
-const { staffTokenWithRoles, NATIVE_TRANSPORT, closeDb } = require("./helpers");
+const { staffTokenWithRoles, NATIVE_TRANSPORT, closeDb, makeStatementLine } = require("./helpers");
 
 const PORTAL = "/api/customer/auth";
 const DEV_CODE = process.env.OTP_DEV_CODE || "000000";
@@ -163,20 +163,25 @@ describe("integration — customer register → order → release → gates → 
     let order = await orderRepo.findById(orderId);
     assert.equal(order.paymentStatus, "Unpaid", "created Unpaid, awaiting payment");
 
-    // The manual "Pay Now" action — finance settles it from the wallet.
+    // Finance confirms the order against the bank statement line that paid for
+    // it. There is no other way to pay an order, and no amount is sent — the
+    // amount is whatever the bank says the line is worth.
+    const { bankAccountId, lineIds } = await makeStatementLine(order.totalAmount, "JOURNEY PAYER");
     const paid = await request(app)
-      .post(`/api/orders/${orderId}/pay`)
+      .post(`/api/orders/${orderId}/payments`)
       .set("Authorization", `Bearer ${desk.accessToken}`)
-      .send({});
+      .send({ bankAccountId, lineIds });
     assert.equal(paid.status, 200, JSON.stringify(paid.body));
+    assert.equal(paid.body.data.payment.reconciled, true, "a statement line stands behind it");
+    assert.equal(paid.body.data.payment.shortfall, 0);
 
     order = await orderRepo.findById(orderId);
-    assert.equal(order.paymentStatus, "Paid", "wallet covered it");
+    assert.equal(order.paymentStatus, "Paid", "the statement line covered it");
     assert.equal(order.status, "Released", "payment released it in the same transaction");
     assert.ok(order.paymentConfirmedAt, "paymentConfirmedAt stamped");
     assert.ok(order.releasedAt, "releasedAt stamped");
-    // The wallet was fully spent.
-    assert.equal(Number((await customerRepo.findById(customerId)).balance), 0);
+    // And the customer's wallet balance is untouched — it plays no part.
+    assert.equal(Number((await customerRepo.findById(customerId)).balance), TOTAL);
 
     // ── 3. Release desk allocates the fleet trucks ───────────────────────────
     // The order is already Released; this call is here for the allocation, and
@@ -329,10 +334,14 @@ describe("integration — customer register → order → release → gates → 
     assert.equal(placed.body.data.order.customerId, cust.id, "the order is the customer's own");
     assert.equal(placed.body.data.order.status, "Pending", "created Unpaid, awaiting payment");
 
+    const { bankAccountId: acct, lineIds: lines } = await makeStatementLine(
+      placed.body.data.order.totalAmount,
+      "JOURNEY PAYER",
+    );
     const settled = await request(app)
-      .post(`/api/orders/${orderId}/pay`)
+      .post(`/api/orders/${orderId}/payments`)
       .set("Authorization", `Bearer ${desk.accessToken}`)
-      .send({});
+      .send({ bankAccountId: acct, lineIds: lines });
     assert.equal(settled.status, 200, JSON.stringify(settled.body));
     assert.equal((await orderRepo.findById(orderId)).status, "Released", "payment released it");
 

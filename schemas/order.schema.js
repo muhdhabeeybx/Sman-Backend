@@ -155,11 +155,45 @@ const cancelOrder = z.object({
 // The ceiling (not more than is still owed) is enforced in the service, not
 // here: it depends on what the order has already taken, which this layer
 // cannot see. Only the shape is checked here.
-const payOrder = z.object({
+/**
+ * Confirm payment on an order from the bank statement lines that paid for it.
+ *
+ * There is deliberately no `amount` field. It was how the desk said "take this
+ * much from the wallet", and the amount of a payment is now the amount on the
+ * bank statement line — a figure nobody types, so nobody can mistype. An
+ * instalment is simply a call naming fewer lines; what the order has received
+ * is re-derived from its payment rows either way.
+ */
+const confirmOrderPayment = z.object({
+  bankAccountId: z.coerce
+    .number({ invalid_type_error: "Bank account is required" })
+    .int()
+    .positive("Bank account is required"),
+  lineIds: z
+    .array(z.coerce.number().int().positive())
+    .min(1, "Select at least one bank statement line")
+    .max(50, "Too many statement lines in one confirmation"),
+  note: z.string().max(500).optional(),
+});
+
+/** Move surplus from the order holding it to the order that needs it. */
+const transferOrderPayment = z.object({
+  toOrderId: z.coerce
+    .number({ invalid_type_error: "Destination order is required" })
+    .int()
+    .positive("Destination order is required"),
   amount: z.coerce
     .number({ invalid_type_error: "Amount must be a number" })
-    .positive("Amount must be greater than zero")
-    .optional(),
+    .positive("Amount must be greater than zero"),
+  // Required, and not merely allowed. This is money moving between two
+  // customers' orders; an auditor asking "why" should find the answer on the
+  // record rather than having to go and ask somebody.
+  reason: z.string().trim().min(3, "Say why this surplus is being moved").max(500),
+});
+
+/** Take a payment back off an order and return its line to the pool. */
+const removeOrderPayment = z.object({
+  reason: z.string().trim().min(3, "Say why this payment is being removed").max(500),
 });
 
 // Customer portal: replace the pickup truck declaration on an existing order.
@@ -238,13 +272,6 @@ const loadTruck = z.object({
   driverPhone: optionalString("Driver phone", 50),
 });
 
-// Re-matching a paid order onto the statement line(s) that really paid it.
-const rematchFunding = z.object({
-  bankAccountId: id("Bank account"),
-  lineIds: z.array(id("Statement line")).min(1, "Pick at least one statement line"),
-  description: optionalString("Description", 500),
-});
-
 // A load-scoped route: /orders/:id/trucks/:loadId/...
 const loadParam = z.object({ id: id("Order id"), loadId: id("Load id") });
 
@@ -269,12 +296,13 @@ module.exports = {
   updateOrder,
   refParam,
   cancelOrder,
-  payOrder,
+  confirmOrderPayment,
+  transferOrderPayment,
+  removeOrderPayment,
   updateMyTrucks,
   releaseOrder,
   gateIn,
   loadTruck,
   loadParam,
   updateTruckLoad,
-  rematchFunding,
 };

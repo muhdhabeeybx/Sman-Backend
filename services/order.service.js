@@ -16,6 +16,10 @@ const {
 } = require("../repositories");
 const { isWithinScope } = require("../lib/scopeFilter");
 const walletService = require("./wallet.service");
+// Order payments are the money path (see db/migrations/0021). walletService
+// survives above only for the legacy holds that historical orders still carry
+// — nothing here places a new one.
+const orderPaymentService = require("./orderPayment.service");
 // Paystack DVA creation/subaccount-switch and the auto-split transfer are
 // disabled — see the "Paystack DVA funding (disabled...)" block below and
 // runPostPaymentEffects(). Re-add this import if reinstating either:
@@ -655,6 +659,17 @@ async function releaseOrderResources(order, tx) {
     }
   }
   await orderTruckRepo.deleteByOrder(order.id, tx);
+  /**
+   * Legacy only, and a no-op on anything paid since migration 0021 — those
+   * orders have no hold, and releaseHold returns noActiveHold harmlessly.
+   *
+   * Note what is deliberately NOT done here: a cancelled order KEEPS its
+   * payments. The money was genuinely received against this order, and
+   * detaching it on cancellation is how it used to vanish back into a wallet
+   * with nothing naming where it came from. It stays on the order, visible as
+   * surplus, until somebody transfers it to another order or refunds it — on
+   * the record, either way.
+   */
   await walletService.releaseHold(order.id, tx);
 }
 
@@ -1129,39 +1144,57 @@ async function runPostPaymentEffects(orderId, { notifyWhatsApp = true } = {}) {
 }
 
 /**
- * Pay an order from the customer's wallet balance — in full, or in instalments.
+ * Confirm payment on an order from the bank statement lines that paid for it.
  *
- * Called with no `amount` this settles the whole outstanding balance and
- * behaves exactly as it always has: hold, Pending→Paid, release, ticket,
- * commission, one transaction. Called with an `amount` it takes that much, and
- * the order becomes Part Paid: live, released and ticketable, but only up to
- * the quantity that money covers (releasableQuantity above), with the rest
- * still expected.
+ * This replaced `payOrder`, which took money out of the customer's wallet
+ * balance. The difference is not cosmetic:
  *
- * The first instalment is what opens the pipeline — it places the hold and runs
- * the Pending→Paid→Released transitions, because a part-paid order still has to
- * reach the ticketing desk to be any use. Later instalments top the same hold up
- * and move only the money columns; the order is already Released, and there is
- * no status left to change.
+ *   before   the desk credited a customer's wallet from the statement, then
+ *            debited the wallet for the order. Which bank row paid for which
+ *            order was never written down, so the finance report inferred it
+ *            afterwards, oldest-credit-first, and printed the inference as
+ *            fact. An order could also be confirmed with no statement behind
+ *            it at all, by drawing on a balance from who-knows-where.
+ *
+ *   now      the payment IS the statement line, recorded against this order.
+ *            Nothing can confirm an order except naming the bank rows that
+ *            paid for it, and no balance is drawn on to cover a shortfall.
+ *
+ * Instalments need no special handling. Each call records whatever lines are
+ * given, `recomputeOrder` re-derives the order's money columns from every
+ * payment row it now has, and the order lands on Part Paid or Paid by
+ * arithmetic. Only the FIRST payment moves the order's status — it is what
+ * opens the pipeline, because a part-paid order still has to reach the
+ * ticketing desk to be any use; a later instalment finds it already Released
+ * and only the money columns change.
+ *
+ * A line larger than what the order owes is NOT trimmed to fit. The surplus
+ * lands on the order and shows there, and moving it somewhere useful is an
+ * explicit transfer (see orderPayment.service.transferSurplus). That is the
+ * whole point: money stays attached to the order it was paid against until
+ * somebody says otherwise, on the record.
  *
  * @param {object} opts
  * @param {number} opts.orderId
- * @param {number} [opts.customerId]  When set, an ownership guard: the order
- *   must belong to this customer or the call 404s. Omitted for staff, who may
- *   pay any order.
- * @param {number} [opts.amount]  Naira to confirm now. Omitted/null means the
- *   whole outstanding balance. May not exceed what is still owed — a customer
- *   with surplus in the wallet leaves it there, where the finance report can
- *   still see it, rather than over-holding it against one order.
- * @param {{ type: string, staffId?: number, customerId?: number }} opts.actor
+ * @param {number} opts.bankAccountId  the account the lines belong to
+ * @param {number[]} opts.lineIds      UNMATCHED statement lines to claim
+ * @param {{ type: string, staffId?: number }} opts.actor
+ * @param {string} [opts.note]
  * @returns {object} the updated order
  */
-async function payOrder({ orderId, customerId = null, actor, amount = null, notifyWhatsApp = true }) {
+async function confirmOrderPayment({
+  orderId,
+  bankAccountId,
+  lineIds,
+  actor,
+  note = "",
+  notifyWhatsApp = true,
+}) {
   // Lapsed orders are expired-and-refused, never paid at a stale price. The
   // guard commits the Expired flag first; the transaction below then sees it.
-  await expireIfStale({ orderId, customerId });
+  await expireIfStale({ orderId });
 
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const [order] = await tx
       .select()
       .from(orders)
@@ -1170,12 +1203,6 @@ async function payOrder({ orderId, customerId = null, actor, amount = null, noti
       .limit(1);
 
     if (!order) throw httpError(404, "Order not found");
-    // Customer-initiated payment may only ever touch the caller's OWN order; a
-    // foreign order reads as a flat 404, never confirmed. Checked under the row
-    // lock so it holds even against a concurrent change.
-    if (customerId != null && order.customerId !== customerId) {
-      throw httpError(404, "Order not found");
-    }
     if (order.paymentStatus === "Paid") throw httpError(409, "Order is already paid");
     if (order.status === "Expired") {
       throw httpError(409, "This order has expired. Please place a new order at current prices.");
@@ -1183,75 +1210,35 @@ async function payOrder({ orderId, customerId = null, actor, amount = null, noti
     if (!PAYABLE_STATUSES.has(order.status)) {
       throw httpError(409, `Cannot pay an order in ${order.status} status`);
     }
+    if (Number(order.totalAmount) <= 0) throw httpError(400, "Order total is invalid");
 
-    const customer = await customerRepo.findById(order.customerId);
-    if (!customer) throw httpError(404, "Customer not found");
+    // Whether this is the first money on the order decides whether there is a
+    // status transition to run. Read before the payment is recorded, because
+    // recording it is precisely what changes the answer.
+    const isFirstPayment = Number(order.amountPaid ?? 0) <= 0;
 
-    const orderTotal = Number(order.totalAmount);
-    if (orderTotal <= 0) throw httpError(400, "Order total is invalid");
-
-    const alreadyPaid = Number(order.amountPaid ?? 0);
-    const outstanding = round2(orderTotal - alreadyPaid);
-    if (outstanding <= 0) throw httpError(409, "Order is already paid");
-
-    // No amount named means "settle it" — the whole outstanding balance, which
-    // on an untouched order is the order total. That is what every existing
-    // caller (the portal, the WhatsApp flow, the finance desk's Pay button)
-    // passes, so they keep their exact behaviour.
-    const value = amount == null ? outstanding : round2(amount);
-    if (!Number.isFinite(value) || value <= 0) {
-      throw httpError(400, "Payment amount must be greater than zero");
-    }
-    if (value > outstanding) {
-      throw httpError(
-        400,
-        `That is more than this order still owes. Outstanding: ₦${outstanding.toLocaleString()}, offered: ₦${value.toLocaleString()}. Leave the surplus in the wallet — it stays available for the customer's other orders.`,
-      );
-    }
-
-    // The first instalment places the hold; later ones grow it, because
-    // wallet_holds is one row per order for good (see addToHold).
-    const isFirstPayment = alreadyPaid <= 0;
-    const description = `Payment for Order ${order.orderNumber} (Wallet Balance)`;
-    const holdResult = isFirstPayment
-      ? await walletService.placeHold(
-          { customerId: customer.id, orderId: order.id, amount: value, description },
-          tx,
-        )
-      : await walletService.addToHold(
-          { customerId: customer.id, orderId: order.id, amount: value, description },
-          tx,
-        );
-
-    if (!holdResult.success) {
-      if (holdResult.insufficient) {
-        throw httpError(400, `Insufficient wallet balance. Required: ₦${value.toLocaleString()}, Available: ₦${Number(customer.balance).toLocaleString()}`);
-      }
-      if (holdResult.alreadyHeld) {
-        throw httpError(409, "A payment hold already exists for this order");
-      }
-      throw httpError(400, holdResult.message || "Payment failed");
-    }
-
-    const paidAfter = round2(alreadyPaid + value);
-    // Compared at kobo scale rather than with >=, so a total that does not
-    // divide cleanly cannot leave an order a fraction of a kobo short of Paid
-    // and stuck reporting a balance nobody can settle.
-    const fullyPaid = Math.round(paidAfter * 100) >= Math.round(orderTotal * 100);
-    const paymentStatus = fullyPaid ? "Paid" : "Part Paid";
+    const { payments, summary } = await orderPaymentService.recordFromStatementLines(
+      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note },
+      tx,
+    );
 
     if (isFirstPayment) {
       await orderStatus.transition(order.id, "Paid", {
         tx,
         actor,
         action: "order.paid",
-        set: { paymentConfirmedAt: new Date(), paymentStatus, amountPaid: String(paidAfter) },
+        // recomputeOrder has already written amountPaid, paymentStatus and
+        // paymentConfirmedAt inside this same transaction. Passing them again
+        // here would let a stale figure win; the transition only needs to move
+        // the status.
+        set: {},
         metadata: {
-          via: "wallet",
-          amount: String(value),
-          amountPaid: String(paidAfter),
-          orderTotal: String(orderTotal),
-          partial: !fullyPaid,
+          via: "bank_statement",
+          statementLineIds: payments.map((p) => p.statementLineId),
+          received: String(summary.received),
+          orderTotal: String(summary.orderTotal),
+          surplus: String(summary.surplus),
+          partial: summary.shortfall > 0,
         },
       });
 
@@ -1259,43 +1246,27 @@ async function payOrder({ orderId, customerId = null, actor, amount = null, noti
       // rather than waiting for someone to click a button that has no other
       // condition attached to it. A part payment releases it too — capped at
       // the quantity paid for, which generate-tickets enforces.
-      await orderStatus.releaseOnPayment(order.id, { tx, actor, metadata: { via: "wallet" } });
-    } else {
-      // No status to move — the order was released by its first instalment.
-      // Only the money columns change, and the audit row is written here
-      // rather than through transition() for exactly that reason.
-      await tx
-        .update(orders)
-        .set({ paymentStatus, amountPaid: String(paidAfter), updatedAt: new Date() })
-        .where(eq(orders.id, order.id));
-
-      await auditLogRepo.record(
-        {
-          entityType: "order",
-          entityId: order.id,
-          action: fullyPaid ? "order.paid" : "order.part_paid",
-          prevState: order.paymentStatus,
-          newState: paymentStatus,
-          actor,
-          metadata: {
-            via: "wallet",
-            amount: String(value),
-            amountPaid: String(paidAfter),
-            orderTotal: String(orderTotal),
-            outstanding: String(round2(orderTotal - paidAfter)),
-          },
-        },
+      await orderStatus.releaseOnPayment(order.id, {
         tx,
-      );
+        actor,
+        metadata: { via: "bank_statement" },
+      });
     }
+    // A later instalment has no status to move — the order was released by its
+    // first one. recordFromStatementLines has already written its own
+    // 'order.payment_recorded' audit row, which carries the amount, the lines
+    // and the resulting status, so there is nothing further to log here.
 
-    return { ...order, amountPaid: String(paidAfter), paymentStatus, instalment: value };
-  }).then(async (order) => {
-    await runPostPaymentEffects(order.id, { notifyWhatsApp });
-
-    const fullOrder = await orderRepo.findByIdFull(order.id);
-    return fullOrder;
+    return { orderId: order.id, summary };
   });
+
+  // Tickets, commission and notifications. Run after every payment, exactly as
+  // the wallet path did: an instalment unlocks more litres, and these effects
+  // are written to be idempotent and best-effort so a re-run settles rather
+  // than duplicates.
+  await runPostPaymentEffects(result.orderId, { notifyWhatsApp });
+
+  return orderRepo.findByIdFull(result.orderId);
 }
 
 module.exports = {
@@ -1303,7 +1274,7 @@ module.exports = {
   updateOrder,
   cancelOrder,
   updatePickupTrucks,
-  payOrder,
+  confirmOrderPayment,
   releasableQuantity,
   runPostPaymentEffects,
   expireOrder,

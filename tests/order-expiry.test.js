@@ -11,7 +11,7 @@ const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis, orders } = require("../db/schema");
 const { customerRepo, orderRepo, pfiRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
-const { NATIVE_TRANSPORT, closeDb } = require("./helpers");
+const { NATIVE_TRANSPORT, closeDb, payOrderWithStatementLine } = require("./helpers");
 
 const PORTAL_AUTH = "/api/customer/auth";
 const ORDERS = "/api/customer/orders";
@@ -153,7 +153,7 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     const placed = await placeOrder(accessToken);
     const orderId = placed.body.data.order.id;
 
-    await orderService.payOrder({ orderId, actor: { type: "system" } });
+    await payOrderWithStatementLine(orderId);
     await backdate(orderId, 100);
     await orderService.expireStaleOrders();
 
@@ -194,7 +194,7 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     await backdate(orderId, 25);
 
     await assert.rejects(
-      () => orderService.payOrder({ orderId, actor: { type: "system" } }),
+      () => payOrderWithStatementLine(orderId),
       (err) => err.status === 409 && /expired/i.test(err.message),
       "paying a lapsed order is refused as expired"
     );

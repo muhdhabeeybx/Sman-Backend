@@ -1024,7 +1024,7 @@ describe("order outcomes", () => {
     expiryHours: 24,
   };
 
-  it("ORDER_CREATED: invoice, then ONE Pay now / Cancel message carrying the transfer details, then portal hint", () => {
+  it("ORDER_CREATED: invoice, then ONE message carrying the transfer details and Cancel, then portal hint", () => {
     const s = mkSession(STATES.CONFIRM, { ...fullPickupCart(), pendingOrder: true });
     const r = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
     assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
@@ -1035,26 +1035,34 @@ describe("order outcomes", () => {
     assert.ok(r.replies[1].body.includes("9930001111"));
     assert.match(r.replies[1].body, /pay by/i);
     assert.equal(r.session.cart.awaiting.expiresAt, ORDER.expiresAt);
-    // Pay now is always offered now; the tap settles once the transfer funds the wallet.
-    assert.deepEqual(buttonIds(r.replies[1]), ["paynow", "cancelorder"]);
+    // Cancel only. "Pay now" settled the order from wallet balance and went
+    // with the rest of that path — the transfer itself is the action now, and
+    // the finance desk confirms the order against the statement line it lands
+    // on. See engine.awaitPaymentButtonDefs.
+    assert.deepEqual(buttonIds(r.replies[1]), ["cancelorder"]);
   });
 
-  it("ORDER_CREATED offers Pay now whether or not the wallet already covers the total", () => {
+  it("ORDER_CREATED offers no payment button, funded wallet or not", () => {
     const s = mkSession(STATES.CONFIRM, { ...fullPickupCart(), pendingOrder: true });
     const btns = (x) => x.replies.find((y) => y.kind === REPLY.BUTTONS);
     const empty = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
     const funded = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER },
       baseCtx({ customer: { id: 7, name: "Ada", status: "Active", balance: "30000000" } }));
-    assert.deepEqual(buttonIds(btns(empty)), ["paynow", "cancelorder"]);
-    assert.deepEqual(buttonIds(btns(funded)), ["paynow", "cancelorder"]);
+    // A covered balance used to be the case FOR offering the button. It is now
+    // beside the point: a wallet balance cannot pay for an order at all.
+    assert.deepEqual(buttonIds(btns(empty)), ["cancelorder"]);
+    assert.deepEqual(buttonIds(btns(funded)), ["cancelorder"]);
   });
 
-  it("tapping Pay now emits PAY_ORDER for the customer's own order", () => {
+  it("a Pay now tap from an old session moves no money and explains the transfer", () => {
+    // The button is gone, but a conversation that rendered it before the change
+    // can still deliver the tap. It must not fall through to the unknown-input
+    // handler, and it must certainly not pay anything.
     const s = mkSession(STATES.AWAIT_PAYMENT, { awaiting: { orderNumber: "SOR-1", totalAmount: 100 } }, { lastOrderId: 501, customerId: 7 });
     const r = reduce(s, btn("paynow"), baseCtx({ customer: { id: 7, name: "Ada", status: "Active", balance: "500" } }));
-    assert.deepEqual(effectTypes(r), [EFFECTS.PAY_ORDER]);
-    assert.equal(r.effects[0].payload.orderId, 501);
-    assert.equal(r.effects[0].payload.customerId, 7);
+    assert.deepEqual(effectTypes(r), [], "no effect — nothing pays an order from this side any more");
+    assert.equal(r.replies.length, 1);
+    assert.match(r.replies[0].body, /send the transfer/i);
   });
 
   it("a refused wallet payment keeps the order in AWAIT_PAYMENT and points at transfer", () => {
@@ -1125,12 +1133,12 @@ describe("order outcomes", () => {
     assert.deepEqual(effectTypes(retried), [EFFECTS.CREATE_ORDER]);
   });
 
-  it("the order-created buttons offer Pay now and Cancel only", () => {
+  it("the order-created buttons offer Cancel only", () => {
     const s = mkSession(STATES.CONFIRM, { ...fullPickupCart(), pendingOrder: true });
     const out = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
     const buttonsReply = out.replies.find((r) => r.kind === REPLY.BUTTONS);
     assert.ok(buttonsReply, "order-created always gets a buttons message now");
-    assert.deepEqual(buttonIds(buttonsReply), ["paynow", "cancelorder"]);
+    assert.deepEqual(buttonIds(buttonsReply), ["cancelorder"]);
   });
 
   it("a stale 'I've paid' tap does nothing", () => {

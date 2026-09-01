@@ -2,7 +2,7 @@ const asyncHandler = require("express-async-handler");
 const { orderRepo, customerRepo } = require("../../repositories");
 const botCheck = require("../../services/botCheck.service");
 const { toE164 } = require("../../utils/phone");
-const { placeOrder, updatePickupTrucks, payOrder, cancelOrder, withExpiresAt } = require("../../services/order.service");
+const { placeOrder, updatePickupTrucks, cancelOrder, withExpiresAt } = require("../../services/order.service");
 const {
   buildReached,
   currentStage,
@@ -270,52 +270,28 @@ const getMyOrderByRef = asyncHandler(async (req, res) => {
 });
 
 /**
- * POST /api/customer/orders/:id/pay — the customer settles their OWN unpaid
- * order from their wallet balance (the self-service "Pay from wallet" action).
+ * Self-service "Pay from wallet" — withdrawn.
  *
- * The shared payOrder service places the hold, drives Pending→Paid, and issues
- * the ticket + commission in one transaction. `customerId` scopes it to the
- * caller: a foreign order 404s under the row lock, never confirmed. An empty
- * balance is a 400, an already-paid or non-Pending order a 409 — all surfaced
- * from the service with the customer-facing message.
+ * Both of these (by id and by order reference) settled a customer's order out
+ * of their wallet balance. That is exactly the automatic draw the finance desk
+ * asked to be rid of: it confirmed an order against money whose origin nothing
+ * recorded, and the finance report then had to guess which bank credit had
+ * paid for it. An order is now paid by naming the bank statement line that
+ * paid for it, which only the desk can do (see db/migrations/0021).
+ *
+ * Kept as an explicit 410 rather than deleted, so an app still holding the old
+ * button gets an answer it can show a human instead of a 404 that reads like a
+ * bug. The audit log records no customer ever having used either endpoint.
  */
-const payMyOrder = asyncHandler(async (req, res) => {
-  const order = await payOrder({
-    orderId: Number(req.params.id),
-    customerId: req.customer.id,
-    actor: { type: "customer", customerId: req.customer.id },
-  });
+const SELF_PAY_WITHDRAWN =
+  "Orders are now confirmed by our finance desk against the bank transfer you sent. Send your payment to the account on your order and it will be confirmed against that order — no wallet balance is drawn.";
 
-  res.json({
-    success: true,
-    message: `Order ${order.orderNumber} paid from your wallet balance.`,
-    data: { order: await withExpiresAt(await withOwnerDetail(order)) },
-  });
+const payMyOrder = asyncHandler(async (req, res) => {
+  res.status(410).json({ success: false, message: SELF_PAY_WITHDRAWN });
 });
 
-/**
- * POST /api/customer/orders/by-ref/:ref/pay — pay an unpaid order from wallet
- * balance keyed by its order NUMBER (the reference the apps hold on the history
- * and detail screens), so a customer can settle an older order, not only the
- * one they just placed. Ownership-scoped identically to the by-id pay.
- */
 const payMyOrderByRef = asyncHandler(async (req, res) => {
-  const found = await orderRepo.findByNumber(req.params.ref);
-  if (!found || found.customerId !== req.customer.id) {
-    return res.status(404).json({ success: false, message: "Order not found" });
-  }
-
-  const order = await payOrder({
-    orderId: found.id,
-    customerId: req.customer.id,
-    actor: { type: "customer", customerId: req.customer.id },
-  });
-
-  res.json({
-    success: true,
-    message: `Order ${order.orderNumber} paid from your wallet balance.`,
-    data: { order: await withExpiresAt(await withOwnerDetail(order)) },
-  });
+  res.status(410).json({ success: false, message: SELF_PAY_WITHDRAWN });
 });
 
 /**

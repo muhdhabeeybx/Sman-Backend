@@ -60,6 +60,9 @@ const waMessageSchema = require("./waMessage");
 const waTemplateSchema = require("./waTemplate");
 const bankAccountSchema = require("./bankAccount");
 const bankStatementSchema = require("./bankStatement");
+// After ./order, ./bankStatement, ./bankAccount, ./deposit and ./staff —
+// orderPayment destructures all five at load time.
+const orderPaymentSchema = require("./orderPayment");
 const depotProductCommissionSchema = require("./depotProductCommission");
 const commissionSchema = require("./commission");
 const customerLicenseSchema = require("./companyLicense");
@@ -101,6 +104,7 @@ module.exports = {
   ...ticketSchema,
   ...depositSchema,
   ...orderDepositAllocationSchema,
+  ...orderPaymentSchema,
   ...expectedPaymentSchema,
   ...walletHoldSchema,
   ...deliveryCustomerSchema,

@@ -115,6 +115,153 @@ async function ensureTestCustomer() {
   });
 }
 
+
+/**
+ * Pay an order the only way an order can now be paid: against a bank statement
+ * line recorded on it.
+ *
+ * Fixtures used to do this with `orderService.payOrder({ orderId, actor })`,
+ * which credited a wallet and drew the order's total back out of it. That path
+ * is gone (see db/migrations/0021), and with it the ability to mark an order
+ * paid without saying what paid for it.
+ *
+ * So the helper manufactures the evidence: one UNMATCHED statement line for
+ * exactly `amount` (the order's outstanding balance by default), on a bank
+ * account shared by the whole test run, then confirms the order against it.
+ * Passing a smaller `amount` produces a part payment, which is the shape a
+ * real part payment has too.
+ *
+ * @param {number} orderId
+ * @param {number} [amount]  defaults to whatever the order still owes
+ * @returns the updated order
+ */
+let sharedBankAccount = null;
+let sharedStatement = null;
+let statementLineSeq = 0;
+
+/** The one bank account and statement every payment fixture hangs off. */
+async function ensureFixtureBankAccount() {
+  if (sharedBankAccount) return sharedBankAccount;
+  const { db } = require("../config/db");
+  const { bankAccounts, bankStatements } = require("../db/schema");
+  const stamp = Date.now().toString().slice(-8);
+  [sharedBankAccount] = await db
+    .insert(bankAccounts)
+    .values({
+      bankName: "Test Bank",
+      accountName: "SOROMAN TEST FIXTURES",
+      accountNumber: `90${stamp}`,
+      status: "Active",
+    })
+    .returning();
+  [sharedStatement] = await db
+    .insert(bankStatements)
+    .values({ bankAccountId: sharedBankAccount.id, filename: `fixtures-${stamp}.csv` })
+    .returning();
+  return sharedBankAccount;
+}
+
+async function payOrderWithStatementLine(orderId, amount = null) {
+  // Required late: config/db must not be reached before dotenv has run, and
+  // these modules pull it in transitively.
+  const { db } = require("../config/db");
+  const { eq } = require("drizzle-orm");
+  const {
+    orders, bankStatementLines,
+  } = require("../db/schema");
+  const orderService = require("../services/order.service");
+
+  await ensureFixtureBankAccount();
+
+  const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
+  if (!order) throw new Error(`payOrderWithStatementLine: order ${orderId} not found`);
+  const owing = Number(order.totalAmount) - Number(order.amountPaid || 0);
+  const value = amount == null ? owing : Number(amount);
+
+  statementLineSeq += 1;
+  const key = `${Date.now().toString(36)}-${statementLineSeq}`;
+  const [line] = await db
+    .insert(bankStatementLines)
+    .values({
+      statementId: sharedStatement.id,
+      bankAccountId: sharedBankAccount.id,
+      txnDate: new Date(),
+      amount: String(value),
+      depositor: "TEST FIXTURE PAYER",
+      narration: `Fixture payment for order ${orderId}`,
+      bankRef: `FIXREF-${key}`,
+      dedupKey: `FIXDEDUP-${key}`,
+      status: "UNMATCHED",
+    })
+    .returning();
+
+  return orderService.confirmOrderPayment({
+    orderId,
+    bankAccountId: sharedBankAccount.id,
+    lineIds: [line.id],
+    actor: { type: "system" },
+    notifyWhatsApp: false,
+  });
+}
+
+
+/**
+ * A wallet hold as the old payment path left one: the balance already debited,
+ * an `active` row against the order.
+ *
+ * placeHold() is gone — orders are no longer paid out of a wallet (see
+ * db/migrations/0021) — but holds placed under that flow are still active in
+ * the live data and have to resolve correctly when their orders are cancelled
+ * or deleted. Tests covering that resolution need to be able to create one, so
+ * the fixture writes it directly rather than through a function that no longer
+ * exists.
+ */
+async function seedLegacyHold({ customerId, orderId, amount, description = "legacy hold" }) {
+  const { db } = require("../config/db");
+  const { walletHolds } = require("../db/schema");
+  const { customerRepo: repo } = require("../repositories");
+
+  const debited = await repo.debitBalance(customerId, Number(amount));
+  if (!debited) throw new Error("seedLegacyHold: customer balance cannot cover the hold");
+  const [hold] = await db
+    .insert(walletHolds)
+    .values({ customerId, orderId, amount: String(amount), description })
+    .returning();
+  return hold;
+}
+
+
+/**
+ * An UNMATCHED bank statement line for `amount`, on the shared fixture
+ * account — the raw material a payment is made of.
+ *
+ * For tests that drive the HTTP surface (`POST /api/orders/:id/payments`) and
+ * so need the ids rather than a finished payment.
+ */
+async function makeStatementLine(amount, depositor = "TEST FIXTURE PAYER") {
+  const { db } = require("../config/db");
+  const { bankStatementLines } = require("../db/schema");
+
+  await ensureFixtureBankAccount();
+  statementLineSeq += 1;
+  const key = `${Date.now().toString(36)}-${statementLineSeq}`;
+  const [line] = await db
+    .insert(bankStatementLines)
+    .values({
+      statementId: sharedStatement.id,
+      bankAccountId: sharedBankAccount.id,
+      txnDate: new Date(),
+      amount: String(amount),
+      depositor,
+      narration: `NIP/${depositor}/${key}`,
+      bankRef: `FIXREF-${key}`,
+      dedupKey: `FIXDEDUP-${key}`,
+      status: "UNMATCHED",
+    })
+    .returning();
+  return { line, bankAccountId: sharedBankAccount.id, lineIds: [line.id] };
+}
+
 module.exports = {
   NATIVE_TRANSPORT,
   TEST_STAFF,
@@ -124,4 +271,7 @@ module.exports = {
   staffToken,
   staffTokenWithRoles,
   closeDb,
+  payOrderWithStatementLine,
+  seedLegacyHold,
+  makeStatementLine,
 };

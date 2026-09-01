@@ -18,6 +18,7 @@ const walletService = require("../../services/wallet.service");
 const { generateTicketForTruck } = require("../../services/ticket.service");
 const orderStatus = require("../../services/orderStatus.service");
 const orderService = require("../../services/order.service");
+const orderPaymentService = require("../../services/orderPayment.service");
 const { placeOrder, withExpiresAt } = orderService;
 
 /** Small helper: an HTTP error the error handler renders with its status. */
@@ -764,34 +765,114 @@ const getPayableOrders = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { orders: await withExpiresAt(orders) } });
 });
 
-const payOrder = asyncHandler(async (req, res) => {
-  const order = await orderService.payOrder({
+/**
+ * Confirm payment on an order from the bank statement lines that paid for it.
+ *
+ * Replaces the old "pay from wallet" endpoint. The desk names bank rows; it
+ * does not name an amount, and there is no balance to draw on.
+ */
+const confirmOrderPayment = asyncHandler(async (req, res) => {
+  const order = await orderService.confirmOrderPayment({
     orderId: Number(req.params.id),
-    // Omitted by the plain "Pay" button, which still settles the order in full.
-    // Present when finance is confirming an instalment.
-    amount: req.body?.amount ?? null,
+    bankAccountId: Number(req.body.bankAccountId),
+    lineIds: req.body.lineIds.map(Number),
+    note: req.body.note || "",
     actor: { type: "staff", staffId: req.user.id },
   });
 
-  const outstanding = Number(order.totalAmount) - Number(order.amountPaid ?? 0);
+  const summary = await orderPaymentService.summarizeOrder(order.id);
   const partPaid = order.paymentStatus === "Part Paid";
 
   res.json({
     success: true,
     message: partPaid
-      ? `Part payment of ₦${Number(order.amountPaid).toLocaleString()} confirmed for order ${order.orderNumber}. ₦${outstanding.toLocaleString()} still expected; ${orderService.releasableQuantity(order).toLocaleString()} litres may be ticketed.`
-      : `Order ${order.orderNumber} paid successfully from wallet`,
+      ? `Part payment confirmed for ${order.orderNumber}: ₦${summary.received.toLocaleString()} received, ₦${summary.shortfall.toLocaleString()} still expected. ${orderService.releasableQuantity(order).toLocaleString()} litres may be ticketed.`
+      : summary.surplus > 0
+        ? `${order.orderNumber} paid. ₦${summary.surplus.toLocaleString()} was received beyond the order value and is held against this order — transfer it to another order if it was meant for one.`
+        : `${order.orderNumber} paid — ₦${summary.received.toLocaleString()} matched to the bank statement.`,
     data: {
       order: await withExpiresAt(order),
       // What the desk needs next, without a second round trip to work it out.
       payment: {
-        amountPaid: Number(order.amountPaid ?? 0),
-        outstanding,
+        ...summary,
         releasableQuantity: orderService.releasableQuantity(order),
         fullyPaid: !partPaid,
       },
     },
   });
+});
+
+/** Every payment recorded against one order, with its bank details. */
+const getOrderPayments = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const [payments, summary] = await Promise.all([
+    orderPaymentService.listForOrder(orderId),
+    orderPaymentService.summarizeOrder(orderId),
+  ]);
+  res.json({ success: true, data: { payments, summary } });
+});
+
+/**
+ * Take a payment back off an order — it was matched to the wrong one.
+ *
+ * The statement line returns to the unmatched pool so it can be recorded
+ * against the order it really belongs to.
+ */
+const removeOrderPayment = asyncHandler(async (req, res) => {
+  const { removed, summary } = await orderPaymentService.removePayment({
+    paymentId: Number(req.params.paymentId),
+    staffId: req.user.id,
+    reason: req.body.reason,
+  });
+
+  res.json({
+    success: true,
+    message: removed.statementLineId
+      ? `Payment of ₦${Number(removed.amount).toLocaleString()} removed. Its bank statement line is back in the unmatched pool.`
+      : `Payment of ₦${Number(removed.amount).toLocaleString()} removed.`,
+    data: { summary },
+  });
+});
+
+/**
+ * Move surplus from this order to another one.
+ *
+ * The sanctioned replacement for what used to be done as a wallet transfer
+ * with the destination typed into a description field.
+ */
+const transferOrderPayment = asyncHandler(async (req, res) => {
+  const result = await orderPaymentService.transferSurplus({
+    fromOrderId: Number(req.params.id),
+    toOrderId: Number(req.body.toOrderId),
+    amount: Number(req.body.amount),
+    reason: req.body.reason,
+    staffId: req.user.id,
+  });
+
+  res.json({
+    success: true,
+    message: `₦${Number(req.body.amount).toLocaleString()} moved to the destination order. Both orders now show the movement.`,
+    data: result,
+  });
+});
+
+/** Undo a transfer, both legs together. */
+const reverseOrderPaymentTransfer = asyncHandler(async (req, res) => {
+  const result = await orderPaymentService.reverseTransfer({
+    transferId: Number(req.params.transferId),
+    staffId: req.user.id,
+    reason: req.body?.reason || "",
+  });
+  res.json({ success: true, message: "Transfer reversed on both orders.", data: result });
+});
+
+/** Orders currently holding money beyond their own value. */
+const getOrdersWithSurplus = asyncHandler(async (req, res) => {
+  const rows = await orderPaymentService.findOrdersWithSurplus({
+    limit: req.query.limit,
+    customerId: req.query.customerId,
+  });
+  res.json({ success: true, data: { orders: rows } });
 });
 
 /** Per-truck ceiling, matching the limit order.service enforces at creation. */
@@ -1153,66 +1234,6 @@ const reconcileOrderEffects = asyncHandler(async (req, res) => {
   });
 });
 
-/**
- * POST /orders/:id/rematch-funding — point a paid order at the statement
- * line(s) that actually paid for it.
- *
- * For the case the matching flow had no answer to: the wrong line was
- * matched, the order is already paid, and a MATCHED line could never be
- * released again — so the finance report named the wrong payment for that
- * order permanently. See walletService.rematchOrderFunding for the ordering
- * the money movement depends on.
- */
-const rematchOrderFunding = asyncHandler(async (req, res) => {
-  const orderId = Number(req.params.id);
-  const { bankAccountId, lineIds, description } = req.body;
-
-  const order = await orderRepo.findById(orderId);
-  if (!order) throw httpErr(404, "Order not found");
-  // A Part Paid order has landed money too, and it is just as capable of having
-  // been matched to the wrong statement line.
-  if (order.paymentStatus === "Unpaid") {
-    throw httpErr(409, "Only a paid order has a payment to re-match");
-  }
-
-  const result = await walletService.rematchOrderFunding({
-    orderId,
-    bankAccountId: Number(bankAccountId),
-    lineIds: lineIds.map(Number),
-    staffId: req.user?.id || null,
-    description: description || "",
-  });
-
-  if (!result.success) {
-    return res.status(400).json({ success: false, message: result.message });
-  }
-
-  await auditLogRepo.record({
-    entityType: "order",
-    entityId: orderId,
-    action: "order.funding_rematched",
-    actor: { type: "staff", staffId: req.user.id },
-    metadata: {
-      replacedDepositIds: result.replacedDepositIds,
-      newDepositIds: result.newDeposits.map((d) => d.id),
-      lineIds: lineIds.map(Number),
-      newTotal: result.newTotal,
-    },
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
-
-  res.json({
-    success: true,
-    message: "Payment re-matched — the previous statement line is back in the unmatched pool",
-    data: {
-      newTotal: result.newTotal,
-      unattributed: result.unattributed,
-      replaced: result.replacedDepositIds.length,
-    },
-  });
-});
-
 // Edit anything about an order short of its status — reassign it to another
 // customer, move it to a different PFI, correct its date, quantity, price or
 // logistics text. See orderService.updateOrder for why status/paymentStatus
@@ -1240,7 +1261,6 @@ module.exports = {
   getOrderById,
   createOrder,
   updateOrder,
-  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   generateOrderTickets,
@@ -1252,6 +1272,11 @@ module.exports = {
   gateOutTruck,
   getPayableOrders,
   deleteOrder,
-  payOrder,
+  confirmOrderPayment,
+  getOrderPayments,
+  removeOrderPayment,
+  transferOrderPayment,
+  reverseOrderPaymentTransfer,
+  getOrdersWithSurplus,
   reconcileOrderEffects,
 };

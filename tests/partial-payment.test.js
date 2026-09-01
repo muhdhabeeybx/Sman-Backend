@@ -18,9 +18,13 @@ const {
   orderTrucks,
   tickets,
   auditLogs,
+  bankAccounts,
+  bankStatements,
+  bankStatementLines,
+  orderPayments,
 } = require("../db/schema");
 const orderService = require("../services/order.service");
-const walletService = require("../services/wallet.service");
+const orderPaymentService = require("../services/orderPayment.service");
 const { closeDb } = require("./helpers");
 
 /**
@@ -42,6 +46,8 @@ describe("part payment", () => {
   let customer;
   let depot;
   let product;
+  let bankAccount;
+  let statement;
   let orderSeq = 0;
 
   const makeOrder = async (quantity = QUANTITY) => {
@@ -63,13 +69,50 @@ describe("part payment", () => {
     return order;
   };
 
-  const fund = (amount) =>
-    walletService.credit({
-      customerId: customer.id,
-      amount,
-      description: "part-payment test funding",
-      reference: `partpay-${suffix}-${Math.random().toString(36).slice(2)}`,
+  /**
+   * Pay `amount` against the order, the only way an order can now be paid: an
+   * unmatched bank statement line for exactly that figure, recorded on it.
+   *
+   * This replaced a `fund(amount)` helper that credited the customer's wallet
+   * and let payOrder draw the order's total back out of it. The distinction
+   * matters to what these tests can still prove — under the old helper an
+   * order could be marked paid with no bank row anywhere behind it, which is
+   * the state the finance desk could not audit.
+   */
+  let lineSeq = 0;
+  const pay = async (order, amount) => {
+    lineSeq += 1;
+    const key = `${suffix}-${lineSeq}`;
+    const [line] = await db
+      .insert(bankStatementLines)
+      .values({
+        statementId: statement.id,
+        bankAccountId: bankAccount.id,
+        txnDate: new Date("2026-08-20T09:00:00Z"),
+        amount: String(amount),
+        depositor: "PART PAY FIXTURE",
+        narration: `NIP/PART PAY FIXTURE/${key}`,
+        bankRef: `PPREF-${key}`,
+        dedupKey: `PPDEDUP-${key}`,
+        status: "UNMATCHED",
+      })
+      .returning();
+
+    return orderService.confirmOrderPayment({
+      orderId: order.id,
+      bankAccountId: bankAccount.id,
+      lineIds: [line.id],
+      actor: staffActor,
+      notifyWhatsApp: false,
     });
+  };
+
+  const paymentsFor = (orderId) =>
+    db
+      .select()
+      .from(orderPayments)
+      .where(eq(orderPayments.orderId, orderId))
+      .orderBy(orderPayments.id);
 
   const reload = async (id) => {
     const [row] = await db.select().from(orders).where(eq(orders.id, id));
@@ -114,6 +157,21 @@ describe("part payment", () => {
         category: "PMS",
       })
       .returning();
+
+    [bankAccount] = await db
+      .insert(bankAccounts)
+      .values({
+        bankName: "Zenith Bank",
+        accountName: "SOROMAN PART PAY TEST",
+        accountNumber: `13777${String(Date.now()).slice(-5)}`,
+        status: "Active",
+      })
+      .returning();
+
+    [statement] = await db
+      .insert(bankStatements)
+      .values({ bankAccountId: bankAccount.id, filename: `partpay-${suffix}.csv` })
+      .returning();
   });
 
   after(async () => {
@@ -121,6 +179,7 @@ describe("part payment", () => {
       await db.select({ id: orders.id }).from(orders).where(eq(orders.customerId, customer.id))
     ).map((r) => r.id);
     if (orderIds.length) {
+      await db.delete(orderPayments).where(inArray(orderPayments.orderId, orderIds));
       await db.delete(orderDepositAllocations).where(inArray(orderDepositAllocations.orderId, orderIds));
       await db.delete(tickets).where(inArray(tickets.orderId, orderIds));
       await db.delete(orderTrucks).where(inArray(orderTrucks.orderId, orderIds));
@@ -131,6 +190,9 @@ describe("part payment", () => {
     await db.delete(deposits).where(eq(deposits.customerId, customer.id));
     await db.delete(orders).where(eq(orders.customerId, customer.id));
     await db.delete(customers).where(eq(customers.id, customer.id));
+    await db.delete(bankStatementLines).where(eq(bankStatementLines.statementId, statement.id));
+    await db.delete(bankStatements).where(eq(bankStatements.id, statement.id));
+    await db.delete(bankAccounts).where(eq(bankAccounts.id, bankAccount.id));
     await db.delete(products).where(eq(products.id, product.id));
     await db.delete(depots).where(eq(depots.id, depot.id));
     await closeDb();
@@ -190,16 +252,10 @@ describe("part payment", () => {
 
   // ── The payment flow ────────────────────────────────────────────────────
 
-  test("paying half marks the order Part Paid and holds only that half", async () => {
+  test("paying half marks the order Part Paid and records only that half", async () => {
     const order = await makeOrder();
-    await fund(HALF);
 
-    const paid = await orderService.payOrder({
-      orderId: order.id,
-      amount: HALF,
-      actor: staffActor,
-      notifyWhatsApp: false,
-    });
+    const paid = await pay(order, HALF);
 
     assert.equal(paid.paymentStatus, "Part Paid");
     assert.equal(Number(paid.amountPaid), HALF);
@@ -212,54 +268,46 @@ describe("part payment", () => {
     assert.equal(row.status, "Released");
     assert.ok(row.paymentConfirmedAt, "payment confirmed timestamp is stamped");
 
-    // Only the half was taken. The wallet, and the hold, agree.
-    const [hold] = await db.select().from(walletHolds).where(eq(walletHolds.orderId, order.id));
-    assert.equal(Number(hold.amount), HALF);
-    assert.equal(hold.status, "active");
+    // One payment row, carrying the bank line that paid it.
+    const rows = await paymentsFor(order.id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].source, "statement");
+    assert.equal(Number(rows[0].amount), HALF);
 
-    const ledger = await walletService.getLedgerBalance(customer.id);
-    const [c] = await db.select().from(customers).where(eq(customers.id, customer.id));
-    assert.equal(ledger, Number(c.balance), "ledger and balance still agree");
-    assert.equal(Number(c.balance), 0, "the whole funded half is committed to the order");
+    const summary = await orderPaymentService.summarizeOrder(order.id);
+    assert.equal(summary.shortfall, TOTAL - HALF, "the balance is reported, not covered");
+    assert.equal(summary.surplus, 0);
 
     assert.equal(orderService.releasableQuantity(row), 50000);
   });
 
-  test("the balance is refused if it exceeds what is still owed", async () => {
+  test("paying more than the order owes leaves the surplus ON the order", async () => {
+    // The inversion. This used to be refused outright ("more than this order
+    // still owes"), because the amount was a figure somebody typed and could
+    // therefore be checked before the money moved. It is now the amount on a
+    // bank statement line — money that has already arrived — so refusing it
+    // would mean refusing to record a payment the bank has already taken.
+    //
+    // It lands on the order, in full, and shows as surplus. Moving it is an
+    // explicit transfer to another order, which is the whole point.
     const order = await makeOrder();
-    await fund(TOTAL);
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
+    const after = await pay(order, HALF + 1000);
 
-    await assert.rejects(
-      () =>
-        orderService.payOrder({
-          orderId: order.id,
-          amount: HALF + 1000,
-          actor: staffActor,
-          notifyWhatsApp: false,
-        }),
-      (err) => err.status === 400 && /more than this order still owes/i.test(err.message),
-      "over-paying an order must be refused, not silently over-held",
-    );
+    assert.equal(after.paymentStatus, "Paid");
+    assert.equal(Number(after.amountPaid), TOTAL + 1000);
 
-    // Refused cleanly: nothing moved.
-    const row = await reload(order.id);
-    assert.equal(Number(row.amountPaid), HALF);
-    const [hold] = await db.select().from(walletHolds).where(eq(walletHolds.orderId, order.id));
-    assert.equal(Number(hold.amount), HALF);
+    const summary = await orderPaymentService.summarizeOrder(order.id);
+    assert.equal(summary.received, TOTAL + 1000);
+    assert.equal(summary.applied, TOTAL, "the order's value is settled, and no more");
+    assert.equal(summary.surplus, 1000, "the extra ₦1,000 sits here until somebody moves it");
   });
 
-  test("paying the balance tops up the same hold and completes the order", async () => {
+  test("paying the balance settles the order, as a second payment row", async () => {
     const order = await makeOrder();
-    await fund(TOTAL);
 
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
-    const settled = await orderService.payOrder({
-      orderId: order.id,
-      amount: HALF,
-      actor: staffActor,
-      notifyWhatsApp: false,
-    });
+    await pay(order, HALF);
+    const settled = await pay(order, HALF);
 
     assert.equal(settled.paymentStatus, "Paid");
 
@@ -268,48 +316,42 @@ describe("part payment", () => {
     assert.equal(Number(row.amountPaid), TOTAL);
     assert.equal(orderService.releasableQuantity(row), QUANTITY);
 
-    // ONE hold, grown to the full total — not two. wallet_holds is uniquely
-    // indexed on order_id, and topping up is what keeps that true.
-    const holds = await db.select().from(walletHolds).where(eq(walletHolds.orderId, order.id));
-    assert.equal(holds.length, 1, "an instalment must top up the hold, never place a second");
-    assert.equal(Number(holds[0].amount), TOTAL);
-
-    const ledger = await walletService.getLedgerBalance(customer.id);
-    const [c] = await db.select().from(customers).where(eq(customers.id, customer.id));
-    assert.equal(ledger, Number(c.balance), "ledger and balance still agree after both instalments");
+    // Two instalments, two rows, each traceable to its own bank line. The old
+    // model grew a single wallet hold instead, which is why an instalment left
+    // nothing behind saying which transfer it was.
+    const rows = await paymentsFor(order.id);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.reduce((s, r) => s + Number(r.amount), 0), TOTAL);
+    assert.equal(new Set(rows.map((r) => r.statementLineId)).size, 2, "two distinct bank lines");
   });
 
   test("a fully-paid order refuses further payment", async () => {
     const order = await makeOrder();
-    await fund(TOTAL);
-    await orderService.payOrder({ orderId: order.id, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, TOTAL);
 
     await assert.rejects(
-      () => orderService.payOrder({ orderId: order.id, amount: 1000, actor: staffActor, notifyWhatsApp: false }),
+      () => pay(order, 1000),
       (err) => err.status === 409,
     );
   });
 
-  test("paying with no amount still settles the order in full, as it always did", async () => {
+  test("one line covering the whole total settles the order outright", async () => {
     const order = await makeOrder();
-    await fund(TOTAL);
 
-    const paid = await orderService.payOrder({ orderId: order.id, actor: staffActor, notifyWhatsApp: false });
+    const paid = await pay(order, TOTAL);
 
     assert.equal(paid.paymentStatus, "Paid");
     const row = await reload(order.id);
     assert.equal(Number(row.amountPaid), TOTAL);
     assert.equal(row.status, "Released");
+    assert.equal((await paymentsFor(order.id)).length, 1);
   });
 
-  test("an omitted amount on a part-paid order settles just the remainder", async () => {
+  test("a second line for the remainder settles a part-paid order", async () => {
     const order = await makeOrder();
-    await fund(TOTAL);
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
 
-    // No amount named: "settle it" means the outstanding balance, not the
-    // order total — which would try to take another ₦24.1m.
-    await orderService.payOrder({ orderId: order.id, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
 
     const row = await reload(order.id);
     assert.equal(row.paymentStatus, "Paid");
@@ -320,12 +362,11 @@ describe("part payment", () => {
 
   test("a part-paid order cannot lapse", async () => {
     const order = await makeOrder();
-    await fund(HALF);
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
 
     const row = await reload(order.id);
     // Backdated well past any expiry window: an unfunded order this old would
-    // lapse. This one has money held against it and must not.
+    // lapse. This one has money against it and must not.
     const ancient = { ...row, status: "Pending", createdAt: new Date("2020-01-01") };
     assert.equal(
       orderService.isOrderExpired(ancient),
@@ -340,16 +381,15 @@ describe("part payment", () => {
   test("commission is pro-rata, and grows as the balance is paid", async () => {
     const commissionService = require("../services/commission.service");
     const order = await makeOrder();
-    await fund(TOTAL);
 
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
     await commissionService.createForOrder(order.id);
 
     const [half] = await db.select().from(commissions).where(eq(commissions.orderId, order.id));
     assert.ok(half, "a part payment creates a commission");
     assert.equal(Number(half.quantity), 50000, "commission is due on the litres paid for, not the order");
 
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
     await commissionService.createForOrder(order.id);
 
     const [full] = await db.select().from(commissions).where(eq(commissions.orderId, order.id));
@@ -359,11 +399,10 @@ describe("part payment", () => {
     assert.equal(rows.length, 1, "one commission row per order, re-snapshotted — not one per instalment");
   });
 
-  test("the finance report shows sales value, amount paid and the differential", async () => {
+  test("the finance report shows sales value, what was received, and the gap", async () => {
     const { orderRepo } = require("../repositories");
     const order = await makeOrder();
-    await fund(HALF);
-    await orderService.payOrder({ orderId: order.id, amount: HALF, actor: staffActor, notifyWhatsApp: false });
+    await pay(order, HALF);
 
     // Searched by the fixture's own unique order number, not by id. An id
     // search also runs an ILIKE '%<id>%' over every order number, so under the
@@ -375,12 +414,61 @@ describe("part payment", () => {
 
     assert.ok(row, "a part-paid order appears on the report by default, not only once fully paid");
     assert.equal(Number(row.totalAmount), TOTAL, "sales value");
-    assert.equal(Number(row.amountPaid), HALF, "amount paid");
-    assert.equal(row.outstandingAmount, TOTAL - HALF, "differential still expected");
-    assert.equal(row.partPaid, true);
+    assert.equal(row.received, HALF, "what actually arrived");
+    assert.equal(row.applied, HALF);
+    assert.equal(row.shortfall, TOTAL - HALF, "still expected");
+    assert.equal(row.surplus, 0);
+    assert.equal(row.reconciled, true, "a bank statement line stands behind it");
 
-    assert.equal(report.totals.totalPaid, HALF);
-    assert.equal(report.totals.totalOutstanding, TOTAL - HALF);
+    // Every figure on the row comes off a payment row the reader can check.
+    assert.equal(row.payments.length, 1);
+    assert.equal(row.payments[0].source, "statement");
+    assert.equal(row.payments[0].depositor, "PART PAY FIXTURE");
+    assert.ok(row.payments[0].bankRef, "the teller reference is on the report");
+
+    assert.equal(report.totals.totalReceived, HALF);
+    assert.equal(report.totals.totalShortfall, TOTAL - HALF);
+    assert.equal(report.totals.totalSurplus, 0);
     assert.equal(report.totals.partPaidCount, 1);
+    assert.equal(report.totals.reconciledCount, 1);
+    assert.equal(report.totals.unreconciledCount, 0);
+  });
+
+  test("the report can be filtered to only what an auditor can verify", async () => {
+    const { orderRepo } = require("../repositories");
+
+    // An order marked paid with no bank evidence at all — the shape all 5,741
+    // pre-cutover orders have after migration 0021's backfill.
+    const legacy = await makeOrder();
+    await db
+      .update(orders)
+      .set({
+        paymentStatus: "Paid",
+        amountPaid: String(TOTAL),
+        paymentConfirmedAt: new Date(),
+      })
+      .where(eq(orders.id, legacy.id));
+    await db.insert(orderPayments).values({
+      orderId: legacy.id,
+      amount: String(TOTAL),
+      source: "legacy",
+      note: "no bank record",
+    });
+
+    const reconciled = await orderRepo.findFinanceReport({
+      search: legacy.orderNumber,
+      reconciliation: "reconciled",
+    });
+    assert.equal(reconciled.orders.length, 0, "no statement line, so it is not verifiable");
+
+    const unreconciled = await orderRepo.findFinanceReport({
+      search: legacy.orderNumber,
+      reconciliation: "unreconciled",
+    });
+    const row = unreconciled.orders.find((r) => r.id === legacy.id);
+    assert.ok(row, "and it is findable, as exactly that");
+    assert.equal(row.reconciled, false);
+    assert.equal(row.payments[0].bankRef, "", "no bank reference is invented for it");
+    assert.equal(row.payments[0].depositor, "");
   });
 });

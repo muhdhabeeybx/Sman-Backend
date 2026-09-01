@@ -3,20 +3,12 @@ const axios = require("axios");
 const { virtualAccountName } = require("../utils/helpers");
 const { db } = require("../config/db");
 
-const {
-  customerRepo,
-  deliverySaleRepo,
-  depositRepo,
-  orderRepo,
-  depotRepo,
-  lpgStationRepo,
-  bankAccountRepo,
-} = require("../repositories");
-const walletService = require("./wallet.service");
-const { generateTicketForOrder } = require("./ticket.service");
-const orderStatus = require("./orderStatus.service");
+// Almost everything this module reached for went with the settlement sweep and
+// the Paystack paths below it. What survives is the commented-out reinstatement
+// code and a live `verifyTransaction`; the repositories the disabled blocks
+// reference are re-required at the top of this file when any of them is
+// reinstated.
 const { QUEUES, enqueue } = require("../config/queue");
-const commissionService = require("./commission.service");
 
 /**
  * Push "payment received" into the customer's WhatsApp conversation. Only the
@@ -333,134 +325,35 @@ const processPaystackPayment = async () => ({
   message: "Paystack payments are disabled — wallets are funded by manual deposit only",
 });
 
-const processUnpaidOrdersForCustomer = async (customerId) => {
-  const unpaidOrders = (await orderRepo.findUnpaidByCustomer(customerId)) || [];
-  const processedOrders = [];
-
-  for (const order of unpaidOrders) {
-    const orderTotal = Number(order.totalAmount || 0);
-    if (orderTotal <= 0) continue;
-
-    // Expire stale orders before attempting payment — prevents the settlement
-    // sweep from paying an order at a price that is no longer current. Lazy
-    // require to avoid circular dependency (order.service → payment.service).
-    try {
-      const { expireIfStale } = require("./order.service");
-      const expired = await expireIfStale({ orderId: order.id, customerId });
-      if (expired) continue;
-    } catch (expErr) {
-      console.error(`[settlement] expiry check failed for ${order.orderNumber}:`, expErr.message);
-      continue;
-    }
-
-    // Hold + transition in ONE transaction so a crash between them never
-    // leaves an orphaned active hold locking the customer's funds.
-    try {
-      await db.transaction(async (tx) => {
-        const holdResult = await walletService.placeHold({
-          customerId,
-          orderId: order.id,
-          amount: orderTotal,
-          description: `Auto-payment for Order ${order.orderNumber} (Wallet Balance)`,
-        }, tx);
-
-        if (!holdResult.success) {
-          // alreadyHeld on an unpaid order means an earlier run placed the hold
-          // and crashed before marking it paid — finish that job. An inactive
-          // (released/converted) hold is history, not a claim; skip.
-          if (!holdResult.alreadyHeld) return;
-          const existingHold = await walletService.findHoldByOrder(order.id, tx);
-          if (!existingHold || existingHold.status !== "active") return;
-        }
-
-        // Only Pending orders can be paid. Non-Pending orders that are still
-        // Unpaid are an edge case that should not be force-transitioned.
-        if (order.status !== "Pending") return;
-
-        await orderStatus.transition(order.id, "Paid", {
-          tx,
-          actor: { type: "system" },
-          action: "order.paid",
-          // amountPaid alongside the status: this sweep settles the order in
-          // full, and the finance report reads that column for what was
-          // received. Left at its 0 default it would report the whole order
-          // value as still outstanding on an order that is fully paid.
-          set: {
-            paymentConfirmedAt: new Date(),
-            paymentStatus: "Paid",
-            amountPaid: String(orderTotal),
-          },
-          metadata: { via: "settlement", amount: String(orderTotal) },
-        });
-
-        // Settled orders clear for loading in the same breath — see
-        // orderStatus.releaseOnPayment.
-        await orderStatus.releaseOnPayment(order.id, {
-          tx,
-          actor: { type: "system" },
-          metadata: { via: "settlement" },
-        });
-      });
-    } catch (txErr) {
-      console.error(`[settlement] failed to pay order ${order.orderNumber}:`, txErr.message);
-      continue;
-    }
-
-    // Post-commit effects — idempotent, best-effort, never block the sweep.
-    notifyWhatsAppPaymentConfirmed(order.id);
-
-    try {
-      await generateTicketForOrder(order.id);
-      console.log(`Order ${order.orderNumber} automatically paid with wallet balance and ticket generated.`);
-    } catch (tktErr) {
-      console.error(`Failed to generate ticket for auto-paid order ${order.orderNumber}:`, tktErr.message);
-    }
-
-    try {
-      await commissionService.createForOrder(order.id);
-    } catch (commErr) {
-      console.error(`Failed to create commission for order ${order.orderNumber}:`, commErr.message);
-    }
-
-    // Transfer depot share to subaccount (best-effort)
-    try {
-      await transferToDepotSubaccount(order);
-    } catch (subErr) {
-      console.error(`[settlement] subaccount transfer failed for order ${order.orderNumber}:`, subErr.message);
-    }
-
-    processedOrders.push(order);
-  }
-
-  return processedOrders;
-};
-
-/**
- * Settle every unpaid order that the customer's wallet can cover.
+/* --- Settlement sweep (removed — order-first payments) --------------------
  *
- * Previously called findAll({ limit: 1000 }) — which clamps to 100 — so it
- * silently covered only the hundred most recently created customers. The
- * `limit: 1000` at the call site read as deliberate coverage, which is exactly
- * why nobody looked again.
+ * processUnpaidOrdersForCustomer() walked a customer's unpaid orders and paid
+ * every one the wallet balance could cover, oldest first. processAllUnpaidOrders()
+ * did that for every customer with a balance.
  *
- * Both counts are logged: a sweep that considers 0 customers and a sweep that
- * settles 0 orders look identical in the return value, and only one of them is
- * a problem.
- */
-const processAllUnpaidOrders = async () => {
-  const funded = await customerRepo.findWithPositiveBalance();
-
-  let totalProcessed = 0;
-  for (const cust of funded) {
-    const processed = await processUnpaidOrdersForCustomer(cust.id);
-    totalProcessed += processed.length;
-  }
-
-  console.log(
-    `[settlement] considered ${funded.length} customer(s) with a balance; settled ${totalProcessed} order(s)`
+ * This is the sharpest form of the automatic draw the finance desk asked to be
+ * rid of. A deposit recorded to settle one order could silently settle a
+ * different, older one, and nothing anywhere recorded which bank payment had
+ * paid for which order — the finance report then inferred it, wrongly, and the
+ * desk spent its time reconciling a machine's guesses.
+ *
+ * The HTTP endpoint has returned 410 since before this change (see
+ * settlement.controller.js). The functions are removed rather than left
+ * dormant so that re-enabling the endpoint cannot quietly reinstate the
+ * behaviour: an order is paid by naming the bank statement line that paid for
+ * it, and only the finance desk can do that. See db/migrations/0021 and
+ * services/orderPayment.service.js.
+ * ------------------------------------------------------------------------ */
+const settlementSweepRemoved = () => {
+  throw Object.assign(
+    new Error(
+      "The settlement sweep is gone. An order is paid by matching the bank statement line that paid for it — see services/orderPayment.service.js.",
+    ),
+    { status: 410 },
   );
-  return totalProcessed;
 };
+const processUnpaidOrdersForCustomer = settlementSweepRemoved;
+const processAllUnpaidOrders = settlementSweepRemoved;
 
 /* --- Paystack auto-split transfers (disabled — manual deposit only) -------
  * transferToDepotSubaccount / transferToStationSubaccount pushed the depot's

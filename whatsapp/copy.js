@@ -413,7 +413,14 @@ const awaitPaymentNudge = (order) => {
 };
 
 const awaitPaymentCancelButton = () => "Cancel this order";
-const payNowButton = () => "Pay now";
+/**
+ * The answer to a "Pay now" tap from a session that rendered the button before
+ * it was withdrawn. The button itself is gone (see engine.awaitPaymentButtonDefs)
+ * and so is the wallet payment path behind it — an order is confirmed against
+ * the bank transfer that paid for it, by the finance desk.
+ */
+const payNowWithdrawn = () =>
+  "Just send the transfer to the account on your order — there is nothing to tap. Our finance desk confirms your order against your bank transfer as soon as it lands, and you will get a message here the moment it is confirmed.";
 
 const cancelOrderConfirm = (orderNumber) =>
   `Do you wish to cancel ${orderNumber ? `order *${orderNumber}*` : "this order"}? This order has not been paid. No amount will be charged, and the stock will be released.`;
@@ -533,7 +540,7 @@ module.exports = {
   orderFailedGeneric,
   awaitPaymentNudge,
   awaitPaymentCancelButton,
-  payNowButton,
+  payNowWithdrawn,
   cancelOrderConfirm,
   cancelOrderButtons,
   orderCancelled,

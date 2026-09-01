@@ -4,7 +4,7 @@ const { loadContext } = require("./context");
 const { EFFECTS, INBOUND, REPLY } = require("./constants");
 const { customerRepo, orderRepo, waMessageRepo, waSessionRepo } = require("../repositories");
 const { toE164 } = require("../utils/phone");
-const { placeOrder, cancelOrder, payOrder, computeExpiresAt } = require("../services/order.service");
+const { placeOrder, cancelOrder, computeExpiresAt } = require("../services/order.service");
 const { orderExpiryHours, orderExpiryDisabled } = require("../config/orderExpiry");
 const { sendReply, sendTypingIndicator } = require("./client");
 const { QUEUES, enqueue } = require("../config/queue");
@@ -113,40 +113,6 @@ const performEffect = async (effect, { wamid, waPhone, inboundMessageId = null }
         // the engine tells the customer to call rather than pretending.
         console.error("[wa-pipeline] CANCEL_ORDER failed:", err.message);
         return { type: INBOUND.ORDER_FAILED, reason: "cancel" };
-      }
-    }
-
-    case EFFECTS.PAY_ORDER: {
-      try {
-        const order = await payOrder({
-          orderId: effect.payload.orderId,
-          customerId: effect.payload.customerId,
-          actor: { type: "customer", customerId: effect.payload.customerId },
-          // The engine replies "Payment received" synchronously below, so
-          // suppress payOrder's own async push — it would be a duplicate.
-          notifyWhatsApp: false,
-        });
-        return { type: INBOUND.PAYMENT_CONFIRMED, order };
-      } catch (err) {
-        // payOrder scopes to the customer and re-checks the balance, so this
-        // is a legitimate refusal (insufficient balance, already paid, or
-        // expired). The engine keeps unpaid orders on the transfer path, and
-        // offers reorder when the window has closed.
-        console.error("[wa-pipeline] PAY_ORDER failed:", err.message);
-        // Already paid — typically a bank-transfer settlement flipped the
-        // order to Paid between the menu render and this tap. That is a
-        // SUCCESS from the customer's view, not a failure: confirm it rather
-        // than telling them "we couldn't take the payment".
-        if (/already paid/i.test(err.message || "")) {
-          const order = await orderRepo
-            .findByIdFull(effect.payload.orderId)
-            .catch(() => null);
-          if (order) return { type: INBOUND.PAYMENT_CONFIRMED, order };
-        }
-        if (/expired/i.test(err.message || "")) {
-          return { type: INBOUND.ORDER_FAILED, reason: "expired", message: err.message };
-        }
-        return { type: INBOUND.ORDER_FAILED, reason: "pay", message: err.message };
       }
     }
 

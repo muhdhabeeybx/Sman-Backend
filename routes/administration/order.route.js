@@ -9,7 +9,6 @@ const {
   getOrderById,
   createOrder,
   updateOrder,
-  rematchOrderFunding,
   releaseOrder,
   cancelOrder,
   deleteOrder,
@@ -21,7 +20,12 @@ const {
   updateTruckLoad,
   gateOutTruck,
   getPayableOrders,
-  payOrder,
+  confirmOrderPayment,
+  getOrderPayments,
+  removeOrderPayment,
+  transferOrderPayment,
+  reverseOrderPaymentTransfer,
+  getOrdersWithSurplus,
   reconcileOrderEffects,
 } = require("../../controllers/administration/order.controller");
 
@@ -54,15 +58,6 @@ router.patch(
   updateOrder
 );
 
-// Correcting which statement line is recorded against a paid order. Not a
-// lifecycle transition — the order stays paid and its hold is untouched.
-router.post(
-  "/:id/rematch-funding",
-  verifyStaff,
-  validate({ params: orderSchemas.idParam, body: orderSchemas.rematchFunding }),
-  rematchOrderFunding
-);
-
 // Lifecycle transitions are role-gated to the desk that owns the action, and
 // each flows through the state machine (see services/orderStatus.service.js).
 // The raw `PUT /:id` status setter and `POST /:id/complete` are removed (H1):
@@ -83,12 +78,62 @@ router.post(
   cancelOrder
 );
 
-router.post(
-  "/:id/pay",
+// Orders holding money beyond their own value — where the desk finds surplus
+// that needs moving. Before /:id so the literal segment wins the match.
+router.get(
+  "/with-surplus",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to pay" }),
-  validate({ params: orderSchemas.idParam, body: orderSchemas.payOrder }),
-  payOrder
+  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  getOrdersWithSurplus
+);
+
+/**
+ * Confirm payment on an order from the bank statement lines that paid for it.
+ *
+ * This is the ONLY way an order becomes paid. There is no endpoint that draws
+ * on a customer's wallet balance, and no amount is accepted from the client —
+ * see schemas/order.schema.js and db/migrations/0021.
+ */
+router.post(
+  "/:id/payments",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to confirm payment" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.confirmOrderPayment }),
+  confirmOrderPayment
+);
+
+router.get(
+  "/:id/payments",
+  authenticateStaff,
+  validate({ params: orderSchemas.idParam }),
+  getOrderPayments
+);
+
+// Correcting a mis-matched payment: the row goes, its statement line returns
+// to the unmatched pool. Finance only, and a reason is required.
+router.delete(
+  "/:id/payments/:paymentId",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.removeOrderPayment }),
+  removeOrderPayment
+);
+
+// Move this order's surplus to another order.
+router.post(
+  "/:id/payments/transfer",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to move money between orders" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.transferOrderPayment }),
+  transferOrderPayment
+);
+
+router.delete(
+  "/:id/payments/transfer/:transferId",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  validate({ params: orderSchemas.idParam }),
+  reverseOrderPaymentTransfer
 );
 
 // Re-run post-payment effects for a paid order whose ticket/commission failed.

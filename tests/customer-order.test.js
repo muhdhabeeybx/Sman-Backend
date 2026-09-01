@@ -10,7 +10,7 @@ const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis } = require("../db/schema");
 const { customerRepo, orderRepo, ticketRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
-const { NATIVE_TRANSPORT, closeDb } = require("./helpers");
+const { NATIVE_TRANSPORT, closeDb, payOrderWithStatementLine } = require("./helpers");
 
 const PORTAL_AUTH = "/api/customer/auth";
 const ORDERS = "/api/customer/orders";
@@ -154,8 +154,10 @@ describe("customer portal — a customer places their own order", () => {
     assert.ok(res.body.errors.some((e) => e.path === "companyName"));
   });
 
-  test("a funded wallet pays an order after placement, advancing it to Paid", async () => {
+  test("confirming a statement line against an order advances it to Paid and Released", async () => {
     const { customer, accessToken } = await registerActiveCustomer("2");
+    // Funded on purpose: the balance must stay exactly where it is. Under the
+    // old flow this is the money that would have paid the order.
     await customerRepo.creditBalance(customer.id, TOTAL);
 
     const res = await request(app)
@@ -168,9 +170,9 @@ describe("customer portal — a customer places their own order", () => {
     assert.equal(res.body.data.order.paymentStatus, "Unpaid");
     assert.equal(res.body.data.order.status, "Pending");
 
-    // Finance pays the order from the customer's wallet balance (the manual
-    // "Pay Now" action). This is the path the admin /pay endpoint invokes.
-    await orderService.payOrder({ orderId: res.body.data.order.id, actor: { type: "system" } });
+    // Finance confirms the order against the bank statement line that paid for
+    // it — the only way an order becomes Paid now.
+    await payOrderWithStatementLine(res.body.data.order.id);
 
     const order = await orderRepo.findById(res.body.data.order.id);
     assert.equal(order.paymentStatus, "Paid");
@@ -178,7 +180,11 @@ describe("customer portal — a customer places their own order", () => {
     // waiting for a desk to wave it through.
     assert.equal(order.status, "Released", "payment cleared it for loading");
     assert.ok(order.releasedAt, "releasedAt stamped by the payment");
-    assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet spent");
+    assert.equal(
+      Number((await customerRepo.findById(customer.id)).balance),
+      TOTAL,
+      "the wallet was not touched — the bank statement line paid for the order",
+    );
   });
 
   test("a customer may choose fleet delivery too, not only pickup", async () => {
@@ -349,7 +355,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send(body());
     assert.equal(paid.status, 201);
-    await orderService.payOrder({ orderId: paid.body.data.order.id, actor: { type: "system" } });
+    await payOrderWithStatementLine(paid.body.data.order.id);
     assert.equal((await orderRepo.findById(paid.body.data.order.id)).status, "Released");
 
     // Status filter: only Pending.
@@ -392,10 +398,20 @@ describe("customer portal — a customer places their own order", () => {
     assert.equal(empty.body.data.pagination.total, 0);
   });
 
-  // ── Self-service wallet payment: POST /api/customer/orders/:id/pay ─────────
+  // ── Self-service payment: withdrawn ───────────────────────────────────────
+  //
+  // POST /orders/:id/pay and /orders/by-ref/:ref/pay settled a customer's own
+  // order out of their wallet balance. Both are gone with the rest of the
+  // wallet payment path (db/migrations/0021): an order is confirmed by the
+  // finance desk against the bank statement line that paid for it, so there is
+  // nothing for a customer to press. What the tests below pin is that the
+  // endpoints answer with a sentence a person can act on, and — the part that
+  // actually matters — that no order can be moved through them.
 
-  test("a customer pays their own unpaid order from wallet balance", async () => {
+  test("self-service pay is withdrawn, and moves nothing", async () => {
     const { customer, accessToken } = await registerActiveCustomer("20");
+    // Funded, deliberately: a balance that WOULD have covered the order in full
+    // is exactly the case that must no longer be able to pay for it.
     await customerRepo.creditBalance(customer.id, TOTAL);
 
     const placed = await request(app)
@@ -405,77 +421,40 @@ describe("customer portal — a customer places their own order", () => {
     assert.equal(placed.status, 201, JSON.stringify(placed.body));
     const orderId = placed.body.data.order.id;
 
-    const paid = await request(app)
-      .post(`${ORDERS}/${orderId}/pay`)
-      .set("Authorization", `Bearer ${accessToken}`)
-      .send({});
-    assert.equal(paid.status, 200, JSON.stringify(paid.body));
-    assert.equal(paid.body.data.order.paymentStatus, "Paid");
-    assert.equal(paid.body.data.order.status, "Released", "paying releases it");
-    assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet spent");
-  });
-
-  test("paying with an empty wallet is refused (400), the order stays Unpaid", async () => {
-    const { accessToken } = await registerActiveCustomer("21");
-    const placed = await request(app)
-      .post(ORDERS)
-      .set("Authorization", `Bearer ${accessToken}`)
-      .send(body());
-    const orderId = placed.body.data.order.id;
-
     const res = await request(app)
       .post(`${ORDERS}/${orderId}/pay`)
       .set("Authorization", `Bearer ${accessToken}`)
       .send({});
-    assert.equal(res.status, 400, JSON.stringify(res.body));
-    assert.match(res.body.message, /insufficient/i);
+    assert.equal(res.status, 410, JSON.stringify(res.body));
+    assert.match(res.body.message, /finance desk|bank transfer/i);
+
     assert.equal((await orderRepo.findById(orderId)).paymentStatus, "Unpaid", "still unpaid");
+    assert.equal(
+      Number((await customerRepo.findById(customer.id)).balance),
+      TOTAL,
+      "and the balance was not touched",
+    );
   });
 
-  test("a customer cannot pay another customer's order — 404, and nothing is touched", async () => {
-    const owner = await registerActiveCustomer("22");
-    const intruder = await registerActiveCustomer("23");
-    await customerRepo.creditBalance(intruder.customer.id, TOTAL);
-
-    const placed = await request(app)
-      .post(ORDERS)
-      .set("Authorization", `Bearer ${owner.accessToken}`)
-      .send(body());
-    const orderId = placed.body.data.order.id;
-
-    const res = await request(app)
-      .post(`${ORDERS}/${orderId}/pay`)
-      .set("Authorization", `Bearer ${intruder.accessToken}`)
-      .send({});
-    assert.equal(res.status, 404, JSON.stringify(res.body));
-    // The owner's order is untouched and the intruder's wallet is not debited.
-    assert.equal((await orderRepo.findById(orderId)).paymentStatus, "Unpaid");
-    assert.equal(Number((await customerRepo.findById(intruder.customer.id)).balance), TOTAL);
-  });
-
-  test("paying an already-paid order is refused (409)", async () => {
-    const { customer, accessToken } = await registerActiveCustomer("24");
+  test("self-service pay by reference is withdrawn too", async () => {
+    const { customer, accessToken } = await registerActiveCustomer("21");
     await customerRepo.creditBalance(customer.id, TOTAL);
     const placed = await request(app)
       .post(ORDERS)
       .set("Authorization", `Bearer ${accessToken}`)
       .send(body());
-    const orderId = placed.body.data.order.id;
+    const ref = placed.body.data.order.orderNumber;
 
-    const first = await request(app)
-      .post(`${ORDERS}/${orderId}/pay`)
+    const res = await request(app)
+      .post(`${ORDERS}/by-ref/${encodeURIComponent(ref)}/pay`)
       .set("Authorization", `Bearer ${accessToken}`)
       .send({});
-    assert.equal(first.status, 200, JSON.stringify(first.body));
-
-    const second = await request(app)
-      .post(`${ORDERS}/${orderId}/pay`)
-      .set("Authorization", `Bearer ${accessToken}`)
-      .send({});
-    assert.equal(second.status, 409, JSON.stringify(second.body));
+    assert.equal(res.status, 410, JSON.stringify(res.body));
+    assert.equal((await orderRepo.findById(placed.body.data.order.id)).paymentStatus, "Unpaid");
+    assert.equal(Number((await customerRepo.findById(customer.id)).balance), TOTAL);
   });
 
-  test("paying requires authentication", async () => {
+  test("paying still requires authentication — the withdrawal is not a way in", async () => {
     const res = await request(app).post(`${ORDERS}/1/pay`).send({});
     assert.equal(res.status, 401);
   });
@@ -507,7 +486,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send(body());
     const orderId = placed.body.data.order.id;
-    await orderService.payOrder({ orderId, actor: { type: "system" } });
+    await payOrderWithStatementLine(orderId);
 
     const res = await request(app)
       .post(`${ORDERS}/${orderId}/cancel`)
@@ -539,44 +518,6 @@ describe("customer portal — a customer places their own order", () => {
     assert.equal(res.status, 401);
   });
 
-  // ── Pay an older order by reference: POST /orders/by-ref/:ref/pay ──────────
-
-  test("a customer pays an older order from wallet by its reference", async () => {
-    const { customer, accessToken } = await registerActiveCustomer("34");
-    await customerRepo.creditBalance(customer.id, TOTAL);
-    const placed = await request(app)
-      .post(ORDERS)
-      .set("Authorization", `Bearer ${accessToken}`)
-      .send(body());
-    const ref = placed.body.data.order.orderNumber;
-
-    const paid = await request(app)
-      .post(`${ORDERS}/by-ref/${encodeURIComponent(ref)}/pay`)
-      .set("Authorization", `Bearer ${accessToken}`)
-      .send({});
-    assert.equal(paid.status, 200, JSON.stringify(paid.body));
-    assert.equal(paid.body.data.order.paymentStatus, "Paid");
-    assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet spent");
-  });
-
-  test("a customer cannot pay another customer's order by reference — 404", async () => {
-    const owner = await registerActiveCustomer("35");
-    const intruder = await registerActiveCustomer("36");
-    await customerRepo.creditBalance(intruder.customer.id, TOTAL);
-    const placed = await request(app)
-      .post(ORDERS)
-      .set("Authorization", `Bearer ${owner.accessToken}`)
-      .send(body());
-    const ref = placed.body.data.order.orderNumber;
-
-    const res = await request(app)
-      .post(`${ORDERS}/by-ref/${encodeURIComponent(ref)}/pay`)
-      .set("Authorization", `Bearer ${intruder.accessToken}`)
-      .send({});
-    assert.equal(res.status, 404, JSON.stringify(res.body));
-    assert.equal((await orderRepo.findById(placed.body.data.order.id)).paymentStatus, "Unpaid");
-  });
-
   // ── Cancel an order by reference: POST /orders/by-ref/:ref/cancel ──────────
 
   test("a customer cancels their own unpaid order by its reference", async () => {
@@ -604,7 +545,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send(body());
     const { id, orderNumber } = placed.body.data.order;
-    await orderService.payOrder({ orderId: id, actor: { type: "system" } });
+    await payOrderWithStatementLine(id);
 
     const res = await request(app)
       .post(`${ORDERS}/by-ref/${encodeURIComponent(orderNumber)}/cancel`)
@@ -648,7 +589,7 @@ describe("customer portal — a customer places their own order", () => {
       .set("Authorization", `Bearer ${accessToken}`)
       .send(body());
     const orderId = placed.body.data.order.id;
-    await orderService.payOrder({ orderId, actor: { type: "system" } });
+    await payOrderWithStatementLine(orderId);
 
     const ticket = await ticketRepo.findByOrder(orderId);
     assert.ok(ticket, "payment generated a loading ticket");

@@ -252,47 +252,17 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
     });
   });
 
-  test("the PAY_ORDER effect settles an unpaid order from wallet balance", async () => {
-    const customer = await customerRepo.findByPhone(PHONE);
-    // A fresh, own order — Unpaid on creation, like every order now.
-    const { order } = await placeOrder({
-      customerId: customer.id,
-      state: this.depot.state,
-      depotId: this.depot.id,
-      productId: this.product.id,
-      quantity: 3000,
-      deliveryType: "pickup",
-      trucks: [],
-    });
-    assert.equal(order.paymentStatus, "Unpaid");
-    // Fund the wallet so "Pay now" can actually cover it.
-    await walletService.credit({
-      customerId: customer.id,
-      amount: Number(order.totalAmount),
-      description: "Top-up for PAY_ORDER test",
-      reference: `PIPE-PAYNOW-${RUN}`,
-    });
-
+  test("there is no PAY_ORDER effect left to perform", async () => {
+    // PAY_ORDER settled an order out of the customer's wallet balance, which
+    // is the automatic draw the whole order-first change exists to remove (see
+    // db/migrations/0021). Both the effect and the button that emitted it are
+    // gone; a payload from a session that predates the change reaches the
+    // unknown-effect branch and is ignored rather than moving money.
     const inbound = await performEffect(
-      { type: "PAY_ORDER", payload: { orderId: order.id, customerId: customer.id } },
+      { type: "PAY_ORDER", payload: { orderId: 1, customerId: 1 } },
       { wamid: `wamid.PIPE-${RUN}-PAYNOW`, waPhone: PHONE }
     );
-
-    assert.equal(inbound.type, INBOUND.PAYMENT_CONFIRMED, "success re-enters as a confirmed payment");
-    assert.equal(inbound.order.id, order.id);
-    const paid = await orderRepo.findById(order.id);
-    assert.equal(paid.paymentStatus, "Paid");
-
-    // A stale second tap on an already-paid order RE-CONFIRMS rather than
-    // erroring: an order that is paid — whether by this tap's predecessor or
-    // by a bank-transfer settlement between menu render and tap — should tell
-    // the customer "payment received", never "we couldn't take the payment".
-    const repeat = await performEffect(
-      { type: "PAY_ORDER", payload: { orderId: order.id, customerId: customer.id } },
-      { wamid: `wamid.PIPE-${RUN}-PAYNOW2`, waPhone: PHONE }
-    );
-    assert.equal(repeat.type, INBOUND.PAYMENT_CONFIRMED);
-    assert.equal(repeat.order.id, order.id);
+    assert.equal(inbound, null, "an unknown effect performs nothing and returns nothing");
   });
 
   test("a stale inbound recovered by the janitor is skipped, never replayed", async () => {

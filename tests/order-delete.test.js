@@ -10,7 +10,7 @@ const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis } = require("../db/schema");
 const { customerRepo, pfiRepo, bankAccountRepo, orderPfiAllocationRepo } = require("../repositories");
 const { placeOrder } = require("../services/order.service");
-const { staffTokenWithRoles, closeDb } = require("./helpers");
+const { staffTokenWithRoles, closeDb, seedLegacyHold } = require("./helpers");
 
 const RUN = Date.now();
 const UNIT_PRICE = 100;
@@ -145,8 +145,7 @@ describe("DELETE /api/orders/:id — hard delete must give the PFI its stock bac
     await walletService.credit({ customerId, amount: total, description: "delete-test funding" });
     const funded = Number((await customerRepo.findById(customerId)).balance);
 
-    const held = await walletService.placeHold({ customerId, orderId: order.id, amount: total });
-    assert.equal(held.success, true, "the hold must be placed for this test to mean anything");
+    await seedLegacyHold({ customerId, orderId: order.id, amount: total });
     assert.equal(
       Number((await customerRepo.findById(customerId)).balance),
       funded - total,

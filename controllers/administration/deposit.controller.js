@@ -21,134 +21,33 @@ const getDepositById = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { deposit } });
 });
 
+/**
+ * POST /deposits — withdrawn.
+ *
+ * This credited a CUSTOMER's wallet, either from bank statement lines or from
+ * a typed-in amount. It is the front door to the model the finance desk asked
+ * to be rid of: money arriving against a person rather than against the order
+ * it was sent to pay for.
+ *
+ * Leaving it open would defeat everything else in this change. A statement
+ * line consumed here disappears into a balance, and the only way it can then
+ * reach an order is by being drawn on — which is the automatic draw that made
+ * the report unauditable in the first place. Blocking it is what makes the
+ * guarantee hold: every statement line either sits unmatched in the pool or is
+ * recorded against exactly one order.
+ *
+ * Money that genuinely is not for any one order — an advance, a deposit
+ * against future business — has no home in this system by design, and should
+ * be matched to the order it eventually pays for, when that order exists.
+ *
+ * 410 rather than 404: a page still offering the button gets a sentence it can
+ * show the user. See db/migrations/0021 and services/orderPayment.service.js.
+ */
 const createDeposit = asyncHandler(async (req, res) => {
-  const {
-    customer: customerId,
-    amount,
-    type = "credit",
-    description,
-    reference,
-    bankAccountId,
-    bankName,
-    accountName,
-    accountNumber,
-    depositorName,
-    paymentDate,
-    paystackDetails,
-    lineIds,
-    orderId,
-  } = req.body;
-
-  const fromStatementLines = Array.isArray(lineIds) && lineIds.length > 0;
-
-  if (!customerId || (!amount && !fromStatementLines)) {
-    return res.status(400).json({
-      success: false,
-      message: "Customer and amount are required",
-    });
-  }
-
-  if (type !== "credit") {
-    return res.status(400).json({
-      success: false,
-      message: "Deposit only handles money coming in (type must be 'credit')",
-    });
-  }
-
-  const customer = await customerRepo.findById(customerId);
-  if (!customer) {
-    return res.status(404).json({ success: false, message: "Customer not found" });
-  }
-
-  // Several statement lines, one deposit each: every line's own amount,
-  // depositor, date and reference stay intact rather than being summed into
-  // one row — see wallet.service.js. A claim/credit failure partway through
-  // throws and rolls the whole transaction back (handled by errorHandler).
-  if (fromStatementLines) {
-    if (!bankAccountId) {
-      return res.status(400).json({
-        success: false,
-        message: "bankAccountId is required to claim statement lines",
-      });
-    }
-
-    const result = await walletService.creditFromStatementLines({
-      customerId,
-      bankAccountId: Number(bankAccountId),
-      lineIds: lineIds.map(Number),
-      staffId: req.user?.id || null,
-      description,
-      orderId: orderId ? Number(orderId) : null,
-    });
-
-    if (!result.success) {
-      return res.status(400).json({ success: false, message: result.message });
-    }
-
-    const fullDeposits = await Promise.all(
-      result.deposits.map((d) => depositRepo.findByIdFull(d.id)),
-    );
-    return res.status(201).json({
-      success: true,
-      message: `Recorded ${fullDeposits.length} deposit${fullDeposits.length === 1 ? "" : "s"} from ${result.claimedLines.length} bank statement line${result.claimedLines.length === 1 ? "" : "s"}`,
-      data: { deposits: fullDeposits, totalAmount: result.totalAmount, deposit: fullDeposits[0] },
-    });
-  }
-
-  const metadata = paystackDetails || {
-    paymentMethod: "manual_bank_transfer",
-    bankAccountId: bankAccountId || null,
-    bankName: bankName || null,
-    accountName: accountName || null,
-    accountNumber: accountNumber || null,
-    senderName: depositorName || null,
-    paidAt: paymentDate || new Date().toISOString(),
-    channel: "manual_bank_transfer",
-    // No statement line to stamp matchedOrderId on for a typed-amount
-    // deposit — this is the only trail linking it back to the order it was
-    // recorded to confirm.
-    ...(orderId ? { orderId: Number(orderId) } : {}),
-  };
-
-  const depositDescription =
-    description ||
-    (bankName && accountNumber
-      ? `Manual deposit into ${bankName} (${accountNumber})`
-      : "Manual bank deposit");
-
-  const depositRef =
-    reference && reference.trim()
-      ? reference.trim()
-      : `DEP-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
-
-  // Ledger row and balance move together or not at all; a duplicate
-  // reference is reported instead of crediting the balance twice.
-  const result = await walletService.credit({
-    customerId,
-    amount: Number(amount),
-    description: depositDescription,
-    reference: depositRef,
-    paystackDetails: metadata,
-    recordedBy: req.user?.id || null,
-  });
-
-  if (result.alreadyProcessed) {
-    return res.status(409).json({
-      success: false,
-      message: result.message,
-    });
-  }
-
-  if (!result.success) {
-    return res.status(400).json({ success: false, message: result.message });
-  }
-
-  const fullDeposit = await depositRepo.findByIdFull(result.deposit.id);
-
-  res.status(201).json({
-    success: true,
-    message: "Deposit recorded successfully",
-    data: { deposit: fullDeposit },
+  res.status(410).json({
+    success: false,
+    message:
+      "Deposits are no longer recorded against a customer. Open the order the money was sent for and confirm it there against the bank statement line — that way the payment stays attached to the order, and the finance report can be checked against the statement line by line.",
   });
 });
 

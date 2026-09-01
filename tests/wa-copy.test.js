@@ -178,7 +178,7 @@ test("every copy string, pinned", (t) => {
     orderFailedGeneric: copy.orderFailedGeneric(SUPPORT),
     awaitPaymentNudge: copy.awaitPaymentNudge(ORDER),
     awaitPaymentCancelButton: copy.awaitPaymentCancelButton(),
-    payNowButton: copy.payNowButton(),
+    payNowWithdrawn: copy.payNowWithdrawn(),
     cancelOrderConfirm: copy.cancelOrderConfirm("SOR-1042"),
     cancelOrderButtons: copy.cancelOrderButtons(),
     orderCancelled: copy.orderCancelled(ORDER),

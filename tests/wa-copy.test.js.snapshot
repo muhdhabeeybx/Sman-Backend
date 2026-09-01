@@ -180,7 +180,7 @@ exports[`every copy string, pinned 1`] = `
   "orderFailedGeneric": "An error occurred while creating your order. Please note that no amount has been charged. Please try again shortly, or contact us on +234-800-SOROMAN.",
   "awaitPaymentNudge": "We are still awaiting your transfer for order *SOR-1042*. Amount: ₦25,500,000. Bank: Wema Bank. Account Number: *9930001111*.\\n\\nPlease pay by *Wed, 12 Aug, 16:42* — after that this price is no longer held.",
   "awaitPaymentCancelButton": "Cancel this order",
-  "payNowButton": "Pay now",
+  "payNowWithdrawn": "Just send the transfer to the account on your order — there is nothing to tap. Our finance desk confirms your order against your bank transfer as soon as it lands, and you will get a message here the moment it is confirmed.",
   "cancelOrderConfirm": "Do you wish to cancel order *SOR-1042*? This order has not been paid. No amount will be charged, and the stock will be released.",
   "cancelOrderButtons": {
     "cancelorder:yes": "Yes, cancel it",

@@ -16,6 +16,7 @@ const {
   orderDepositAllocations,
 } = require("../db/schema");
 const walletService = require("../services/wallet.service");
+const { customerRepo } = require("../repositories");
 const { closeDb } = require("./helpers");
 
 // The property under test throughout:
@@ -198,26 +199,36 @@ describe("wallet ledger", () => {
     await assertLedgerMatchesBalance(customer.id);
   });
 
-  test("hold lifecycle: place reduces balance, release restores it", async () => {
-    const order = await makeOrder(1500);
+  /**
+   * A hold as the old payment path left one: the balance already debited, an
+   * `active` row against the order.
+   *
+   * placeHold() is gone — orders are no longer paid out of a wallet (see
+   * db/migrations/0021) — but 106 holds placed under that flow are still
+   * active in the live data, and they have to resolve correctly as their
+   * orders cancel or complete. That resolution is what these two tests cover,
+   * so the fixture writes the hold directly rather than through a function
+   * that no longer exists.
+   */
+  const seedLegacyHold = async (order, amount) => {
+    await customerRepo.debitBalance(customer.id, amount);
+    const [hold] = await db
+      .insert(walletHolds)
+      .values({
+        customerId: customer.id,
+        orderId: order.id,
+        amount: String(amount),
+        description: `legacy hold for ${order.orderNumber}`,
+      })
+      .returning();
+    return hold;
+  };
 
-    const placed = await walletService.placeHold({
-      customerId: customer.id,
-      orderId: order.id,
-      amount: 1500,
-    });
-    assert.equal(placed.success, true);
+  test("a legacy hold releases back to the balance, once and only once", async () => {
+    const order = await makeOrder(1500);
+    await seedLegacyHold(order, 1500);
     assert.equal(await currentBalance(customer.id), 2500);
     await assertLedgerMatchesBalance(customer.id);
-
-    // Second hold on the same order must fail, not stack.
-    const duplicate = await walletService.placeHold({
-      customerId: customer.id,
-      orderId: order.id,
-      amount: 1500,
-    });
-    assert.equal(duplicate.success, false);
-    assert.equal(duplicate.alreadyHeld, true);
 
     const released = await walletService.releaseHold(order.id);
     assert.equal(released.success, true);
@@ -232,14 +243,9 @@ describe("wallet ledger", () => {
     assert.equal(await currentBalance(customer.id), 4000);
   });
 
-  test("converting a hold writes the debit ledger row without moving the balance", async () => {
+  test("converting a legacy hold writes the debit ledger row without moving the balance", async () => {
     const order = await makeOrder(3000);
-
-    await walletService.placeHold({
-      customerId: customer.id,
-      orderId: order.id,
-      amount: 3000,
-    });
+    await seedLegacyHold(order, 3000);
     assert.equal(await currentBalance(customer.id), 1000);
 
     const converted = await walletService.convertHold(order.id, "test conversion");
@@ -254,20 +260,5 @@ describe("wallet ledger", () => {
 
     const convertedTwice = await walletService.convertHold(order.id);
     assert.equal(convertedTwice.success, false);
-  });
-
-  test("concurrent holds cannot commit the same money twice", async () => {
-    // 1000 left; two 800 holds on different orders race.
-    const [orderA, orderB] = await Promise.all([makeOrder(800), makeOrder(800)]);
-
-    const results = await Promise.all([
-      walletService.placeHold({ customerId: customer.id, orderId: orderA.id, amount: 800 }),
-      walletService.placeHold({ customerId: customer.id, orderId: orderB.id, amount: 800 }),
-    ]);
-
-    const wins = results.filter((r) => r.success).length;
-    assert.equal(wins, 1, "exactly one concurrent hold must succeed");
-    assert.equal(await currentBalance(customer.id), 200);
-    await assertLedgerMatchesBalance(customer.id);
   });
 });

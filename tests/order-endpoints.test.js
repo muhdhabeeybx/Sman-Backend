@@ -10,7 +10,7 @@ const { db } = require("../config/db");
 const { orders, depots, products } = require("../db/schema");
 const { orderRepo, customerRepo, auditLogRepo, bankAccountRepo } = require("../repositories");
 const walletService = require("../services/wallet.service");
-const { staffTokenWithRoles, closeDb } = require("./helpers");
+const { staffTokenWithRoles, closeDb, seedLegacyHold } = require("./helpers");
 
 // depot/product are notNull FKs on orders — reuse an existing row or make one.
 // placeOrder pays into the depot's own bank account (manual deposit only —
@@ -192,7 +192,7 @@ describe("order lifecycle endpoints — role gates + state machine", () => {
     // wallet first so the hold can be taken.
     await customerRepo.creditBalance(customerId, amount);
     const startBalance = Number((await customerRepo.findById(customerId)).balance);
-    await walletService.placeHold({ customerId, orderId: order.id, amount, description: "test" });
+    await seedLegacyHold({ customerId, orderId: order.id, amount, description: "test" });
     assert.equal(
       Number((await customerRepo.findById(customerId)).balance),
       startBalance - amount,

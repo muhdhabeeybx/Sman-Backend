@@ -124,8 +124,9 @@ const credit = async (
         balanceAfter: asDecimal(updated.balance),
         paystackDetails,
         depositDate: depositDate || null,
-        // Starts fully unclaimed; allocateOrderFunding() draws it down as
-        // orders are paid from it.
+        // Starts fully unclaimed. Nothing draws it down any more — order
+        // payments no longer come out of the wallet — so on a new credit this
+        // stays equal to `amount` and reads as "never spent on an order".
         remainingAmount: asDecimal(value),
       })
       .returning();
@@ -511,176 +512,31 @@ const reassignHold = async ({ orderId, toCustomerId }, tx) => {
 };
 
 /**
- * How money reached an order. Recorded per allocation row so the report never
- * has to guess again — see db/migrations/0011.
+ * Order funding, allocation and holds — REMOVED (order-first payments).
  *
- *   BANK    a bank statement line matched to THIS order at confirm time
- *   WALLET  a draw from balance already sitting in the wallet
- *   LEGACY  written before any of this was recorded; unverifiable by design
+ * What stood here: ALLOCATION_SOURCE, findDepositsMatchedToOrder(),
+ * allocateOrderFunding() and deallocateOrderFunding(). Together they were the
+ * bookkeeping that tried, after the fact, to say which wallet credit had paid
+ * for which order.
+ *
+ * allocateOrderFunding ran in two passes. The first read the statement lines
+ * actually matched to the order. The SECOND — the one the finance desk was
+ * complaining about — took whatever the order still needed out of the rest of
+ * the wallet, oldest credit first, and recorded that walk as though it were a
+ * payment. An order short by ₦50,000 quietly consumed a slice of an unrelated
+ * person's transfer from three weeks earlier, and the report printed it under
+ * a bank reference that had nothing to do with the order.
+ *
+ * There is nothing left to allocate. A payment is recorded against the order
+ * it paid for, at the moment it is confirmed, in order_payments — see
+ * services/orderPayment.service.js and db/migrations/0021. No balance is ever
+ * drawn on to cover a shortfall; an order that is short stays short, visibly,
+ * which is the only state a finance desk can act on.
+ *
+ * order_deposit_allocations still exists and still holds the history this was
+ * all backfilled from. It is read-only now: nothing writes it.
  */
-const ALLOCATION_SOURCE = { BANK: "bank", WALLET: "wallet", LEGACY: "legacy" };
 
-/**
- * The deposits that were matched to THIS order, in the act of confirming it.
- *
- * Two records say so, and both are written at confirm time by
- * creditFromStatementLines()/rematchOrderFunding():
- *
- *   bank_statement_lines.matched_order_id  the line was claimed FOR this order
- *   deposits.paystack_details->>'orderId'  the deposit was recorded to confirm it
- *
- * The statement line is the stronger of the two — it is the row an auditor
- * will be holding — but a deposit typed in by hand has no line at all, so
- * both are consulted. Ordered oldest first so several tranches paid against
- * one order read in the order the bank lists them.
- */
-const findDepositsMatchedToOrder = async (customerId, orderId, tx) => {
-  const result = await tx.execute(sql`
-    SELECT d.id, d.amount, d.remaining_amount AS "remainingAmount"
-    FROM deposits d
-    WHERE d.customer_id = ${customerId}
-      AND d.type = 'credit'
-      AND (
-        EXISTS (
-          SELECT 1 FROM bank_statement_lines l
-          WHERE l.matched_deposit_id = d.id AND l.matched_order_id = ${orderId}
-        )
-        -- Guarded rather than cast outright: paystack_details is free-form
-        -- JSON going back to the gateway era, and one non-numeric orderId
-        -- anywhere in the table would abort the cast for every row.
-        OR (d.paystack_details->>'orderId' ~ '^[0-9]+$'
-            AND (d.paystack_details->>'orderId')::int = ${orderId})
-      )
-      -- Already written up against this order by an earlier attempt; a
-      -- retried hold must not allocate the same credit twice.
-      AND NOT EXISTS (
-        SELECT 1 FROM order_deposit_allocations a
-        WHERE a.deposit_id = d.id AND a.order_id = ${orderId}
-      )
-      -- A reversed credit is not a funding source. reverseDeposit() zeroes
-      -- remainingAmount precisely to cut the original off for future orders,
-      -- and pass 2 of allocateOrderFunding() honours that through its
-      -- remainingAmount > 0 filter — but pass 1 had no equivalent, and it
-      -- records the credit at FACE value rather than at what the order draws
-      -- from it. So a reversal left the husk fully able to match again.
-      --
-      -- That is what happened to order 11562. Its three statement lines were
-      -- unmatched (unmatchStatementDeposit: allocations deleted, credits
-      -- reversed, lines freed) and then re-matched, creating three fresh
-      -- credits. The reversal clears the husk's own reference and re-points
-      -- its statement line, but nothing clears paystack_details->>'orderId'
-      -- — so the OR branch above still matched all three husks, and
-      -- confirming the order wrote six allocation rows instead of three. Both
-      -- trios carried their face value into the amount column, so the finance
-      -- report added them up and reported 48.2m received against a 24.1m
-      -- order: an overpayment of exactly the order's own value, out of one
-      -- payment made once.
-      --
-      -- Matched on the reversal's own REV-<id> reference — the trail
-      -- reverseDeposit() documents as the link back to the original, there
-      -- being no schema column for it. deposits.reference is uniquely indexed
-      -- where non-null, so this identifies at most one row, and it survives
-      -- the husk's own reference being cleared (the REV- debit keeps its
-      -- own). Deliberately not keyed off remainingAmount = 0: a credit
-      -- legitimately spent to zero by other orders must still be reported
-      -- against this one at face value, which is what makes the surplus
-      -- traceable between orders.
-      AND NOT EXISTS (
-        SELECT 1 FROM deposits r
-        WHERE r.type = 'debit' AND r.reference = 'REV-' || d.id
-      )
-    ORDER BY d.created_at ASC, d.id ASC
-    FOR UPDATE OF d
-  `);
-  return result.rows ?? result;
-};
-
-/**
- * Write up where an order's payment came from.
- *
- * Two passes, and the order of them is the whole point:
- *
- *   1. The statement lines that were matched to this order. Each is recorded
- *      at its FACE value, because that is the figure on the bank statement
- *      this report gets checked against. What the order consumes of it is
- *      capped at the order's own value; any surplus stays in the wallet with
- *      its reference still attached, so a later manual draw can name where
- *      the balance came from.
- *
- *   2. Only whatever the order still needs after that, drawn from the rest of
- *      the wallet oldest-credit-first, and marked as a wallet draw.
- *
- * Pass 1 did not exist. Everything went through pass 2, which meant an order
- * confirmed against a specific bank credit was written up as slices of
- * whatever unclaimed money happened to be oldest — reading, on the report, as
- * a pile of small "transfers" from unrelated payers. The evidence for pass 1
- * was being recorded all along (matched_order_id), just never read.
- *
- * Purely additive bookkeeping: called from placeHold()/releaseHold() wrapped
- * in try/catch that only logs. A bug here must never be able to fail or roll
- * back an actual payment — the balance debit above this call is the real
- * money movement and already happened by the time this runs. Any remainder
- * left unallocated came from deposits that predate this ledger
- * (remainingAmount IS NULL, so the `gt` filter below excludes them) — that's
- * expected, not an error, and the finance report surfaces it as "not tracked."
- */
-const allocateOrderFunding = async (customerId, orderId, amount, tx) => {
-  let remaining = money(amount);
-  if (remaining <= 0) return;
-
-  /** Record one row and draw the deposit down by what the order consumed. */
-  const write = async (depositId, received, applied, source) => {
-    if (applied > 0) {
-      await tx
-        .update(deposits)
-        .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(applied)}` })
-        .where(eq(deposits.id, depositId));
-    }
-    await tx.insert(orderDepositAllocations).values({
-      orderId,
-      depositId,
-      amount: asDecimal(received),
-      appliedAmount: asDecimal(applied),
-      source,
-    });
-  };
-
-  // ── 1. What was actually matched to this order ──────────────────────────
-  const matched = await findDepositsMatchedToOrder(customerId, orderId, tx);
-  for (const d of matched) {
-    // Face value of the credit, whether or not this order needed all of it.
-    const received = money(d.amount);
-    if (received <= 0) continue;
-    // What it can still spend, against what the order still needs. A credit
-    // already partly spent elsewhere can only apply what is left of it.
-    const applied = Math.min(money(d.remainingAmount), remaining);
-    await write(d.id, received, Math.max(0, applied), ALLOCATION_SOURCE.BANK);
-    remaining -= Math.max(0, applied);
-  }
-
-  if (remaining <= 0) return;
-
-  // ── 2. The rest, from balance already in the wallet ─────────────────────
-  const matchedIds = new Set(matched.map((d) => Number(d.id)));
-  const candidates = await tx
-    .select({ id: deposits.id, remainingAmount: deposits.remainingAmount })
-    .from(deposits)
-    .where(and(eq(deposits.customerId, customerId), eq(deposits.type, "credit"), gt(deposits.remainingAmount, 0)))
-    .orderBy(asc(deposits.createdAt))
-    .for("update");
-
-  for (const d of candidates) {
-    if (remaining <= 0) break;
-    // Pass 1 already wrote a row for these, and the unique index on
-    // (order_id, deposit_id) would reject a second one anyway.
-    if (matchedIds.has(Number(d.id))) continue;
-    const take = Math.min(money(d.remainingAmount), remaining);
-    if (take <= 0) continue;
-
-    await write(d.id, take, take, ALLOCATION_SOURCE.WALLET);
-    remaining -= take;
-  }
-};
 
 /**
  * Undo a statement match outright: take the deposit back out of the wallet,
@@ -754,373 +610,37 @@ const unmatchStatementDeposit = async ({ depositId, staffId = null, description 
 };
 
 /**
- * Point an order at the statement line(s) that actually paid for it.
+ * rematchOrderFunding() — REMOVED (order-first payments).
  *
- * The situation this exists for: the wrong line was matched, the order is
- * already paid, and there was no way back — a MATCHED line could never be
- * released, so the mistake was permanent and the finance report named the
- * wrong payment for that order forever.
+ * It swapped which wallet deposit was recorded as having paid for an order:
+ * credit the replacement, reverse the mistake, free the old statement line.
+ * The ordering was delicate — the replacement had to be credited BEFORE the
+ * reversal, so the balance guard had money to work against — and the whole
+ * thing existed only because a MATCHED line could never otherwise be released.
  *
- * Order of operations matters and is not arbitrary. The replacement is
- * credited BEFORE the mistake is reversed, so the reversal's
- * balance-can't-go-negative guard has the new money to work against. Done the
- * other way round it would fail on every order whose funds are already
- * committed to a hold — which is every order this is for.
- *
- * The hold itself is never touched. The customer still owes the same money
- * and the order is still paid; only which deposit is recorded as having paid
- * it changes, plus the balance moving by (new − old) where the two differ.
- *
- * Old deposits that came from a statement line have that line returned to the
- * unmatched pool, so it can be matched to the order it really belongs to.
+ * The replacement is two plain operations, neither of which touches a balance:
+ * remove the wrong payment from the order (its statement line goes back to the
+ * unmatched pool) and record the right one. See
+ * services/orderPayment.service.js — removePayment() and
+ * recordFromStatementLines().
  */
-const rematchOrderFunding = async (
-  { orderId, bankAccountId, lineIds, staffId = null, description = "" },
-  tx,
-) => {
-  const run = async (trx) => {
-    const [order] = await trx
-      .select({ customerId: orders.customerId, totalAmount: orders.totalAmount })
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
-    if (!order) return { success: false, message: "Order not found" };
 
-    // The hold is the authority on what was actually taken, but orders paid
-    // before holds existed have allocations and no hold row — those are
-    // exactly the old mis-matches most in need of correcting, so the order's
-    // own total stands in rather than turning them away.
-    const [hold] = await trx
-      .select()
-      .from(walletHolds)
-      .where(eq(walletHolds.orderId, orderId))
-      .for("update")
-      .limit(1);
 
-    const customerId = hold ? hold.customerId : order.customerId;
-    const holdAmount = hold ? money(hold.amount) : money(order.totalAmount);
-
-    // What is on the order now, and which deposits those were. The applied
-    // figure is the one to give back — see deallocateOrderFunding.
-    const current = await trx
-      .select({
-        depositId: orderDepositAllocations.depositId,
-        appliedAmount: orderDepositAllocations.appliedAmount,
-      })
-      .from(orderDepositAllocations)
-      .where(eq(orderDepositAllocations.orderId, orderId));
-
-    // --- 1. Claim the replacement lines and credit them -------------------
-    const claimed = await trx
-      .update(bankStatementLines)
-      .set({
-        status: "MATCHED",
-        matchedBy: staffId,
-        matchedAt: new Date(),
-        matchedOrderId: orderId,
-      })
-      .where(
-        and(
-          inArray(bankStatementLines.id, lineIds),
-          eq(bankStatementLines.bankAccountId, bankAccountId),
-          eq(bankStatementLines.status, "UNMATCHED"),
-        ),
-      )
-      .returning();
-
-    if (claimed.length !== lineIds.length) {
-      throw Object.assign(
-        new Error("One or more of those lines were already used in another deposit — refresh and try again."),
-        { status: 409 },
-      );
-    }
-
-    const bankAccount = await bankAccountRepo.findById(bankAccountId);
-    const newDeposits = [];
-    for (const line of claimed) {
-      const res = await credit(
-        {
-          customerId,
-          amount: money(line.amount),
-          description:
-            description || `Re-matched payment for order #${orderId}${line.narration ? `: ${line.narration}` : ""}`,
-          reference: line.bankRef || `STMT-${line.id}`,
-          // The banking date, stored ON the deposit rather than rediscovered
-          // at read time by joining back to the statement line. That join took
-          // the lowest-id line of however many funded the deposit, and fell
-          // back to created_at when it found none — so a column headed
-          // "Deposit Date" could quietly show the day the row was keyed in.
-          // See migration 0017.
-          depositDate: line.txnDate,
-          paystackDetails: {
-            paymentMethod: "manual_bank_transfer",
-            channel: "manual_bank_transfer",
-            bankAccountId,
-            bankName: bankAccount?.bankName || null,
-            accountName: bankAccount?.accountName || null,
-            accountNumber: bankAccount?.accountNumber || null,
-            senderName: line.depositor || null,
-            paidAt: line.txnDate,
-            statementLineIds: [line.id],
-            statementLineCount: 1,
-            orderId,
-          },
-          recordedBy: staffId,
-        },
-        trx,
-      );
-      if (!res.success || res.alreadyProcessed) {
-        throw Object.assign(
-          new Error(
-            res.alreadyProcessed
-              ? `Statement line ${line.id}'s reference was already used by another deposit — refresh and try again.`
-              : res.message || "Credit failed",
-          ),
-          { status: res.alreadyProcessed ? 409 : 400 },
-        );
-      }
-      await trx
-        .update(bankStatementLines)
-        .set({ matchedDepositId: res.deposit.id })
-        .where(eq(bankStatementLines.id, line.id));
-      newDeposits.push(res.deposit);
-    }
-    const newTotal = claimed.reduce((sum, l) => sum + money(l.amount), 0);
-
-    // --- 2. Take the order off its old sources ----------------------------
-    for (const r of current) {
-      await trx
-        .update(deposits)
-        .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.appliedAmount}` })
-        .where(eq(deposits.id, r.depositId));
-    }
-    await trx.delete(orderDepositAllocations).where(eq(orderDepositAllocations.orderId, orderId));
-
-    // --- 3. Put it on the new ones ----------------------------------------
-    // Each replacement line is recorded at face value — it is a bank row, and
-    // a bank row is the statement line as the statement has it. Only what the
-    // order consumes is taken out of the credit, so picking a line larger
-    // than the order leaves the surplus in the wallet under its own reference
-    // rather than silently trimming the figure the auditor will look for.
-    let remaining = holdAmount;
-    for (const d of newDeposits) {
-      const received = money(d.amount);
-      if (received <= 0) continue;
-      const applied = Math.max(0, Math.min(received, remaining));
-      if (applied > 0) {
-        await trx
-          .update(deposits)
-          .set({ remainingAmount: sql`${deposits.remainingAmount} - ${asDecimal(applied)}` })
-          .where(eq(deposits.id, d.id));
-      }
-      await trx.insert(orderDepositAllocations).values({
-        orderId,
-        depositId: d.id,
-        amount: asDecimal(received),
-        appliedAmount: asDecimal(applied),
-        source: ALLOCATION_SOURCE.BANK,
-      });
-      remaining -= applied;
-    }
-
-    // --- 4. Undo the mistake and free its line ----------------------------
-    const reversed = [];
-    for (const r of current) {
-      const res = await reverseDeposit(
-        {
-          depositId: r.depositId,
-          recordedBy: staffId,
-          description: `Re-matched off order #${orderId} — this was not the payment for it`,
-        },
-        trx,
-      );
-      if (!res.success) {
-        // The only way here is the balance guard: what is being taken away is
-        // larger than what replaced it, and the difference is already
-        // committed to another order's hold. Say so rather than half-doing it.
-        throw Object.assign(
-          new Error(
-            res.insufficient
-              ? `The replacement (${newTotal}) is smaller than the payment being removed, and the difference is already committed elsewhere. Free that up first, or pick lines covering at least as much.`
-              : res.message || "Could not reverse the previous payment",
-          ),
-          { status: 400 },
-        );
-      }
-      reversed.push(r.depositId);
-
-      await trx
-        .update(bankStatementLines)
-        .set({ status: "UNMATCHED", matchedDepositId: null, matchedOrderId: null, matchedBy: null, matchedAt: null })
-        .where(eq(bankStatementLines.matchedDepositId, r.depositId));
-    }
-
-    return {
-      success: true,
-      newDeposits,
-      newTotal,
-      replacedDepositIds: reversed,
-      unattributed: Math.max(0, remaining),
-    };
-  };
-  return tx ? run(tx) : db.transaction(run);
-};
 
 /**
- * Reverses allocateOrderFunding() — an order's hold was released, so nothing
- * was actually spent.
+ * placeHold() / addToHold() — REMOVED (order-first payments).
  *
- * Gives back `appliedAmount`, not `amount`: on a bank row those differ
- * whenever the payment overshot the order, and only the applied part was ever
- * taken out of the deposit's remainingAmount. Handing back the face value
- * would credit the wallet with a surplus that never left it.
+ * A hold committed money out of `customers.balance` for an order, and holds
+ * were how every order was paid: the desk credited the wallet from the bank
+ * statement, then the wallet paid the order. That indirection is precisely
+ * what stopped anything from recording which bank row paid for which order.
+ *
+ * Nothing places a hold any more. releaseHold() and convertHold() below stay,
+ * because holds placed under the old flow are still active in the live data
+ * and have to resolve correctly when their orders cancel or complete.
  */
-const deallocateOrderFunding = async (orderId, tx) => {
-  const rows = await tx
-    .select({
-      depositId: orderDepositAllocations.depositId,
-      appliedAmount: orderDepositAllocations.appliedAmount,
-    })
-    .from(orderDepositAllocations)
-    .where(eq(orderDepositAllocations.orderId, orderId));
 
-  for (const r of rows) {
-    await tx
-      .update(deposits)
-      .set({ remainingAmount: sql`${deposits.remainingAmount} + ${r.appliedAmount}` })
-      .where(eq(deposits.id, r.depositId));
-  }
 
-  await tx.delete(orderDepositAllocations).where(eq(orderDepositAllocations.orderId, orderId));
-};
-
-/**
- * Commit funds to an order. Decrements the balance so the money cannot be
- * spent twice, but writes no ledger row yet — that happens on conversion.
- * The unique index on orderId makes re-attempts fail closed (alreadyHeld)
- * instead of holding the same money twice: if the hold insert below violates
- * it, the whole transaction — including the balance decrement — rolls back.
- */
-// An optional `tx` lets a caller (e.g. placeOrder) commit the hold atomically
-// with the order it belongs to. Without one, the hold gets its own transaction.
-const placeHold = async ({ customerId, orderId, amount, description = "" }, tx) => {
-  const value = money(amount);
-  if (value <= 0) {
-    return { success: false, message: "Hold amount must be positive" };
-  }
-
-  const run = async (trx) => {
-    const updated = await customerRepo.debitBalance(customerId, value, trx);
-    if (!updated) {
-      return { success: false, insufficient: true, message: "Insufficient wallet balance" };
-    }
-
-    const [hold] = await trx
-      .insert(walletHolds)
-      .values({
-        customerId,
-        orderId,
-        amount: asDecimal(value),
-        description,
-      })
-      .returning();
-
-    try {
-      await allocateOrderFunding(customerId, orderId, value, trx);
-    } catch (err) {
-      console.error(`[wallet] allocateOrderFunding failed for order ${orderId}:`, err.message);
-    }
-
-    return { success: true, hold, customer: updated };
-  };
-
-  // Inside a caller's transaction a duplicate-hold violation must propagate —
-  // the caller's atomic unit can't be soft-recovered here (Postgres aborts it).
-  // The alreadyHeld soft path only applies to the standalone transaction, whose
-  // sole retry caller is the settlement sweep.
-  if (tx) return run(tx);
-  try {
-    return await db.transaction(run);
-  } catch (err) {
-    if (isUniqueViolation(err)) {
-      return { success: false, alreadyHeld: true, message: "A hold already exists for this order" };
-    }
-    throw err;
-  }
-};
-
-/**
- * Commit MORE funds to an order that already has a hold — the second and later
- * instalments of a part-paid order.
- *
- * wallet_holds carries one row per order id, ever, and that index is load-
- * bearing: it is what makes a retried payment fail closed instead of holding
- * the same money twice. So an instalment tops the existing row up rather than
- * placing another one. The invariant is untouched either way —
- *
- *   balance = credits - debits - active holds
- *
- * — because the balance is debited by exactly what the hold grows by, in the
- * same transaction. Everything downstream keeps working unchanged: convertHold
- * writes one debit row for the full accumulated figure when the order
- * completes, and releaseHold gives all of it back if the order is cancelled.
- *
- * Only an ACTIVE hold may be topped up. One already converted or released
- * belongs to a finished order, and adding to it would either double-count
- * against a debit row that has already been written or resurrect money the
- * customer has had back — so the caller is told to place a fresh hold instead.
- */
-const addToHold = async ({ customerId, orderId, amount, description = "" }, tx) => {
-  const value = money(amount);
-  if (value <= 0) {
-    return { success: false, message: "Top-up amount must be positive" };
-  }
-
-  const run = async (trx) => {
-    const [hold] = await trx
-      .select()
-      .from(walletHolds)
-      .where(eq(walletHolds.orderId, orderId))
-      .for("update")
-      .limit(1);
-
-    if (!hold) return { success: false, noHold: true, message: "No hold exists for this order" };
-    if (hold.status !== "active") {
-      return {
-        success: false,
-        message: `This order's hold has already been ${hold.status} — it cannot be topped up`,
-      };
-    }
-
-    // Same guarded debit every other spend goes through, so an instalment can
-    // no more overdraw the wallet than a first payment can.
-    const updated = await customerRepo.debitBalance(customerId, value, trx);
-    if (!updated) {
-      return { success: false, insufficient: true, message: "Insufficient wallet balance" };
-    }
-
-    const [grown] = await trx
-      .update(walletHolds)
-      .set({
-        amount: sql`${walletHolds.amount} + ${asDecimal(value)}`,
-        ...(description ? { description } : {}),
-      })
-      .where(eq(walletHolds.id, hold.id))
-      .returning();
-
-    // Same additive bookkeeping placeHold does, and failing it must never take
-    // the payment down with it — the balance has already moved by here.
-    try {
-      await allocateOrderFunding(customerId, orderId, value, trx);
-    } catch (err) {
-      console.error(`[wallet] allocateOrderFunding failed for order ${orderId}:`, err.message);
-    }
-
-    return { success: true, hold: grown, customer: updated };
-  };
-
-  return tx ? run(tx) : db.transaction(run);
-};
 
 /**
  * Return held funds to the balance (order cancelled before fulfilment).
@@ -1149,11 +669,10 @@ const releaseHold = async (orderId, tx) => {
     // same hold already took.
     await customerRepo.creditBalance(hold.customerId, money(hold.amount), trx);
 
-    try {
-      await deallocateOrderFunding(orderId, trx);
-    } catch (err) {
-      console.error(`[wallet] deallocateOrderFunding failed for order ${orderId}:`, err.message);
-    }
+    // Nothing to deallocate: the order_deposit_allocations bookkeeping this
+    // used to unwind is no longer written, and the surviving rows are history.
+    // An order's own payments are NOT detached when it is cancelled — see
+    // order.service.releaseOrderResources for why that is deliberate.
 
     return { success: true, hold: updatedHold };
   };
@@ -1237,22 +756,35 @@ const getLedgerBalance = async (customerId) => {
   return money(credits) - money(debits) - money(held);
 };
 
+/**
+ * What survives here, and why.
+ *
+ * This module no longer pays for anything. Order payments live in
+ * services/orderPayment.service.js (see db/migrations/0021). These remain for
+ * the legacy wallet — 4,700-odd historical deposits and the customer credit
+ * still to be reconciled onto orders:
+ *
+ *   credit / debit / transfer / reverseDeposit   moving and correcting legacy
+ *                                                wallet balances
+ *   unmatchStatementDeposit                      freeing a statement line that
+ *                                                a legacy deposit is holding
+ *   releaseHold / convertHold / findHoldByOrder  resolving holds placed before
+ *                                                the cutover, as their orders
+ *                                                cancel or complete
+ *   reassignHold                                 moving one of those holds when
+ *                                                an order changes customer
+ *   getLedgerBalance                             reconciliation
+ */
 module.exports = {
-  ALLOCATION_SOURCE,
   credit,
   creditFromStatementLines,
   debit,
   transfer,
   reverseDeposit,
   reassignHold,
-  rematchOrderFunding,
   unmatchStatementDeposit,
-  placeHold,
-  addToHold,
   releaseHold,
   convertHold,
   findHoldByOrder,
   getLedgerBalance,
-  allocateOrderFunding,
-  deallocateOrderFunding,
 };
