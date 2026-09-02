@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const workQueues = require("../../services/workQueues.service");
 const { db } = require("../../config/db");
 const {
   fleetTrucks: trucks,
@@ -495,4 +496,15 @@ const getOverview = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getStats, getOverview };
+/**
+ * How much work is waiting on this user, per desk.
+ *
+ * Serves both the sidebar's number badges and the "my work" landing page, so
+ * the two can never disagree. Location/PFI scoped like every other list.
+ */
+const getWorkQueues = asyncHandler(async (req, res) => {
+  const data = await workQueues.getWorkQueues(req.user);
+  res.json({ success: true, data });
+});
+
+module.exports = { getStats, getOverview, getWorkQueues };
