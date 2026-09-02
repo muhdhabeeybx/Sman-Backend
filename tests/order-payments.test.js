@@ -491,6 +491,56 @@ describe("order payments", () => {
     }
   });
 
+  test("the report dates an order by when it was PLACED, not when it was confirmed", async () => {
+    /**
+     * The finance report and the sales report have to be layable side by side.
+     * salesSummary filters on orders.createdAt; this used to filter on
+     * payment_confirmed_at, so an order placed in August and confirmed in
+     * September counted towards August's sales and September's finance —
+     * same order, same money, two different months.
+     *
+     * It contradicted itself too: the Date column always showed createdAt, so
+     * an order could print "24 Aug" and only be findable by filtering to the
+     * day somebody happened to confirm it.
+     */
+    const { orderRepo } = require("../repositories");
+    const placedOn = new Date("2026-08-24T12:00:00.000Z");
+
+    const line = await makeLine(4200000, "BACKDATED PAYER");
+    const order = await makeOrder(4200000);
+    await db.update(orders).set({ createdAt: placedOn }).where(eq(orders.id, order.id));
+    // Confirmed now — days after it was placed, which is the whole point.
+    await confirm(order, [line.id]);
+
+    const onPlacedDate = await orderRepo.findFinanceReport({
+      dateFrom: "2026-08-24",
+      dateTo: "2026-08-24",
+    });
+    assert.ok(
+      onPlacedDate.orders.some((r) => r.id === order.id),
+      "an order placed on 24 August belongs in the 24 August report",
+    );
+
+    // And it must NOT also show up on the day it was confirmed.
+    const today = new Date().toISOString().slice(0, 10);
+    if (today !== "2026-08-24") {
+      const onConfirmDate = await orderRepo.findFinanceReport({
+        dateFrom: today,
+        dateTo: today,
+      });
+      assert.ok(
+        !onConfirmDate.orders.some((r) => r.id === order.id),
+        "and not in the report for the day it was confirmed",
+      );
+    }
+
+    // The confirmation date is not lost — it is still on the row, and each
+    // payment still carries the bank's own value date.
+    const row = onPlacedDate.orders.find((r) => r.id === order.id);
+    assert.ok(row.paymentConfirmedAt, "when finance confirmed it is still recorded");
+    assert.ok(row.payments[0].txnDate, "and the bank's value date is untouched");
+  });
+
   test("every order's amount_paid equals the sum of its payment rows", async () => {
     // The invariant the finance report and every order screen both rely on.
     const rows = await db.execute(`

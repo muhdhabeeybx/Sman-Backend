@@ -31,6 +31,7 @@ const {
   TRUCK_CAPACITY_LITRES,
   MAX_TRUCKS,
   MAX_FAILURES,
+  MAX_EXPECTED_PAYMENTS,
 } = require("./constants");
 const copy = require("./copy");
 
@@ -166,6 +167,45 @@ const isPlausibleName = (raw) => {
 const isPlausibleCompany = (raw) => {
   const s = String(raw ?? "").trim();
   return s.length >= 2 && s.length <= 100 && /[A-Za-z]/.test(s);
+};
+
+/**
+ * "5,000,000 Rure Oil and Gas" -> { amount: 5000000, name: "Rure Oil and Gas" }.
+ *
+ * Amount first, because that is the order the desk wizard asks in and the
+ * order people say it out loud. Everything after the figure is the name the
+ * transfer will arrive under, with a leading dash or colon dropped so
+ * "5m - Rure Oil" reads the same as "5m Rure Oil".
+ *
+ * The dot is the trap, exactly as in parseLitres but worse: money HAS a
+ * decimal, so a dot cannot simply be stripped. A trailing ".dd" is kobo; any
+ * other dot is thousands grouping. Without that split "5.000.000" parses as 5
+ * and a customer's five million becomes five naira in the desk's matching hint.
+ *
+ * Returns null when there is no leading figure at all. A figure with an
+ * unusable name, or a name with an unusable figure, comes back with that field
+ * empty so the caller can say which half it could not read.
+ */
+const parseExpectedAmount = (rawNumber, suffix) => {
+  let n = String(rawNumber).replace(/[,\s]/g, "");
+  if (!/^\d+\.\d{1,2}$/.test(n)) n = n.replace(/\./g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(n)) return NaN;
+  const value = Number(n);
+  if (!suffix) return value;
+  return value * (/k/i.test(suffix) ? 1_000 : 1_000_000);
+};
+
+const parseExpectedSplit = (raw) => {
+  const m = /^\s*(?:₦|ngn\s*)?\s*(\d[\d.,\s]*)\s*(k|m)?\s*(.+)$/i.exec(String(raw ?? "").trim());
+  if (!m) return null;
+  const amount = parseExpectedAmount(m[1], m[2]);
+  const name = String(m[3] || "").trim().replace(/^[-–—:,]+\s*/, "").trim();
+  return {
+    amount: Number.isFinite(amount) && amount > 0 ? amount : NaN,
+    // isPlausibleCompany also rejects the digit-only tail left behind when the
+    // whole message was a bare figure ("5,000,000" -> name "0").
+    name: isPlausibleCompany(name) ? name : "",
+  };
 };
 
 // ------------------------------------------------------------- context reading
@@ -391,6 +431,8 @@ const promptFor = (state, session, context) => {
     }
     case STATES.CONFIRM:
       return [confirmReply(session, context)];
+    case STATES.EXPECTED_PAYMENT:
+      return [buttons(copy.expectedPaymentPrompt(), copy.expectedPaymentButtons())];
     case STATES.AWAIT_PAYMENT: {
       if (!cart.awaiting) return [text(copy.helpText())];
       return [buttons(copy.awaitPaymentNudge(cart.awaiting), awaitPaymentButtonDefs(cart, context))];
@@ -675,7 +717,7 @@ const reduceInner = (session, inbound, ctx, expired) => {
       const paidFromWallet = order.paymentStatus === "Paid";
       const next = {
         ...session,
-        state: paidFromWallet ? STATES.MENU : STATES.AWAIT_PAYMENT,
+        state: paidFromWallet ? STATES.MENU : STATES.EXPECTED_PAYMENT,
         lastOrderId: order.id,
         failureCount: 0,
         cart: paidFromWallet
@@ -704,6 +746,10 @@ const reduceInner = (session, inbound, ctx, expired) => {
         // body of the Pay now / Cancel buttons, so the "how to pay" copy and
         // the buttons that action it can't drift apart or repeat each other.
         replies.push(buttons(copy.orderCreated(order), awaitPaymentButtonDefs(next.cart, ctx)));
+        // Then, separately, who is sending it. Its own message because it is
+        // its own question with its own buttons — folded into the one above,
+        // the account details and the ask would compete for the same tap.
+        replies.push(buttons(copy.expectedPaymentPrompt(), copy.expectedPaymentButtons()));
       }
       if (order.deliveryType === "pickup" && ctx.portalUrl) {
         replies.push(text(copy.portalManageHint(ctx.portalUrl)));
@@ -820,7 +866,10 @@ const reduceInner = (session, inbound, ctx, expired) => {
     if (nameless) return done(session, [text(copy.identifyGreeting())]);
     // In AWAIT_PAYMENT there is no cart to discard — there is a REAL unpaid
     // order. "cancel" means cancelling that, which deserves a confirmation.
-    if (session.state === STATES.AWAIT_PAYMENT && session.lastOrderId) {
+    if (
+      (session.state === STATES.AWAIT_PAYMENT || session.state === STATES.EXPECTED_PAYMENT) &&
+      session.lastOrderId
+    ) {
       return done(session, [cancelOrderConfirmReply(session)]);
     }
     return goTo({ ...session, cart: emptyCart() }, STATES.MENU, ctx, [text(copy.cancelled())]);
@@ -895,11 +944,100 @@ const reduceInner = (session, inbound, ctx, expired) => {
       return handleLogistics(session, inbound, ctx);
     case STATES.CONFIRM:
       return handleConfirm(session, ctx, value);
+    case STATES.EXPECTED_PAYMENT:
+      return handleExpectedPayment(session, inbound, ctx, value);
     case STATES.AWAIT_PAYMENT:
       return handleAwaitPayment(session, ctx, value);
     default:
       return goTo(session, STATES.MENU, ctx);
   }
+};
+
+/**
+ * Collecting who is paying, one depositor per message.
+ *
+ * Entries accumulate on the cart and are written in a SINGLE effect when the
+ * customer taps Done — not one row per message. A chat that stalls halfway
+ * leaves no half-declared order behind, and the desk never sees a partial
+ * split it might read as the whole story.
+ *
+ * Every exit lands in AWAIT_PAYMENT, which re-shows the account and the cancel
+ * button. Skipping and finishing with nothing said are the same outcome: the
+ * step is optional and an order is never held up by it.
+ */
+const handleExpectedPayment = (session, inbound, ctx, value) => {
+  const cart = session.cart || {};
+  const entries = Array.isArray(cart.expected) ? cart.expected : [];
+  const withoutEntries = { ...cart };
+  delete withoutEntries.expected;
+
+  // Typed as readily as tapped. The buttons carry these two words, and a
+  // customer who writes what the button says means what the button means —
+  // without this, "done" falls through and is read as a failed split.
+  const isSkip = value === "expectskip" || value === "skip" || value === "none";
+  const isDone = value === "expectdone" || value === "done" || value === "finished";
+
+  if (isSkip || (isDone && entries.length === 0)) {
+    return goTo({ ...session, cart: withoutEntries }, STATES.AWAIT_PAYMENT, ctx, [
+      text(copy.expectedPaymentSkipped()),
+    ]);
+  }
+
+  if (isDone) {
+    return goTo(
+      { ...session, cart: withoutEntries },
+      STATES.AWAIT_PAYMENT,
+      ctx,
+      [text(copy.expectedPaymentSaved(entries.length))],
+      [
+        {
+          type: EFFECTS.NOTE_EXPECTED_PAYMENTS,
+          payload: {
+            orderId: session.lastOrderId,
+            customerId: session.customerId,
+            entries,
+          },
+        },
+      ]
+    );
+  }
+
+  const retryButtons = (body) => buttons(body, copy.expectedPaymentButtons());
+
+  // The RAW text, not the lower-cased command value: this name is read back to
+  // a human against a bank statement, and "rure oil and gas" is not what the
+  // narration will say. Buttons above still match on the normalised value.
+  const raw = typeof inbound.value === "string" ? inbound.value.trim() : "";
+  if (inbound.type !== INBOUND.TEXT) {
+    return fumble(session, ctx, [retryButtons(copy.expectedPaymentUnparsed())]);
+  }
+
+  const split = parseExpectedSplit(raw);
+  if (!split) return fumble(session, ctx, [retryButtons(copy.expectedPaymentUnparsed())]);
+  if (!Number.isFinite(split.amount)) {
+    return fumble(session, ctx, [retryButtons(copy.expectedPaymentBadAmount())]);
+  }
+  if (!split.name) return fumble(session, ctx, [retryButtons(copy.expectedPaymentUnparsed())]);
+
+  // At the cap the entry is refused rather than silently dropped — the reply
+  // says so and Done is the only way on.
+  if (entries.length >= MAX_EXPECTED_PAYMENTS) {
+    return done(session, [
+      retryButtons(copy.expectedPaymentAdded(split.amount, split.name, 0)),
+    ]);
+  }
+
+  const nextEntries = [...entries, { amount: split.amount, name: split.name }];
+  const next = {
+    ...session,
+    cart: { ...cart, expected: nextEntries },
+    failureCount: 0,
+  };
+  return done(next, [
+    retryButtons(
+      copy.expectedPaymentAdded(split.amount, split.name, MAX_EXPECTED_PAYMENTS - nextEntries.length)
+    ),
+  ]);
 };
 
 const handleAwaitPayment = (session, ctx, value) => {
@@ -1310,6 +1448,7 @@ module.exports = {
   reduce,
   // Pure helpers exported for direct unit- and property-testing.
   parseLitres,
+  parseExpectedSplit,
   nextStep,
   trucksComplete,
   minTrucksFor,

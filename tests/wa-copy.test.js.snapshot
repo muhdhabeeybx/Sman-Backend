@@ -166,6 +166,18 @@ exports[`every copy string, pinned 1`] = `
   "orderCreated": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay by *Wed, 12 Aug, 16:42* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
   "orderCreatedHoursOnly": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay within *24 hours* — after that this price is no longer held.\\n\\nTo pay by bank transfer, send to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
   "orderCreatedNoWindow": "Your order *SOR-1042* has been created.\\n\\n*Total: ₦25,500,000*\\n\\nTo pay by bank transfer, send to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
+  "expectedPaymentPrompt": "One last thing, and it's optional.\\n\\nWho is sending the money? If more than one person or company is paying towards this order, tell us each one — it's how we match your transfer when it lands.\\n\\nSend them one at a time, amount first:\\n*5,000,000 Rure Oil and Gas*\\n\\nTap *Done* when you've listed everyone, or *Skip* if you'd rather not.",
+  "expectedPaymentButtons": {
+    "expectdone": "Done",
+    "expectskip": "Skip"
+  },
+  "expectedPaymentAdded": "Noted — *₦5,000,000* from *Rure Oil and Gas*.\\n\\nAdd another the same way, or tap *Done*.",
+  "expectedPaymentAddedAtCap": "Noted — *₦5,000,000* from *Rure Oil and Gas*.\\n\\nThat's as many as we can note against one order. Tap *Done* to carry on.",
+  "expectedPaymentUnparsed": "I didn't catch that. Send the amount first, then the name it will arrive under, like *5,000,000 Rure Oil and Gas*.\\n\\nOr tap *Done* if you've finished, *Skip* to leave it.",
+  "expectedPaymentBadAmount": "That amount doesn't look right. Send it in naira, amount first, like *5,000,000 Rure Oil and Gas*.",
+  "expectedPaymentSavedOne": "Thank you — we'll look out for that transfer.",
+  "expectedPaymentSavedMany": "Thank you — we'll look out for those 3 transfers.",
+  "expectedPaymentSkipped": "No problem — pay from whichever account suits you.",
   "payFailedInsufficient": "Not yet — there isn't enough in your wallet to cover this order. Please transfer to the account above; once Soroman confirms it, tap *Pay now* again.",
   "payFailedGeneric": "We couldn't take the payment. Please try again, or transfer to the account above.",
   "orderExpired": "This order has expired. Payment was not received in time, so the price is no longer held. Please place a new order at current prices.",

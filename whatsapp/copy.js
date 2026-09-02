@@ -364,6 +364,63 @@ const orderCreated = (order) => {
   );
 };
 
+// ------------------------------------------------- expected payment (splits)
+
+/**
+ * Asked once, straight after the order exists.
+ *
+ * The desk has had this for a while — its order wizard offers "Customer told
+ * you how they'll pay?" and takes an amount and a company name per deposit.
+ * This is that same question on WhatsApp, in the one place the customer is
+ * already looking at the account they are about to pay into.
+ *
+ * Why it earns a turn: a bank transfer arrives carrying nothing but a
+ * depositor name and a narration. When three companies each send part of one
+ * order, the desk has three lines and no way to know which order they settle.
+ * Naming them in advance is what turns that into a match.
+ *
+ * Optional, and said to be optional — an order is never held up by it.
+ */
+const expectedPaymentPrompt = () =>
+  "One last thing, and it's optional.\n\n" +
+  "Who is sending the money? If more than one person or company is paying " +
+  "towards this order, tell us each one — it's how we match your transfer " +
+  "when it lands.\n\n" +
+  "Send them one at a time, amount first:\n" +
+  "*5,000,000 Rure Oil and Gas*\n\n" +
+  "Tap *Done* when you've listed everyone, or *Skip* if you'd rather not.";
+
+const expectedPaymentButtons = () => ({ expectdone: "Done", expectskip: "Skip" });
+
+/** Each entry read back, so a mistyped figure is caught before the transfer. */
+const expectedPaymentAdded = (amount, name, remaining) =>
+  `Noted — *${naira(amount)}* from *${name}*.\n\n` +
+  (remaining > 0
+    ? "Add another the same way, or tap *Done*."
+    : "That's as many as we can note against one order. Tap *Done* to carry on.");
+
+/**
+ * Unparseable. Shows the shape rather than naming a rule: the customer needs
+ * the example, not the grammar.
+ */
+const expectedPaymentUnparsed = () =>
+  "I didn't catch that. Send the amount first, then the name it will arrive " +
+  "under, like *5,000,000 Rure Oil and Gas*.\n\n" +
+  "Or tap *Done* if you've finished, *Skip* to leave it.";
+
+/** A figure that parsed but can't be money. */
+const expectedPaymentBadAmount = () =>
+  "That amount doesn't look right. Send it in naira, amount first, like " +
+  "*5,000,000 Rure Oil and Gas*.";
+
+const expectedPaymentSaved = (count) =>
+  count === 1
+    ? "Thank you — we'll look out for that transfer."
+    : `Thank you — we'll look out for those ${count} transfers.`;
+
+const expectedPaymentSkipped = () =>
+  "No problem — pay from whichever account suits you.";
+
 /**
  * The wallet payment couldn't go through — either the transfer hasn't landed
  * yet (a Pay now tapped early) or the balance fell short. Either way the order
@@ -531,6 +588,13 @@ module.exports = {
   editRows,
   orderPending,
   orderCreated,
+  expectedPaymentPrompt,
+  expectedPaymentButtons,
+  expectedPaymentAdded,
+  expectedPaymentUnparsed,
+  expectedPaymentBadAmount,
+  expectedPaymentSaved,
+  expectedPaymentSkipped,
   payFailed,
   orderExpired,
   orderExpiredButtons,

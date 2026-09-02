@@ -19,6 +19,12 @@ const STATES = Object.freeze({
   COLLECT: "COLLECT",
   LOGISTICS: "LOGISTICS",
   CONFIRM: "CONFIRM",
+  // How the money is coming in — amount and the name it will arrive under,
+  // one entry per depositor. Sits between the order existing and the wait for
+  // payment because it is only answerable once there is an order to pay for,
+  // and it is worth nothing after the transfer has already landed unmatched.
+  // Optional, like the desk wizard's equivalent step.
+  EXPECTED_PAYMENT: "EXPECTED_PAYMENT",
   AWAIT_PAYMENT: "AWAIT_PAYMENT",
 });
 
@@ -77,6 +83,9 @@ const EFFECTS = Object.freeze({
   CREATE_ORDER: "CREATE_ORDER",
   CREATE_CUSTOMER: "CREATE_CUSTOMER",
   CANCEL_ORDER: "CANCEL_ORDER",
+  // Advisory only — writes expected_payments rows. Emitted once, at the end
+  // of EXPECTED_PAYMENT, carrying every entry the customer gave.
+  NOTE_EXPECTED_PAYMENTS: "NOTE_EXPECTED_PAYMENTS",
 });
 
 // Approved-template names (submitted to Meta in Phase C). Outside the 24-hour
@@ -95,6 +104,10 @@ const MAX_TRUCKS = 10; // sanity ceiling on trucks per chat order
 // Third unparseable input in one state offers the menu instead of repeating.
 const MAX_FAILURES = 3;
 
+// Depositors namable against one order. Ten is far past any real split and
+// stops a chat writing advisory rows without end.
+const MAX_EXPECTED_PAYMENTS = 10;
+
 module.exports = {
   STATES,
   LIMITS,
@@ -109,4 +122,5 @@ module.exports = {
   TRUCK_CAPACITY_LITRES,
   MAX_TRUCKS,
   MAX_FAILURES,
+  MAX_EXPECTED_PAYMENTS,
 };

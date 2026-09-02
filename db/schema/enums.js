@@ -288,6 +288,7 @@ const waSessionStateEnum = pgEnum("wa_session_state", [
   "COLLECT",
   "LOGISTICS",
   "CONFIRM",
+  "EXPECTED_PAYMENT",
   "AWAIT_PAYMENT",
 ]);
 

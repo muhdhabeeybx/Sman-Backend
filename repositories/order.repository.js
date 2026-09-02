@@ -429,16 +429,37 @@ const findFinanceReport = async ({
     );
     conditions.push(possibleId ? or(eq(orders.id, possibleId), textMatch) : textMatch);
   }
-  // A bare "2026-08-20" from a date input parses as that day's UTC midnight —
-  // compared as-is, dateTo would exclude every order confirmed later that
-  // same day. Widened to the last instant of the day so "today" means today.
+  /**
+   * Dated by when the order was PLACED, not when finance got round to
+   * confirming it.
+   *
+   * These were different columns and it made the two reports impossible to
+   * lay side by side: salesSummary filters on orders.createdAt (see
+   * reporting.service.js), this filtered on payment_confirmed_at. An order
+   * placed on 24 August and confirmed on 1 September appeared in the sales
+   * figures for August and the finance figures for September — same order,
+   * same money, two different months, and nothing on either page explaining
+   * the gap.
+   *
+   * It was also self-contradictory here: the Date column has always shown
+   * createdAt, so an order could display "20 Aug" while only being findable
+   * by filtering to the day it happened to be confirmed.
+   *
+   * Confirmation date is not lost — payment_confirmed_at is still on the row,
+   * and each payment carries the bank's own value date. This is only about
+   * which day an order counts towards.
+   *
+   * A bare "2026-08-20" from a date input parses as that day's UTC midnight —
+   * compared as-is, dateTo would exclude every order placed later that same
+   * day. Widened to the last instant of the day so "today" means today.
+   */
   if (dateFrom) {
     const start = /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? `${dateFrom}T00:00:00.000Z` : dateFrom;
-    conditions.push(gte(orders.paymentConfirmedAt, new Date(start)));
+    conditions.push(gte(orders.createdAt, new Date(start)));
   }
   if (dateTo) {
     const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
-    conditions.push(lte(orders.paymentConfirmedAt, new Date(end)));
+    conditions.push(lte(orders.createdAt, new Date(end)));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -457,14 +478,13 @@ const findFinanceReport = async ({
       .leftJoin(products, eq(orders.productId, products.id))
       .leftJoin(pfis, eq(orders.pfiId, pfis.id))
       .where(whereClause)
-      // Newest first, by when the money was actually confirmed. COALESCE'd to
-      // the order date so an unpaid order (null paymentConfirmedAt, included
-      // when the status filter is Unpaid/All) sorts by its own date instead
-      // of being dumped at the very top — Postgres sorts NULLs first on DESC.
-      .orderBy(
-        desc(sql`COALESCE(${orders.paymentConfirmedAt}, ${orders.createdAt})`),
-        desc(orders.id),
-      ),
+      // Newest first by order date — the same column the report is filtered
+      // and dated by, so the rows run in the order the Date column shows.
+      // The COALESCE this replaced existed only to keep unpaid orders (null
+      // paymentConfirmedAt, which Postgres sorts first on DESC) from being
+      // dumped at the top; createdAt is never null, so there is nothing left
+      // to coalesce.
+      .orderBy(desc(orders.createdAt), desc(orders.id)),
     // Over the same filtered set as the rows above, so the stat cards can
     // never disagree with what a filter or search actually shows. Joined the
     // same way as the rows query — the search condition can reference

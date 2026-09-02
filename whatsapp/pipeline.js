@@ -6,6 +6,7 @@ const { customerRepo, orderRepo, waMessageRepo, waSessionRepo } = require("../re
 const { toE164 } = require("../utils/phone");
 const { placeOrder, cancelOrder, computeExpiresAt } = require("../services/order.service");
 const { orderExpiryHours, orderExpiryDisabled } = require("../config/orderExpiry");
+const { noteExpectedPayments } = require("../services/expectedPayment.service");
 const { sendReply, sendTypingIndicator } = require("./client");
 const { QUEUES, enqueue } = require("../config/queue");
 const copy = require("./copy");
@@ -114,6 +115,25 @@ const performEffect = async (effect, { wamid, waPhone, inboundMessageId = null }
         console.error("[wa-pipeline] CANCEL_ORDER failed:", err.message);
         return { type: INBOUND.ORDER_FAILED, reason: "cancel" };
       }
+    }
+
+    case EFFECTS.NOTE_EXPECTED_PAYMENTS: {
+      // Advisory rows only — they name what to look for on the statement and
+      // move no money. So a failure here must not cost the customer their
+      // reply: the engine has already moved to AWAIT_PAYMENT and said thank
+      // you, and the order stands either way. Log it and carry on.
+      try {
+        await noteExpectedPayments({
+          orderId: effect.payload.orderId,
+          customerId: effect.payload.customerId,
+          entries: effect.payload.entries,
+          // No staff member typed these — the customer did, over WhatsApp.
+          createdBy: null,
+        });
+      } catch (err) {
+        console.error("[wa-pipeline] NOTE_EXPECTED_PAYMENTS failed:", err.message);
+      }
+      return null; // nothing re-enters the engine
     }
 
     default:

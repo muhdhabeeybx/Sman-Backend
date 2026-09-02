@@ -1,0 +1,30 @@
+-- A conversation step between placing the order and waiting for the money:
+-- who is sending it, and how much each of them is sending.
+--
+-- Written by hand in the style of 0002-0021, for the reason set out in 0003:
+-- drizzle-kit has no snapshot of this database. The statement is idempotent,
+-- so re-running the file is a no-op.
+--
+-- ── Why this exists ────────────────────────────────────────────────────────
+--
+-- A bank transfer arrives carrying a depositor name and a narration, nothing
+-- more. When three companies each send part of one order, the finance desk has
+-- three statement lines and no way to tell which order they settle. The desk's
+-- own order wizard has asked this for a while -- "Customer told you how they'll
+-- pay?" -- and writes the answers to `expected_payments`, which the confirm-
+-- payment dialog then shows while somebody matches the lines. WhatsApp orders
+-- had no equivalent, so a split paid over chat arrived unannounced.
+--
+-- The new state is where the chat asks. It stores nothing itself: the answers
+-- become ordinary `expected_payments` rows, advisory exactly like the desk's,
+-- so both routes land in the same place and the dialog needs no change.
+--
+-- ADD VALUE is safe inside the implicit transaction the migration runner puts
+-- this file in -- Postgres has allowed that since 12, and the restriction that
+-- remains (the new label cannot be USED until the transaction commits) does not
+-- apply here, because nothing below writes it.
+--
+-- BEFORE 'AWAIT_PAYMENT' keeps the type's own order matching the order of the
+-- conversation, and matching the list in db/schema/enums.js -- so a database
+-- built fresh from the schema and one migrated to it sort identically.
+ALTER TYPE wa_session_state ADD VALUE IF NOT EXISTS 'EXPECTED_PAYMENT' BEFORE 'AWAIT_PAYMENT';

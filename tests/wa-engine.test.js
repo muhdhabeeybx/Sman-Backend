@@ -10,6 +10,7 @@ const assert = require("node:assert");
 
 const { reduce, parseLitres, nextStep, trucksComplete, minTrucksFor, maxTrucksFor } = require("../whatsapp/engine");
 const { STATES, INBOUND, REPLY, EFFECTS, LIMITS, TEMPLATES } = require("../whatsapp/constants");
+const { MAX_EXPECTED_PAYMENTS: LIMITS_MAX_EXPECTED } = require("../whatsapp/constants");
 
 // ------------------------------------------------------------------ fixtures
 
@@ -1024,16 +1025,20 @@ describe("order outcomes", () => {
     expiryHours: 24,
   };
 
-  it("ORDER_CREATED: invoice, then ONE message carrying the transfer details and Cancel, then portal hint", () => {
+  it("ORDER_CREATED: invoice, the transfer details with Cancel, the who's-paying ask, then portal hint", () => {
     const s = mkSession(STATES.CONFIRM, { ...fullPickupCart(), pendingOrder: true });
     const r = reduce(s, { type: INBOUND.ORDER_CREATED, order: ORDER }, baseCtx());
-    assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
+    // An unpaid order now stops to ask who is sending the money before it
+    // settles into the wait — see handleExpectedPayment.
+    assert.equal(r.session.state, STATES.EXPECTED_PAYMENT);
     assert.equal(r.session.lastOrderId, 501);
     // The transfer details ARE the buttons message body — one message, not two,
     // so the "how to pay" copy can't drift from the buttons that action it.
-    assert.deepEqual(kinds(r), [REPLY.DOCUMENT, REPLY.BUTTONS, REPLY.TEXT]);
+    // The expected-payment ask is its own message with its own buttons.
+    assert.deepEqual(kinds(r), [REPLY.DOCUMENT, REPLY.BUTTONS, REPLY.BUTTONS, REPLY.TEXT]);
     assert.ok(r.replies[1].body.includes("9930001111"));
     assert.match(r.replies[1].body, /pay by/i);
+    assert.deepEqual(buttonIds(r.replies[2]), ["expectdone", "expectskip"]);
     assert.equal(r.session.cart.awaiting.expiresAt, ORDER.expiresAt);
     // Cancel only. "Pay now" settled the order from wallet balance and went
     // with the rest of that path — the transfer itself is the action now, and
@@ -1208,6 +1213,100 @@ describe("order outcomes", () => {
 });
 
 // ------------------------------------------------------------ expiry & resume
+
+describe("EXPECTED_PAYMENT — who is sending the money", () => {
+  const awaiting = () => ({
+    awaiting: {
+      orderNumber: "SOR-1042",
+      totalAmount: 25500000,
+      virtualAccountBank: "Wema Bank",
+      virtualAccountNumber: "9930001111",
+    },
+  });
+  const mk = (cart = {}) =>
+    mkSession(STATES.EXPECTED_PAYMENT, { ...awaiting(), ...cart }, { lastOrderId: 501 });
+
+  it("Skip moves on without writing anything", () => {
+    const r = reduce(mk(), btn("expectskip"), baseCtx());
+    assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
+    assert.deepEqual(effectTypes(r), [], "advisory only — nothing to write");
+  });
+
+  it("Done with nothing said is the same as Skip", () => {
+    const r = reduce(mk(), btn("expectdone"), baseCtx());
+    assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
+    assert.deepEqual(effectTypes(r), []);
+  });
+
+  it("an entry is read back and held on the cart, not written yet", () => {
+    const r = reduce(mk(), txt("5,000,000 Rure Oil and Gas"), baseCtx());
+    assert.equal(r.session.state, STATES.EXPECTED_PAYMENT, "stays put for the next one");
+    assert.deepEqual(r.session.cart.expected, [{ amount: 5000000, name: "Rure Oil and Gas" }]);
+    // Nothing is written until Done: a chat abandoned halfway must not leave a
+    // partial split the desk could read as the whole story.
+    assert.deepEqual(effectTypes(r), []);
+    assert.match(r.replies[0].body, /5,000,000/);
+    assert.match(r.replies[0].body, /Rure Oil and Gas/);
+  });
+
+  it("every entry is written in ONE effect on Done", () => {
+    const ctx = baseCtx();
+    let s1 = reduce(mk(), txt("5,000,000 Rure Oil and Gas"), ctx).session;
+    let s2 = reduce(s1, txt("2.5m Ukwenu James"), ctx).session;
+    const r = reduce(s2, btn("expectdone"), ctx);
+
+    assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
+    assert.deepEqual(effectTypes(r), [EFFECTS.NOTE_EXPECTED_PAYMENTS]);
+    assert.deepEqual(r.effects[0].payload.entries, [
+      { amount: 5000000, name: "Rure Oil and Gas" },
+      { amount: 2500000, name: "Ukwenu James" },
+    ]);
+    assert.equal(r.effects[0].payload.orderId, 501);
+    assert.equal(r.effects[0].payload.customerId, 7);
+    // The working list is cleared once spent, so a later turn can't resend it.
+    assert.equal(r.session.cart.expected, undefined);
+  });
+
+  it("an unreadable line re-asks and keeps the buttons, writing nothing", () => {
+    const r = reduce(mk(), txt("i will pay soon"), baseCtx());
+    assert.equal(r.session.state, STATES.EXPECTED_PAYMENT);
+    assert.deepEqual(effectTypes(r), []);
+    assert.deepEqual(buttonIds(r.replies[0]), ["expectdone", "expectskip"]);
+  });
+
+  it("a name with no usable figure is refused as an amount problem", () => {
+    const r = reduce(mk(), txt("0 Rure Oil"), baseCtx());
+    assert.equal(r.session.state, STATES.EXPECTED_PAYMENT);
+    assert.deepEqual(effectTypes(r), []);
+    assert.match(r.replies[0].body, /amount/i);
+  });
+
+  it("a bare figure with no name is refused — the name is the whole point", () => {
+    const r = reduce(mk(), txt("5,000,000"), baseCtx());
+    assert.equal(r.session.state, STATES.EXPECTED_PAYMENT);
+    assert.deepEqual(r.session.cart.expected, undefined);
+    assert.deepEqual(effectTypes(r), []);
+  });
+
+  it("stops accepting entries at the cap rather than growing without end", () => {
+    const ctx = baseCtx();
+    const full = Array.from({ length: LIMITS_MAX_EXPECTED }, (_, i) => ({
+      amount: 1000 * (i + 1),
+      name: `Payer ${i + 1}`,
+    }));
+    const r = reduce(mk({ expected: full }), txt("9,000,000 One Too Many"), ctx);
+    assert.equal(r.session.cart.expected.length, LIMITS_MAX_EXPECTED, "not appended");
+    assert.deepEqual(effectTypes(r), []);
+  });
+
+  it("'cancel' here means the REAL order, not a cart to throw away", () => {
+    // The order already exists at this point, exactly as in AWAIT_PAYMENT — so
+    // cancel must offer the order-cancel confirmation, never drop to the menu.
+    const r = reduce(mk(), txt("cancel"), baseCtx());
+    assert.notEqual(r.session.state, STATES.MENU);
+    assert.deepEqual(buttonIds(r.replies[0]), ["cancelorder:yes", "keeporder"]);
+  });
+});
 
 describe("expired sessions", () => {
   const cart = { depotId: 1, productId: 10, quantity: 30000, companyName: "Acme Fuels Ltd" };

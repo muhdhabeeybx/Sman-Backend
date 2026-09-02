@@ -5,7 +5,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { db } = require("../config/db");
-const { depots, products, depotProductPrices, pfis, waSessions } = require("../db/schema");
+const { depots, products, depotProductPrices, pfis, waSessions, expectedPayments } = require("../db/schema");
 const { eq } = require("drizzle-orm");
 const { customerRepo, orderRepo, waMessageRepo, waSessionRepo, bankAccountRepo } = require("../repositories");
 const { normalizeInbound } = require("../whatsapp/normalize");
@@ -169,7 +169,9 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
     // the depot account number.
 
     const { wamid, session, outbound } = await say("confirm");
-    assert.equal(session.state, "AWAIT_PAYMENT");
+    // The order is real from this moment; the chat then stops to ask who is
+    // sending the money before it settles into the wait — handleExpectedPayment.
+    assert.equal(session.state, "EXPECTED_PAYMENT");
     assert.ok(session.lastOrderId, "session points at the real order");
 
     const order = await orderRepo.findById(session.lastOrderId);
@@ -184,6 +186,29 @@ describe("wa pipeline — a whole order placed over WhatsApp, no Meta required",
     const paymentMsg = outbound.find((m) => (m.payload.body || "").includes(`PIPACC${String(RUN).slice(-6)}`));
     assert.ok(paymentMsg, "the reply carries the depot's deposit account number");
     assert.equal(paymentMsg.payload.kind, "buttons", "details ride on the Pay now / Cancel message");
+  });
+
+  test("the who's-paying step writes advisory expected_payments, then hands over to AWAIT_PAYMENT", async () => {
+    const orderId = (await waSessionRepo.findByPhone(PHONE)).lastOrderId;
+    const rowsFor = () =>
+      db.select().from(expectedPayments).where(eq(expectedPayments.orderId, orderId));
+
+    const entry = await say("3,000,000 Rure Oil and Gas");
+    assert.equal(entry.session.state, "EXPECTED_PAYMENT", "still collecting");
+    assert.equal((await rowsFor()).length, 0, "nothing is written until the customer says done");
+
+    // "done" typed, not tapped — the words on the buttons work either way.
+    const { session } = await say("done");
+    assert.equal(session.state, "AWAIT_PAYMENT");
+
+    const rows = await rowsFor();
+    assert.equal(rows.length, 1);
+    // The name as TYPED: this is read back against a bank statement, so the
+    // lower-cased command value would be the wrong thing to store.
+    assert.equal(rows[0].reference, "Rure Oil and Gas");
+    assert.equal(Number(rows[0].expectedAmount), 3000000);
+    assert.equal(rows[0].status, "pending", "advisory until a deposit resolves it");
+    assert.equal(rows[0].createdBy, null, "the customer said this, not a staff member");
   });
 
   test("re-running the processed confirm turn does nothing — and a NEW confirm cannot double-order", async () => {
