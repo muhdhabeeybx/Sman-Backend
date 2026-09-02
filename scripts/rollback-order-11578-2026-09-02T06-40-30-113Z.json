@@ -1,0 +1,27 @@
+{
+  "takenAt": "2026-09-02T06:40:30.114Z",
+  "order": {
+    "id": 11578,
+    "quantity": 700000,
+    "total_amount": "889000000.00",
+    "amount_paid": "442602000.00",
+    "payment_status": "Part Paid"
+  },
+  "orderPfiAllocations": [
+    {
+      "id": 13609,
+      "pfi_id": 45,
+      "quantity": 700000
+    }
+  ],
+  "pfi": {
+    "id": 45,
+    "sold_qty_litres": 7813450
+  },
+  "commission": {
+    "id": 527,
+    "quantity": 348505,
+    "commission_rate": "1.00",
+    "commission_amount": "348505.00"
+  }
+}
