@@ -11,6 +11,7 @@ const {
   updateDepot,
   deleteDepot,
   updateProductPrice,
+  zeroAllProductPrices,
 } = require("../../controllers/administration/depot.controller");
 
 router.get("/", verifyStaff, validate({ query: depotSchemas.listDepots }), getDepots);
@@ -27,6 +28,21 @@ router.patch(
   validate({ params: depotSchemas.idParam, body: depotSchemas.updateProductPrice }),
   updateProductPrice
 );
+/**
+ * Every product off sale, everywhere. Above /:id so the literal path wins.
+ *
+ * Finance and admin only: it closes the whole trading book in one request, and
+ * unlike editing one depot there is no partial state to inspect first.
+ */
+router.post(
+  "/product-prices/zero-all",
+  verifyStaff,
+  requireRole("super_admin", "admin", "finance", {
+    message: "Finance access required to take every product off sale",
+  }),
+  zeroAllProductPrices
+);
+
 router.delete("/:id", verifyStaff, validate({ params: depotSchemas.idParam }), deleteDepot);
 
 module.exports = router;

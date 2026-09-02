@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, desc, asc, count } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, asc, count, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const {
   depots,
@@ -312,6 +312,63 @@ const upsertProductPrice = async (depotId, productId, price) => {
   return row;
 };
 
+/**
+ * Take every product off sale, everywhere: set all depot prices to 0.
+ *
+ * Zero is how this system records "we do not sell this here" — see
+ * schemas/depot.schema.js. Doing it one depot at a time is thirteen dialogs
+ * and thirteen chances to miss one, and a missed one leaves that depot quietly
+ * still trading, which is exactly the state this action exists to prevent.
+ *
+ * One transaction, and every row keeps its history: the price it held before
+ * is written to depot_price_history alongside the zero, so "what was PMS at
+ * Calabar before we closed everything" is still answerable afterwards. A bulk
+ * action that erased that would be worse than doing it by hand.
+ *
+ * Rows already at 0 are skipped — they are already off sale, and re-writing
+ * them would put a meaningless 0-to-0 entry in the history of every one.
+ *
+ * @returns {{updated: number, skipped: number, before: Array}} what moved
+ */
+const zeroAllProductPrices = async () => {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select({
+        id: depotProductPrices.id,
+        depotId: depotProductPrices.depotId,
+        productId: depotProductPrices.productId,
+        currentPrice: depotProductPrices.currentPrice,
+      })
+      .from(depotProductPrices)
+      .for("update");
+
+    const toZero = rows.filter((r) => Number(r.currentPrice) !== 0);
+    if (!toZero.length) {
+      return { updated: 0, skipped: rows.length, before: [] };
+    }
+
+    await tx
+      .update(depotProductPrices)
+      .set({ currentPrice: "0.00", updatedAt: new Date() })
+      .where(inArray(depotProductPrices.id, toZero.map((r) => r.id)));
+
+    await tx.insert(depotPriceHistory).values(
+      toZero.map((r) => ({ depotProductPriceId: r.id, price: "0.00" })),
+    );
+
+    return {
+      updated: toZero.length,
+      skipped: rows.length - toZero.length,
+      // What each one was, so the response and the audit row can say.
+      before: toZero.map((r) => ({
+        depotId: r.depotId,
+        productId: r.productId,
+        price: r.currentPrice,
+      })),
+    };
+  });
+};
+
 const getPriceHistory = async (depotProductPriceId) => {
   return db
     .select()
@@ -347,6 +404,7 @@ module.exports = {
   getProductPrices,
   getProductPrice,
   upsertProductPrice,
+  zeroAllProductPrices,
   getPriceHistory,
   updateSubaccountFields,
 };

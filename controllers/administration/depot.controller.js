@@ -1,5 +1,5 @@
 const asyncHandler = require("express-async-handler");
-const { depotRepo, pfiRepo, orderRepo } = require("../../repositories");
+const { depotRepo, pfiRepo, orderRepo, auditLogRepo } = require("../../repositories");
 const { getMultiDepotCapacities, getDepotCapacities } = require("../../services/pfi.service");
 
 const getDepots = asyncHandler(async (req, res) => {
@@ -270,4 +270,44 @@ const updateProductPrice = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getDepots, getDepotById, createDepot, updateDepot, deleteDepot, updateProductPrice };
+/**
+ * Take every product off sale at every depot — all prices to 0.
+ *
+ * Zero is how this system records "not sold here", so this closes the whole
+ * book in one action. Deliberately its own endpoint rather than the client
+ * looping over depots: thirteen separate requests can half-succeed, and half
+ * the depots closed is a worse state than either end of the operation.
+ *
+ * Every row keeps its previous price in depot_price_history, and the audit row
+ * carries how many moved, so this is reversible by hand and answerable after
+ * the fact.
+ */
+const zeroAllProductPrices = asyncHandler(async (req, res) => {
+  const result = await depotRepo.zeroAllProductPrices();
+
+  await auditLogRepo.record({
+    entityType: "depot",
+    entityId: 0,
+    action: "depot.prices_zeroed_all",
+    actor: { type: "staff", staffId: req.user.id },
+    metadata: {
+      updated: result.updated,
+      skipped: result.skipped,
+      // What they were, so the change can be undone from the log alone.
+      before: result.before,
+    },
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({
+    success: true,
+    message:
+      result.updated > 0
+        ? `${result.updated} price${result.updated === 1 ? "" : "s"} set to 0. Those products are now off sale everywhere.`
+        : "Every price was already 0 — nothing to change.",
+    data: result,
+  });
+});
+
+module.exports = { getDepots, getDepotById, createDepot, updateDepot, deleteDepot, updateProductPrice, zeroAllProductPrices };
