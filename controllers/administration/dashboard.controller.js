@@ -1,5 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const workQueues = require("../../services/workQueues.service");
+const overview = require("../../services/overview.service");
+const { resolvePeriod } = require("../../lib/reportPeriod");
 const { db } = require("../../config/db");
 const {
   fleetTrucks: trucks,
@@ -74,32 +76,9 @@ const normalisedPlate = (col) =>
 
 const num = (v) => Number(v || 0);
 
-function getPeriodDates(period) {
-  const now = new Date();
-  let from;
-  let label;
-  switch (period) {
-    case "today":
-      from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      label = "Today";
-      break;
-    case "week":
-      from = new Date(now);
-      from.setDate(from.getDate() - 7);
-      label = "This Week";
-      break;
-    case "year":
-      from = new Date(now.getFullYear(), 0, 1);
-      label = "This Year";
-      break;
-    case "month":
-    default:
-      from = new Date(now.getFullYear(), now.getMonth(), 1);
-      label = "This Month";
-      break;
-  }
-  return { from: from.toISOString(), to: now.toISOString(), label };
-}
+// getPeriodDates lived here and understood four presets. Replaced by
+// lib/reportPeriod.resolvePeriod, which also takes an explicit from/to range
+// and returns the label and trend granularity alongside the dates.
 
 async function getDailyRevenueTrend(dateFrom, dateTo) {
   const from = new Date(dateFrom);
@@ -243,8 +222,11 @@ const getStats = asyncHandler(async (req, res) => {
 });
 
 const getOverview = asyncHandler(async (req, res) => {
-  const period = req.query.period || "month";
-  const { from, to, label } = getPeriodDates(period);
+  // Presets plus an explicit from/to range — see lib/reportPeriod. The label
+  // and granularity travel with the data so every panel, and the page header,
+  // describe the same window without each deriving its own wording.
+  const resolved = resolvePeriod(req.query);
+  const { from, to } = resolved;
 
   const [
     revenue,
@@ -260,6 +242,10 @@ const getOverview = asyncHandler(async (req, res) => {
     depotLeaderboard,
     dangoteSummary,
     lpgSummary,
+    finance,
+    inventory,
+    activeDepotLeaderboard,
+    activity,
   ] = await Promise.all([
     revenueSummary({ dateFrom: from, dateTo: to }),
     salesSummary({ dateFrom: from, dateTo: to }),
@@ -461,6 +447,10 @@ const getOverview = asyncHandler(async (req, res) => {
 
       return { ...orderTotals, stations: stationCounts, byStatus };
     })(),
+    overview.financeSummary({ from, to }),
+    overview.inventorySummary(),
+    overview.depotLeaderboard({ from, to }),
+    overview.activityFeed({ limit: 10 }),
   ]);
 
   const orderStatusMap = {};
@@ -477,7 +467,11 @@ const getOverview = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: {
-      period: { from, to, label },
+      period: resolved,
+      /** Rebuilt on order_payments — see services/overview.service.js. */
+      finance,
+      inventory,
+      activity,
       revenue,
       orders: sales,
       wallet,
@@ -489,7 +483,9 @@ const getOverview = asyncHandler(async (req, res) => {
       revenueTrend,
       orderStatusBreakdown,
       recentActivity,
-      depotLeaderboard,
+      // Active depots only, ranked on money received. The old list included
+      // suspended depots sitting on nil.
+      depotLeaderboard: activeDepotLeaderboard,
       dangote: dangoteSummary,
       lpg: lpgSummary,
     },
@@ -507,4 +503,38 @@ const getWorkQueues = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
-module.exports = { getStats, getOverview, getWorkQueues };
+/**
+ * The full activity log, paginated and filterable.
+ *
+ * Backs the activity page, and the overview's ten rows come from the same
+ * function so the two cannot show different histories.
+ */
+const getActivity = asyncHandler(async (req, res) => {
+  const { limit = 50, page = 1, entityType, action } = req.query;
+  const perPage = Math.min(200, Math.max(1, parseInt(limit) || 50));
+  const current = Math.max(1, parseInt(page) || 1);
+
+  // A date range only when one was asked for — the activity page opens on
+  // "everything", unlike the dashboard which always has a window.
+  const range = req.query.from || req.query.to ? resolvePeriod(req.query) : null;
+
+  const { rows, total } = await overview.activityFeed({
+    limit: perPage,
+    offset: (current - 1) * perPage,
+    entityType,
+    action,
+    from: range?.from,
+    to: range?.to,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      activity: rows,
+      period: range,
+      pagination: { page: current, limit: perPage, total, pages: Math.ceil(total / perPage) },
+    },
+  });
+});
+
+module.exports = { getStats, getOverview, getWorkQueues, getActivity };
