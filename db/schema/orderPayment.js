@@ -44,6 +44,11 @@ const orderPaymentTransfers = pgTable(
     amount: numeric("amount", { precision: 15, scale: 2 }).notNull(),
     reason: text("reason").default("").notNull(),
     recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
+    // Reviewed as one movement, so the two legs can never disagree about
+    // whether it was vouched for. See migration 0024.
+    reviewedBy: integer("reviewed_by").references(() => staff.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewNote: text("review_note").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
@@ -134,6 +139,20 @@ const orderPayments = pgTable(
     confirmationBasis: varchar("confirmation_basis", { length: 24 })
       .notNull()
       .default("bank_matched"),
+
+    /**
+     * Who has since examined a system-made attribution and vouched for it.
+     *
+     * Deliberately NOT a mutation of confirmationBasis. That column is history
+     * — how the payment came to be here — and rewriting it on review would
+     * repeat 0021's own mistake of erasing the fact that software made the
+     * call. These three say who took responsibility afterwards, and why, so
+     * the report can state both facts at once. See migration 0024.
+     */
+    reviewedBy: integer("reviewed_by").references(() => staff.id, { onDelete: "set null" }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewNote: text("review_note").default("").notNull(),
+
     note: text("note").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

@@ -509,6 +509,178 @@ const reverseTransfer = async ({ transferId, staffId = null, reason = "" }, tx) 
   return tx ? run(tx) : db.transaction(run);
 };
 
+/**
+ * Take responsibility for an attribution the system made.
+ *
+ * Reversal was the first instinct and the data ruled it out: not one of the 17
+ * auto-created transfers, and not one of the 8 orders carrying an inferred bank
+ * line, can be undone without dropping an already-released, already-ticketed
+ * order below its own value (scripts/review-system-attributions.js). The money
+ * is where it needs to be; what was missing was anybody's name against the
+ * decision.
+ *
+ * So this moves no money at all. It records that a person looked at a
+ * system-made attribution and vouched for it, with their reason — turning an
+ * anonymous row into an accountable one.
+ *
+ * `confirmationBasis` is deliberately left alone. It is the historical fact of
+ * how the payment got here, and rewriting it on review would repeat exactly
+ * what 0021 did: erase the software's fingerprints and leave a reader unable to
+ * tell a decision somebody made from one they merely agreed with afterwards.
+ */
+const REVIEWABLE_BASES = new Set([
+  "bank_inferred",
+  "auto_allocated",
+  "no_record",
+  "transfer_auto",
+  "unknown",
+]);
+
+const ratifyPayment = async ({ paymentId, staffId, note }, tx) => {
+  const reason = String(note || "").trim();
+  // The reason IS the deliverable. A sign-off with no reason recorded leaves
+  // the row exactly as unaccountable as it was, with a name attached to
+  // nothing — which is worse, because it looks resolved.
+  if (!reason) throw httpError(400, "Say why this attribution is correct — the reason is the point");
+  if (!staffId) throw httpError(400, "A member of staff must be identified to review a payment");
+
+  const run = async (trx) => {
+    const [payment] = await trx
+      .select()
+      .from(orderPayments)
+      .where(eq(orderPayments.id, paymentId))
+      .for("update")
+      .limit(1);
+    if (!payment) throw httpError(404, "Payment not found");
+
+    if (!REVIEWABLE_BASES.has(payment.confirmationBasis)) {
+      throw httpError(
+        400,
+        "This payment was already a recorded staff decision — there is nothing to vouch for.",
+      );
+    }
+    if (payment.transferId) {
+      throw httpError(
+        400,
+        "This is one leg of a transfer. Review the transfer instead, so both legs are vouched for together.",
+      );
+    }
+    if (payment.reviewedAt) {
+      throw httpError(409, "This payment has already been reviewed");
+    }
+
+    const reviewedAt = new Date();
+    await trx
+      .update(orderPayments)
+      .set({ reviewedBy: staffId, reviewedAt, reviewNote: reason, updatedAt: reviewedAt })
+      .where(eq(orderPayments.id, paymentId));
+
+    await auditLogRepo.record(
+      {
+        entityType: "order",
+        entityId: payment.orderId,
+        action: "order.payment_reviewed",
+        actor: actorFor(staffId),
+        metadata: {
+          paymentId,
+          amount: payment.amount,
+          confirmationBasis: payment.confirmationBasis,
+          statementLineId: payment.statementLineId,
+          bankRef: payment.bankRef,
+          reason,
+        },
+      },
+      trx,
+    );
+
+    return { ...payment, reviewedBy: staffId, reviewedAt, reviewNote: reason };
+  };
+
+  return tx ? run(tx) : db.transaction(run);
+};
+
+/**
+ * Vouch for a movement between orders — both legs at once.
+ *
+ * The transfer row carries the review, and the legs read it from there, so a
+ * leg can never claim to be vouched for while its counterpart is not.
+ */
+const ratifyTransfer = async ({ transferId, staffId, note }, tx) => {
+  const reason = String(note || "").trim();
+  if (!reason) throw httpError(400, "Say why this movement was correct — the reason is the point");
+  if (!staffId) throw httpError(400, "A member of staff must be identified to review a transfer");
+
+  const run = async (trx) => {
+    const [transfer] = await trx
+      .select()
+      .from(orderPaymentTransfers)
+      .where(eq(orderPaymentTransfers.id, transferId))
+      .for("update")
+      .limit(1);
+    if (!transfer) throw httpError(404, "Transfer not found");
+    if (transfer.reviewedAt) throw httpError(409, "This transfer has already been reviewed");
+
+    const reviewedAt = new Date();
+    await trx
+      .update(orderPaymentTransfers)
+      .set({ reviewedBy: staffId, reviewedAt, reviewNote: reason })
+      .where(eq(orderPaymentTransfers.id, transferId));
+
+    // Stamped on the legs too, so a report reading payment rows alone — which
+    // is what the finance report does — sees the review without a join.
+    await trx
+      .update(orderPayments)
+      .set({ reviewedBy: staffId, reviewedAt, reviewNote: reason, updatedAt: reviewedAt })
+      .where(eq(orderPayments.transferId, transferId));
+
+    for (const orderId of [transfer.fromOrderId, transfer.toOrderId]) {
+      await auditLogRepo.record(
+        {
+          entityType: "order",
+          entityId: orderId,
+          action: "order.payment_transfer_reviewed",
+          actor: actorFor(staffId),
+          metadata: {
+            transferId,
+            amount: transfer.amount,
+            fromOrderId: transfer.fromOrderId,
+            toOrderId: transfer.toOrderId,
+            reason,
+          },
+        },
+        trx,
+      );
+    }
+
+    return { ...transfer, reviewedBy: staffId, reviewedAt, reviewNote: reason };
+  };
+
+  return tx ? run(tx) : db.transaction(run);
+};
+
+/**
+ * What is left to review, by class.
+ *
+ * A finite, shrinking list — the point of the whole exercise is that it goes
+ * to zero and stays there, because every new payment is a staff decision by
+ * construction.
+ */
+const reviewQueue = async (tx = db) => {
+  const rows = await tx.execute(sql`
+    SELECT
+      p.confirmation_basis AS "confirmationBasis",
+      COUNT(*)::int        AS rows,
+      COUNT(DISTINCT p.order_id)::int AS orders,
+      COALESCE(SUM(p.amount), 0) AS naira
+    FROM order_payments p
+    WHERE p.reviewed_at IS NULL
+      AND p.confirmation_basis IN ('bank_inferred', 'auto_allocated', 'no_record', 'transfer_auto', 'unknown')
+    GROUP BY 1
+    ORDER BY COUNT(*) DESC
+  `);
+  return rows.rows ?? rows;
+};
+
 /** Every payment row on an order, oldest first, with its transfer counterpart. */
 const listForOrder = async (orderId, tx = db) => {
   const rows = await tx.execute(sql`
@@ -518,6 +690,8 @@ const listForOrder = async (orderId, tx = db) => {
       p.bank_ref AS "bankRef", p.bank_name AS "bankName",
       p.account_name AS "accountName", p.account_number AS "accountNumber",
       p.confirmation_basis AS "confirmationBasis",
+      p.reviewed_at AS "reviewedAt", p.review_note AS "reviewNote",
+      rv.first_name AS "reviewerFirstName", rv.surname AS "reviewerSurname",
       p.note, p.created_at AS "createdAt", p.transfer_id AS "transferId",
       st.first_name AS "recorderFirstName", st.surname AS "recorderSurname",
       -- The order at the other end of a transfer leg, so the row can name it
@@ -554,6 +728,7 @@ const listForOrder = async (orderId, tx = db) => {
       ) AS "originBankRefs"
     FROM order_payments p
     LEFT JOIN staff st ON st.id = p.recorded_by
+    LEFT JOIN staff rv ON rv.id = p.reviewed_by
     LEFT JOIN order_payment_transfers t ON t.id = p.transfer_id
     LEFT JOIN orders o_to ON o_to.id = t.to_order_id
     LEFT JOIN orders o_from ON o_from.id = t.from_order_id
@@ -615,5 +790,9 @@ module.exports = {
   summarizeOrder,
   listForOrder,
   findOrdersWithSurplus,
+  ratifyPayment,
+  ratifyTransfer,
+  reviewQueue,
+  REVIEWABLE_BASES,
   httpError,
 };

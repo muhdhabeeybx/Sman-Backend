@@ -25,6 +25,9 @@ const {
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
+  reviewOrderPayment,
+  reviewOrderPaymentTransfer,
+  getPaymentReviewQueue,
   getOrdersWithSurplus,
   reconcileOrderEffects,
 } = require("../../controllers/administration/order.controller");
@@ -134,6 +137,33 @@ router.delete(
   requireRole("finance", "super_admin", { message: "Finance access required" }),
   validate({ params: orderSchemas.idParam }),
   reverseOrderPaymentTransfer
+);
+
+/**
+ * Vouch for an attribution the system made on its own.
+ *
+ * Not a correction — no money moves. Reversal was ruled out on the data (see
+ * scripts/review-system-attributions.js): none of these can be undone without
+ * dropping an already-released, already-ticketed order below its own value. So
+ * the fix is to the record: a name and a reason against a row that had neither.
+ *
+ * Finance-gated like every other money route, because vouching for ₦3.675bn is
+ * a finance act even though it moves nothing.
+ */
+router.post(
+  "/:id/payments/:paymentId/review",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to review a payment" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.reviewOrderPayment }),
+  reviewOrderPayment
+);
+
+router.post(
+  "/:id/payments/transfer/:transferId/review",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to review a transfer" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.reviewOrderPayment }),
+  reviewOrderPaymentTransfer
 );
 
 // Re-run post-payment effects for a paid order whose ticket/commission failed.

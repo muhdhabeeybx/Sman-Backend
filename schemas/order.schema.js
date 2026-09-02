@@ -196,6 +196,22 @@ const removeOrderPayment = z.object({
   reason: z.string().trim().min(3, "Say why this payment is being removed").max(500),
 });
 
+/**
+ * Vouch for an attribution the system made on its own.
+ *
+ * The note is required and has a floor, because the note IS the deliverable.
+ * A sign-off with no reason recorded leaves the row exactly as unaccountable
+ * as it was, only now with a name attached to nothing — which is worse, since
+ * it reads as resolved.
+ */
+const reviewOrderPayment = z.object({
+  note: z
+    .string()
+    .trim()
+    .min(3, "Say why this attribution is correct — the reason is the whole point")
+    .max(500),
+});
+
 // Customer portal: replace the pickup truck declaration on an existing order.
 // Same shape as create — plate/driver optional, quantity required per truck.
 // An empty array is allowed for ≤60k pickups (clear declared loads; capture at
@@ -299,6 +315,7 @@ module.exports = {
   confirmOrderPayment,
   transferOrderPayment,
   removeOrderPayment,
+  reviewOrderPayment,
   updateMyTrucks,
   releaseOrder,
   gateIn,

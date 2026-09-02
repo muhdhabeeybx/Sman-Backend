@@ -614,6 +614,13 @@ const findFinanceReport = async ({
           WHERE op.order_id = ${orders.id}
             AND op.confirmation_basis IN ('bank_inferred', 'auto_allocated', 'no_record', 'transfer_auto', 'unknown')
         ))::int`,
+        /** The queue: system-decided AND nobody has vouched for it yet. */
+        needsReviewCount: sql`COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM order_payments op
+          WHERE op.order_id = ${orders.id}
+            AND op.reviewed_at IS NULL
+            AND op.confirmation_basis IN ('bank_inferred', 'auto_allocated', 'no_record', 'transfer_auto', 'unknown')
+        ))::int`,
         /** Money on the listed orders that an external audit can actually check. */
         totalVerifiableAmount: sql`COALESCE(SUM((
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op
@@ -661,6 +668,15 @@ const findFinanceReport = async ({
           -- until this column existed, a line a colleague matched by hand and
           -- one the old wallet walk picked on its own rendered identically.
           p.confirmation_basis AS "confirmationBasis",
+          -- Who has since vouched for a system-made attribution, and why.
+          -- Deliberately alongside confirmationBasis rather than replacing it:
+          -- how the payment got here and who signed it off afterwards are two
+          -- different facts, and 0021 already showed what happens when the
+          -- first is overwritten by the second. See migration 0024.
+          p.reviewed_at        AS "reviewedAt",
+          p.review_note        AS "reviewNote",
+          rv.first_name        AS "reviewerFirstName",
+          rv.surname           AS "reviewerSurname",
           p.note,
           p.created_at         AS "createdAt",
           p.transfer_id        AS "transferId",
@@ -713,6 +729,7 @@ const findFinanceReport = async ({
           ) AS "originBankRefs"
         FROM order_payments p
         LEFT JOIN staff st ON st.id = p.recorded_by
+        LEFT JOIN staff rv ON rv.id = p.reviewed_by
         LEFT JOIN order_payment_transfers t ON t.id = p.transfer_id
         LEFT JOIN orders o_to   ON o_to.id = t.to_order_id
         LEFT JOIN orders o_from ON o_from.id = t.from_order_id
@@ -828,6 +845,14 @@ const findFinanceReport = async ({
        * nobody in the building can tell.
        */
       systemDecided: rowPayments.some((p) => SYSTEM_DECIDED_BASES.has(p.confirmationBasis)),
+      /**
+       * Still waiting on a person. The work queue: a system-made attribution
+       * nobody has yet vouched for. Shrinks as the desk works through it,
+       * unlike `systemDecided`, which is a permanent historical fact.
+       */
+      needsReview: rowPayments.some(
+        (p) => SYSTEM_DECIDED_BASES.has(p.confirmationBasis) && !p.reviewedAt,
+      ),
       /** Money on this order that an external auditor can check. */
       verifiableAmount: rowPayments
         .filter((p) => VERIFIABLE_BASES.has(p.confirmationBasis))
@@ -880,6 +905,8 @@ const findFinanceReport = async ({
        * line and still have had the order chosen for it by a migration.
        */
       systemDecidedCount: Number(totalsRow.systemDecidedCount) || 0,
+      /** Of those, how many nobody has vouched for yet. */
+      needsReviewCount: Number(totalsRow.needsReviewCount) || 0,
       /** Naira backed by a bank statement line, whoever attributed it. */
       totalVerifiableAmount: Number(totalsRow.totalVerifiableAmount) || 0,
       /** Naira with no bank line behind it at all. */

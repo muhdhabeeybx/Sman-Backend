@@ -866,6 +866,49 @@ const reverseOrderPaymentTransfer = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Transfer reversed on both orders.", data: result });
 });
 
+/**
+ * Vouch for a payment the system attributed on its own.
+ *
+ * No money moves. Reversal was the first instinct and the data ruled it out —
+ * none of these can be undone without dropping an already-ticketed order below
+ * its own value — so what this fixes is the record, not the arithmetic: an
+ * anonymous attribution becomes one with a name and a reason against it.
+ */
+const reviewOrderPayment = asyncHandler(async (req, res) => {
+  const payment = await orderPaymentService.ratifyPayment({
+    paymentId: Number(req.params.paymentId),
+    staffId: req.user.id,
+    note: req.body.note,
+  });
+
+  res.json({
+    success: true,
+    message: `₦${Number(payment.amount).toLocaleString()} on this order is now vouched for. The report still records that the system made the original attribution.`,
+    data: { payment },
+  });
+});
+
+/** Vouch for a movement between orders — both legs together. */
+const reviewOrderPaymentTransfer = asyncHandler(async (req, res) => {
+  const transfer = await orderPaymentService.ratifyTransfer({
+    transferId: Number(req.params.transferId),
+    staffId: req.user.id,
+    note: req.body.note,
+  });
+
+  res.json({
+    success: true,
+    message: `Movement of ₦${Number(transfer.amount).toLocaleString()} is now vouched for on both orders.`,
+    data: { transfer },
+  });
+});
+
+/** What is left to review, by class — the queue, and how fast it is shrinking. */
+const getPaymentReviewQueue = asyncHandler(async (req, res) => {
+  const queue = await orderPaymentService.reviewQueue();
+  res.json({ success: true, data: { queue } });
+});
+
 /** Orders currently holding money beyond their own value. */
 const getOrdersWithSurplus = asyncHandler(async (req, res) => {
   const rows = await orderPaymentService.findOrdersWithSurplus({
@@ -1277,6 +1320,9 @@ module.exports = {
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
+  reviewOrderPayment,
+  reviewOrderPaymentTransfer,
+  getPaymentReviewQueue,
   getOrdersWithSurplus,
   reconcileOrderEffects,
 };
