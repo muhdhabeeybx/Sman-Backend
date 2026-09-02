@@ -120,7 +120,16 @@ const emailDailyReports = asyncHandler(async (req, res) => {
     .filter(Boolean);
 
   if (result?.error || sent.length === 0) {
-    return res.status(502).json({
+    // 422, not the 502 this answered with before — even though "the email
+    // provider refused" is precisely what 502 describes. A 502 never reached
+    // the browser: the edge in front of this app reads that status as "the
+    // origin is broken", drops the response and serves its own error page,
+    // which carries no CORS headers. So the dashboard logged a CORS violation,
+    // axios raised a bare "Network Error", and the toast showed that instead of
+    // the reason — the provider's own words were lost at the last hop, after
+    // everything above went to the trouble of collecting them. A 4xx is passed
+    // through untouched, so the message actually arrives.
+    return res.status(422).json({
       success: false,
       // The provider's own words. "The report could not be sent" is only
       // reached when nothing said anything at all.
