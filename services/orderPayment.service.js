@@ -6,6 +6,7 @@ const {
   orderPaymentTransfers,
   bankStatementLines,
   PAYMENT_SOURCE,
+  CONFIRMATION_BASIS,
 } = require("../db/schema");
 const bankAccountRepo = require("../repositories/bankAccount.repository");
 const auditLogRepo = require("../repositories/auditLog.repository");
@@ -203,6 +204,9 @@ const recordFromStatementLines = async (
           bankAccountId: Number(bankAccountId),
           amount: asDecimal(line.amount),
           source: PAYMENT_SOURCE.STATEMENT,
+          // There is no other route to this code path: reaching it means a
+          // person picked these lines for this order. See migration 0023.
+          confirmationBasis: CONFIRMATION_BASIS.BANK_MATCHED,
           // The statement, verbatim. Copied rather than joined — see the
           // schema comment on this table for the three ways the join lied.
           txnDate: line.txnDate,
@@ -389,6 +393,10 @@ const transferSurplus = async (
         source: PAYMENT_SOURCE.TRANSFER_OUT,
         transferId: transfer.id,
         recordedBy: staffId,
+        // A deliberate movement, as against the 17 that migration 0021
+        // converted out of the old wallet draws — those are transfer_auto and
+        // the report must not present the two as the same thing.
+        confirmationBasis: CONFIRMATION_BASIS.TRANSFER_DESK,
         note: `Surplus moved to ${to.orderNumber}${reason ? ` — ${reason}` : ""}`,
       },
       {
@@ -397,6 +405,7 @@ const transferSurplus = async (
         source: PAYMENT_SOURCE.TRANSFER_IN,
         transferId: transfer.id,
         recordedBy: staffId,
+        confirmationBasis: CONFIRMATION_BASIS.TRANSFER_DESK,
         note: `Surplus received from ${from.orderNumber}${reason ? ` — ${reason}` : ""}`,
       },
     ]);
@@ -508,6 +517,7 @@ const listForOrder = async (orderId, tx = db) => {
       p.amount, p.source, p.txn_date AS "txnDate", p.depositor, p.narration,
       p.bank_ref AS "bankRef", p.bank_name AS "bankName",
       p.account_name AS "accountName", p.account_number AS "accountNumber",
+      p.confirmation_basis AS "confirmationBasis",
       p.note, p.created_at AS "createdAt", p.transfer_id AS "transferId",
       st.first_name AS "recorderFirstName", st.surname AS "recorderSurname",
       -- The order at the other end of a transfer leg, so the row can name it

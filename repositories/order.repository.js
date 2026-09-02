@@ -3,11 +3,51 @@ const { db } = require("../config/db");
 const {
   orders, customers, depots, products, pfis, orderTrucks,
 } = require("../db/schema");
+const {
+  CONFIRMATION_BASIS,
+  CONFIRMATION_BASIS_LABEL,
+  VERIFIABLE_BASES,
+  SYSTEM_DECIDED_BASES,
+} = require("../db/schema/orderPayment");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { scopeCondition } = require("../lib/scopeFilter");
 
 /** The two payment sources that are a movement between orders, not money in. */
 const TRANSFER_SOURCES = new Set(["transfer_in", "transfer_out"]);
+
+/**
+ * Weakest-first. An order is only as auditable as its least defensible payment,
+ * so the order-level basis is the worst one on it — a ₦500m order confirmed
+ * from a bank statement plus one ₦20,000 row nobody can account for is not a
+ * clean order, and ranking the other way round would let the good row hide the
+ * bad one.
+ */
+const BASIS_RANK = [
+  CONFIRMATION_BASIS.UNKNOWN,
+  CONFIRMATION_BASIS.NO_RECORD,
+  CONFIRMATION_BASIS.AUTO_ALLOCATED,
+  CONFIRMATION_BASIS.TRANSFER_AUTO,
+  CONFIRMATION_BASIS.BANK_INFERRED,
+  CONFIRMATION_BASIS.TRANSFER_DESK,
+  CONFIRMATION_BASIS.BANK_MATCHED,
+];
+
+const weakestBasis = (rows) => {
+  if (!rows.length) return null;
+  let worst = null;
+  let worstRank = Infinity;
+  for (const r of rows) {
+    const rank = BASIS_RANK.indexOf(r.confirmationBasis);
+    // An unrecognised value sorts worst: a basis this code does not know how
+    // to vouch for must never be presented as though it were clean.
+    const effective = rank === -1 ? -1 : rank;
+    if (effective < worstRank) {
+      worstRank = effective;
+      worst = r.confirmationBasis;
+    }
+  }
+  return worst;
+};
 
 const formatOrderRow = (row) => {
   if (!row) return null;
@@ -380,6 +420,13 @@ const findFinanceReport = async ({
    * 'unreconciled' only orders with none
    */
   reconciliation,
+  /**
+   * Filter by how the payments were attributed:
+   *   'system'   only orders carrying a payment nobody chose
+   *   'staff'    only orders where every payment was a recorded human decision
+   *   <a basis>  only orders carrying that exact basis
+   */
+  confirmationBasis,
   scopeUser,
 } = {}) => {
   const conditions = [];
@@ -404,6 +451,26 @@ const findFinanceReport = async ({
   )`;
   if (reconciliation === "reconciled") conditions.push(hasStatement);
   if (reconciliation === "unreconciled") conditions.push(sql`NOT ${hasStatement}`);
+
+  // Same reasoning as the reconciliation filter above: applied as a WHERE
+  // condition so the stat cards and the table describe the same set of orders.
+  if (confirmationBasis) {
+    const systemBases = sql`('bank_inferred', 'auto_allocated', 'no_record', 'transfer_auto', 'unknown')`;
+    const carriesSystemBasis = sql`EXISTS (
+      SELECT 1 FROM order_payments op
+      WHERE op.order_id = ${orders.id} AND op.confirmation_basis IN ${systemBases}
+    )`;
+    if (confirmationBasis === "system") {
+      conditions.push(carriesSystemBasis);
+    } else if (confirmationBasis === "staff") {
+      conditions.push(sql`NOT ${carriesSystemBasis}`);
+    } else {
+      conditions.push(sql`EXISTS (
+        SELECT 1 FROM order_payments op
+        WHERE op.order_id = ${orders.id} AND op.confirmation_basis = ${confirmationBasis}
+      )`);
+    }
+  }
 
   if (search) {
     const possibleId = parseOrderReference(search);
@@ -533,6 +600,26 @@ const findFinanceReport = async ({
         ))), 0)`,
         reconciledCount: sql`COUNT(*) FILTER (WHERE ${hasStatement})::int`,
         partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')::int`,
+        /**
+         * Orders carrying at least one payment nobody chose — the system
+         * allocated it, inferred it, or has no record of it at all.
+         *
+         * Counted in SQL over the same filtered set as everything else here,
+         * rather than from the decorated rows, because the rows are only the
+         * current page's worth and this figure has to describe the whole
+         * filtered book.
+         */
+        systemDecidedCount: sql`COUNT(*) FILTER (WHERE EXISTS (
+          SELECT 1 FROM order_payments op
+          WHERE op.order_id = ${orders.id}
+            AND op.confirmation_basis IN ('bank_inferred', 'auto_allocated', 'no_record', 'transfer_auto', 'unknown')
+        ))::int`,
+        /** Money on the listed orders that an external audit can actually check. */
+        totalVerifiableAmount: sql`COALESCE(SUM((
+          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op
+          WHERE op.order_id = ${orders.id}
+            AND op.confirmation_basis IN ('bank_matched', 'bank_inferred')
+        )), 0)`,
       })
       .from(orders)
       .leftJoin(customers, eq(orders.customerId, customers.id))
@@ -570,6 +657,10 @@ const findFinanceReport = async ({
           p.bank_name          AS "bankName",
           p.account_name       AS "accountName",
           p.account_number     AS "accountNumber",
+          -- How this payment came to be on this order. See migration 0023:
+          -- until this column existed, a line a colleague matched by hand and
+          -- one the old wallet walk picked on its own rendered identically.
+          p.confirmation_basis AS "confirmationBasis",
           p.note,
           p.created_at         AS "createdAt",
           p.transfer_id        AS "transferId",
@@ -715,6 +806,33 @@ const findFinanceReport = async ({
        * filling the bank columns with a plausible-looking guess.
        */
       reconciled: rowPayments.some((p) => p.source === "statement"),
+
+      /**
+       * HOW this order was confirmed — the question `reconciled` does not
+       * answer and which the report was silently conflating with it.
+       *
+       * `reconciled` says a bank line exists somewhere on the order. It says
+       * nothing about who decided that line settles THIS order, and for 22
+       * rows the answer is that migration 0021 guessed. These four fields
+       * separate evidence from inference on the face of the row.
+       */
+      confirmationBasis: weakestBasis(rowPayments),
+      confirmationBasisLabel:
+        CONFIRMATION_BASIS_LABEL[weakestBasis(rowPayments)] || null,
+      /** Every distinct basis on the order, so a mixed order can say so. */
+      confirmationBases: [...new Set(rowPayments.map((p) => p.confirmationBasis))],
+      /**
+       * True where no person chose how this order was funded — the system did,
+       * by the oldest-credit-first walk or by a migration's tiebreak. This is
+       * the flag the desk actually needs: it is the set of orders whose story
+       * nobody in the building can tell.
+       */
+      systemDecided: rowPayments.some((p) => SYSTEM_DECIDED_BASES.has(p.confirmationBasis)),
+      /** Money on this order that an external auditor can check. */
+      verifiableAmount: rowPayments
+        .filter((p) => VERIFIABLE_BASES.has(p.confirmationBasis))
+        .reduce((sum, p) => sum + p.amount, 0),
+
       /** The account(s) the money was actually paid into. */
       paidInto: [
         ...new Set(
@@ -756,6 +874,17 @@ const findFinanceReport = async ({
       reconciledCount,
       unreconciledCount: total - reconciledCount,
       partPaidCount: Number(totalsRow.partPaidCount),
+      /**
+       * Orders holding at least one payment the system attributed on its own.
+       * Distinct from `unreconciledCount`: an order can have a genuine bank
+       * line and still have had the order chosen for it by a migration.
+       */
+      systemDecidedCount: Number(totalsRow.systemDecidedCount) || 0,
+      /** Naira backed by a bank statement line, whoever attributed it. */
+      totalVerifiableAmount: Number(totalsRow.totalVerifiableAmount) || 0,
+      /** Naira with no bank line behind it at all. */
+      totalUnverifiableAmount:
+        Number(totalsRow.totalReceived) - (Number(totalsRow.totalVerifiableAmount) || 0),
     },
   };
 };

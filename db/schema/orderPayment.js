@@ -120,6 +120,20 @@ const orderPayments = pgTable(
     /** The wallet row this was derived from, where the backfill had one. */
     depositId: integer("deposit_id").references(() => deposits.id, { onDelete: "set null" }),
     recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
+
+    /**
+     * HOW this payment came to be attached to this order — see
+     * CONFIRMATION_BASIS below and db/migrations/0023.
+     *
+     * `recordedBy` answers a different and weaker question. On a backfilled
+     * row it names whoever keyed in the underlying *deposit*, not whoever
+     * decided that deposit paid for this order — and on the rows that matter
+     * most, nobody decided: the old oldest-credit-first walk did. This column
+     * is the one that separates evidence from inference.
+     */
+    confirmationBasis: varchar("confirmation_basis", { length: 24 })
+      .notNull()
+      .default("bank_matched"),
     note: text("note").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -177,4 +191,63 @@ const PAYMENT_SOURCE = {
   LEGACY: "legacy",
 };
 
-module.exports = { orderPayments, orderPaymentTransfers, PAYMENT_SOURCE };
+/**
+ * How a payment came to be attached to its order — the provenance question,
+ * kept separate from `source` (which says what KIND of money it is).
+ *
+ * The two verifiable levels are at the top. Everything below AUTO_ALLOCATED
+ * was decided by software with no human judgement recorded, which is precisely
+ * what made the finance report untrustworthy: all six of these used to render
+ * identically.
+ */
+const CONFIRMATION_BASIS = {
+  /** A person named this bank line for this order. Checkable against a statement. */
+  BANK_MATCHED: "bank_matched",
+  /** The bank line is real; migration 0021 chose which order it settles. */
+  BANK_INFERRED: "bank_inferred",
+  /** The old oldest-credit-first wallet walk picked a deposit. No bank line. */
+  AUTO_ALLOCATED: "auto_allocated",
+  /** No funding record ever existed; the amount is the order's own amount_paid. */
+  NO_RECORD: "no_record",
+  /** A person moved surplus between orders on the transfer screen. */
+  TRANSFER_DESK: "transfer_desk",
+  /** Migration 0021 converted an old wallet draw into a transfer. Nobody chose it. */
+  TRANSFER_AUTO: "transfer_auto",
+  /** Reached by no rule. Should not occur; surfaced rather than hidden. */
+  UNKNOWN: "unknown",
+};
+
+/** Bases an external auditor can check against a bank statement. */
+const VERIFIABLE_BASES = new Set([
+  CONFIRMATION_BASIS.BANK_MATCHED,
+  CONFIRMATION_BASIS.BANK_INFERRED,
+]);
+
+/** Bases where no person chose the attribution — the system did. */
+const SYSTEM_DECIDED_BASES = new Set([
+  CONFIRMATION_BASIS.BANK_INFERRED,
+  CONFIRMATION_BASIS.AUTO_ALLOCATED,
+  CONFIRMATION_BASIS.NO_RECORD,
+  CONFIRMATION_BASIS.TRANSFER_AUTO,
+]);
+
+/** Shown on the report and the order screens, verbatim. */
+const CONFIRMATION_BASIS_LABEL = {
+  [CONFIRMATION_BASIS.BANK_MATCHED]: "Matched to bank statement by staff",
+  [CONFIRMATION_BASIS.BANK_INFERRED]: "Bank line real — order chosen by the system",
+  [CONFIRMATION_BASIS.AUTO_ALLOCATED]: "Auto-allocated from wallet — no bank line",
+  [CONFIRMATION_BASIS.NO_RECORD]: "No payment record exists",
+  [CONFIRMATION_BASIS.TRANSFER_DESK]: "Transfer recorded by staff",
+  [CONFIRMATION_BASIS.TRANSFER_AUTO]: "Transfer auto-created by the system",
+  [CONFIRMATION_BASIS.UNKNOWN]: "Unknown",
+};
+
+module.exports = {
+  orderPayments,
+  orderPaymentTransfers,
+  PAYMENT_SOURCE,
+  CONFIRMATION_BASIS,
+  CONFIRMATION_BASIS_LABEL,
+  VERIFIABLE_BASES,
+  SYSTEM_DECIDED_BASES,
+};
