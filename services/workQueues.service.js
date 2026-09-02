@@ -1,6 +1,6 @@
-const { and, eq, inArray, count } = require("drizzle-orm");
+const { and, eq, inArray, notInArray, count } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { orders, pfiExpenses } = require("../db/schema");
+const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
 
 /**
@@ -37,6 +37,10 @@ const where = (...conditions) => and(...conditions.filter(Boolean));
 const AWAITING_TICKETING = ["Paid", "Released"];
 /** Order lifecycle states where a payment can still be confirmed. */
 const PAYABLE_STATUSES = ["Pending", "Paid", "Released", "Loading"];
+/** An order whose trucks the gate should still expect to see. */
+const GATE_LIVE_STATUSES = ["Released", "Loading"];
+/** An order that is over — its trucks are history, not a queue. */
+const ORDER_DEAD_STATUSES = ["Cancelled", "Expired"];
 
 /**
  * The queues, declared once.
@@ -85,11 +89,66 @@ const QUEUES = [
         ),
   },
   {
+    key: "awaitingGateIn",
+    path: "/security/entry",
+    label: "Trucks expected at the gate",
+    emptyLabel: "No trucks expected at the gate",
+    action: "Gate them in as they arrive",
+    /**
+     * Only trucks on a LIVE order. 5,236 truck rows sit at 'pending' against
+     * orders that were cancelled, expired or long since completed — they are
+     * never coming, and counting them would put a permanent four-figure badge
+     * on a page whose real queue is a couple of hundred.
+     */
+    count: (user) =>
+      db
+        .select({ n: count() })
+        .from(orderTrucks)
+        .innerJoin(orders, eq(orders.id, orderTrucks.orderId))
+        .where(
+          where(
+            eq(orderTrucks.status, "pending"),
+            inArray(orders.status, GATE_LIVE_STATUSES),
+            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+          ),
+        ),
+  },
+  {
+    key: "awaitingGateOut",
+    path: "/security/exit",
+    label: "Trucks on the yard",
+    emptyLabel: "The yard is clear",
+    action: "Clear them out once loaded",
+    // Gated in or loaded: physically inside, and somebody has to let them
+    // out. Excludes dead orders only — a truck on the yard is on the yard
+    // whatever happened to the paperwork behind it.
+    count: (user) =>
+      db
+        .select({ n: count() })
+        .from(orderTrucks)
+        .innerJoin(orders, eq(orders.id, orderTrucks.orderId))
+        .where(
+          where(
+            inArray(orderTrucks.status, ["gated_in", "loaded"]),
+            notInArray(orders.status, ORDER_DEAD_STATUSES),
+            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+          ),
+        ),
+  },
+  {
     key: "pendingExpenses",
     path: "/expenses",
     label: "Expenses awaiting approval",
     emptyLabel: "No expenses waiting on a decision",
     action: "Review and approve or decline",
+    /**
+     * Final approval genuinely rests with admin and super admin — nobody else
+     * can clear this queue. It is therefore the one queue that is personally
+     * theirs, and the landing page words it that way for them while wording
+     * every other queue as something the business is waiting on rather than
+     * something they are personally holding up.
+     */
+    approverRoles: [0, 1],
     count: (user) =>
       db
         .select({ n: count() })
@@ -135,12 +194,14 @@ const getWorkQueues = async (user) => {
 
   return {
     counts,
-    queues: results.map(({ key, path, label, emptyLabel, action, n, failed }) => ({
+    queues: results.map(({ key, path, label, emptyLabel, action, approverRoles, n, failed }) => ({
       key,
       path,
       label,
       emptyLabel,
       action,
+      /** Roles that personally clear this queue; absent where nobody owns it. */
+      approverRoles: approverRoles ?? null,
       count: n,
       failed: Boolean(failed),
     })),
