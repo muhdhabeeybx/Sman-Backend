@@ -29,14 +29,25 @@ const productCapacity = z.object({
 
 const productPrice = z.object({
   product: z.union([id("Product"), z.string(), z.number()]),
-  currentPrice: money("Price", { min: 0.01 }),
+  currentPrice: money("Price", { min: 0 }),
 });
 
 /**
- * Setting a fuel price. `min: 0.01` rather than 0: a zero price is almost
- * certainly a mistake, and it would make every order at that depot free — the
- * controller's existing `<= 0` check on read would then reject the order with
- * a confusing "no price configured".
+ * Setting a fuel price.
+ *
+ * `min: 0`, and zero is meaningful: it is how this system has always recorded
+ * "we do not sell this product at this depot". 40 of the 48 rows in
+ * depot_product_prices sit at 0 today, and everything downstream already reads
+ * it that way — loadCatalog filters on `currentPrice > 0`, and placing an
+ * order re-checks it before pricing.
+ *
+ * It was previously `min: 0.01`, on the reasoning that a zero price would make
+ * orders free. It would not, because of those two checks — what it actually
+ * did was make the state unreachable from the UI. A product could be taken off
+ * sale at a depot before that rule existed, and never again afterwards: prices
+ * are upserted, there is no delete path, so once a product had a price the
+ * only way back was a figure greater than zero. Setting it to nothing was
+ * impossible, which is the bug this restores.
  */
 const updateProductPrice = z.object({
   productId: id("Product"),
