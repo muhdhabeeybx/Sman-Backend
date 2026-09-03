@@ -807,16 +807,64 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
       }
     }
 
+    /**
+     * Keep the order's value equal to what it is made of.
+     *
+     * `price` and `totalAmount` arrive as independent optional fields, so a
+     * caller correcting a unit price — which is the common edit, and the reason
+     * this exists — would otherwise leave the total at the old price's figure.
+     * The two would then disagree on the face of the order, and every downstream
+     * total is built on `totalAmount`.
+     *
+     * Derived only when the caller did NOT state a total explicitly: an
+     * explicit total is a deliberate override (a negotiated figure that is not
+     * quantity x rate) and must win.
+     */
+    const priceChanged = set.price !== undefined;
+    const qtyChanged = set.quantity !== undefined;
+    if ((priceChanged || qtyChanged) && patch.totalAmount === undefined) {
+      const nextPrice = Number(set.price ?? order.price);
+      const nextQty = Number(set.quantity ?? order.quantity);
+      const derived = (nextPrice * nextQty).toFixed(2);
+      if (String(order.totalAmount) !== derived) {
+        changes.totalAmount = [order.totalAmount, derived];
+        set.totalAmount = derived;
+      }
+    }
+
     if (!Object.keys(set).length) return order;
 
     const updated = await orderRepo.update(orderId, set, tx);
+
+    /**
+     * A changed value changes whether the order is actually paid.
+     *
+     * Without this, correcting a 45,000 L order from ₦1,200 to ₦1,265 left it
+     * reading "Paid" while ₦2,925,000 short — the finance report computes
+     * shortfall from total_amount and showed the gap, but payment_status still
+     * said Paid, so the Payable Orders desk would not offer it for the top-up
+     * and nobody could settle it.
+     *
+     * recomputeOrder re-derives amountPaid and paymentStatus from the payment
+     * rows against the NEW total, inside this same transaction, so the edit and
+     * its consequence commit together.
+     */
+    let payment = null;
+    if (set.totalAmount !== undefined) {
+      payment = await orderPaymentService.recomputeOrder(orderId, tx);
+      if (payment.paymentStatus !== order.paymentStatus) {
+        changes.paymentStatus = [order.paymentStatus, payment.paymentStatus];
+      }
+    }
 
     await auditLogRepo.record(
       { entityType: "order", entityId: orderId, action: "order.updated", actor, metadata: { changes }, ipAddress, userAgent },
       tx
     );
 
-    return updated;
+    // Re-read: recomputeOrder wrote amountPaid and paymentStatus after
+    // orderRepo.update returned, so `updated` is already stale on those two.
+    return payment ? orderRepo.findById(orderId, tx) : updated;
   });
 }
 
