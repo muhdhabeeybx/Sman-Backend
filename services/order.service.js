@@ -58,7 +58,24 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
  * Cancelled and Expired are not here on purpose: an order that has finished,
  * been called off, or lapsed must not quietly accept more money.
  */
-const PAYABLE_STATUSES = new Set(["Pending", "Paid", "Released", "Loading"]);
+/**
+ * The statuses in which money may still be recorded against an order.
+ *
+ * `Completed` is here because money does not stop arriving when the last truck
+ * leaves, and because the record has to stay correctable after delivery. Two
+ * live cases forced it: VG11105 is carried as Paid on a cached figure
+ * ₦25,326,000 larger than the payment rows behind it, and the desk could not
+ * attach the lines that would close the gap; and an order whose lines were
+ * unmatched after delivery (they had been matched to the wrong order) could
+ * not then be given the right ones. In both, the money is real and the desk
+ * has the statement line in hand — refusing to record it does not make the
+ * order more accurate, only less.
+ *
+ * Cancelled and Expired stay out, and are refused explicitly below: an order
+ * nobody is fulfilling should not be quietly funded, and a lapsed one must be
+ * re-placed at current prices rather than paid at a stale one.
+ */
+const PAYABLE_STATUSES = new Set(["Pending", "Paid", "Released", "Loading", "Completed"]);
 
 /**
  * How much of an order may be ticketed, given what has been paid for it.
@@ -1251,7 +1268,26 @@ async function confirmOrderPayment({
       .limit(1);
 
     if (!order) throw httpError(404, "Order not found");
-    if (order.paymentStatus === "Paid") throw httpError(409, "Order is already paid");
+    /**
+     * A fully-paid order still accepts lines.
+     *
+     * This used to refuse with 409 "Order is already paid", which sounds like a
+     * safeguard and worked as a trap: an order is "paid" according to
+     * `amount_paid`, a cached figure that the 0021 backfill left overstating
+     * the payment rows on 36 orders by ₦1.11bn in total. Every one of those is
+     * carried as Paid while the evidence behind it is short, and the guard
+     * blocked the desk from attaching the very lines that would reconcile it.
+     *
+     * Removing it also makes the pair symmetrical: removePayment has never
+     * cared what an order's status is, so money could always be taken off an
+     * order and not put back. Correcting a mis-match needs both halves.
+     *
+     * Nothing downstream assumes this is the first payment — `isFirstPayment`
+     * below gates the status transition and the release, and
+     * runPostPaymentEffects is idempotent by construction. Money beyond the
+     * order's value lands as surplus, which the response names and the desk can
+     * transfer to the order it belongs to.
+     */
     if (order.status === "Expired") {
       throw httpError(409, "This order has expired. Please place a new order at current prices.");
     }
@@ -1260,17 +1296,31 @@ async function confirmOrderPayment({
     }
     if (Number(order.totalAmount) <= 0) throw httpError(400, "Order total is invalid");
 
-    // Whether this is the first money on the order decides whether there is a
-    // status transition to run. Read before the payment is recorded, because
-    // recording it is precisely what changes the answer.
+    /**
+     * Whether there is a status transition to run.
+     *
+     * Two conditions, not one. "First money on the order" is read before the
+     * payment is recorded, because recording it is precisely what changes the
+     * answer — but it is not sufficient on its own: an order that has already
+     * been released, loaded or delivered is past the Paid stage, and Paid is
+     * only ever legal FROM Pending (see TRANSITIONS in orderStatus.service.js).
+     *
+     * Without the status half, recording the first payment on a delivered
+     * order threw 409 "An order cannot move from Completed to Paid" — which is
+     * exactly the case this endpoint was just opened up for: an order whose
+     * lines were unmatched after delivery has amountPaid back at 0, so it looks
+     * like a first payment while its status is Completed. Money is recorded;
+     * the fulfilment status simply stays where it is.
+     */
     const isFirstPayment = Number(order.amountPaid ?? 0) <= 0;
+    const shouldTransition = isFirstPayment && orderStatus.isLegal(order.status, "Paid");
 
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
       { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note },
       tx,
     );
 
-    if (isFirstPayment) {
+    if (shouldTransition) {
       await orderStatus.transition(order.id, "Paid", {
         tx,
         actor,

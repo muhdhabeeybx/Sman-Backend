@@ -325,14 +325,34 @@ describe("part payment", () => {
     assert.equal(new Set(rows.map((r) => r.statementLineId)).size, 2, "two distinct bank lines");
   });
 
-  test("a fully-paid order refuses further payment", async () => {
+  /**
+   * This used to assert the opposite — that a fully-paid order refuses further
+   * payment with a 409.
+   *
+   * That guard read as a safeguard and worked as a trap. An order is "paid"
+   * according to `amount_paid`, a cached figure the 0021 backfill left
+   * overstating the payment rows on 36 orders by ₦1.11bn between them: every
+   * one of those is carried as Paid on evidence that does not add up, and the
+   * guard blocked the desk from attaching the very lines that would reconcile
+   * it. It was also asymmetric — removePayment has never cared about an
+   * order's status, so money could be taken off an order and never put back.
+   *
+   * The order is not harmed by the extra money: it lands as surplus, which the
+   * response names and which can be transferred to the order it belongs to.
+   * What still refuses payment is a cancelled or lapsed order — see
+   * tests/payment-after-delivery.test.js.
+   */
+  test("a fully-paid order accepts a correcting line, and holds it as surplus", async () => {
     const order = await makeOrder();
     await pay(order, TOTAL);
 
-    await assert.rejects(
-      () => pay(order, 1000),
-      (err) => err.status === 409,
-    );
+    await pay(order, 1000);
+
+    const rows = await paymentsFor(order.id);
+    assert.equal(rows.length, 2, "the correcting line should be recorded");
+    const row = await reload(order.id);
+    assert.equal(Number(row.amountPaid), TOTAL + 1000);
+    assert.equal(row.paymentStatus, "Paid");
   });
 
   test("one line covering the whole total settles the order outright", async () => {
