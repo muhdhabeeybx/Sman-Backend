@@ -23,3 +23,6 @@ WHATSAPP_PLAN.md
 WHATSAPP_ENGINE_PLAN.md
 PR2_PLAN.md
 .claude/
+
+# Pre-repair table snapshots: production customer data, never committed.
+scripts/backups/

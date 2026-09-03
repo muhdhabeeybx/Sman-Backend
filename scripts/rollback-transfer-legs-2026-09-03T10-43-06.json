@@ -1,0 +1,607 @@
+{
+  "takenAt": "2026-09-03T10:43:06.701Z",
+  "note": "Undo: delete order_payments by outLegPaymentId, delete order_payment_transfers by transferId, restore each relabelled row's priorSource/priorConfirmationBasis/priorTransferId, then restore orders.amount_paid and payment_status from ordersBefore.",
+  "created": [
+    {
+      "transferId": 49,
+      "outLegPaymentId": 16987,
+      "allocId": 8418
+    },
+    {
+      "transferId": 50,
+      "outLegPaymentId": 16988,
+      "allocId": 8185
+    },
+    {
+      "transferId": 51,
+      "outLegPaymentId": 16989,
+      "allocId": 8296
+    },
+    {
+      "transferId": 52,
+      "outLegPaymentId": 16990,
+      "allocId": 8278
+    },
+    {
+      "transferId": 53,
+      "outLegPaymentId": 16991,
+      "allocId": 9212
+    },
+    {
+      "transferId": 54,
+      "outLegPaymentId": 16992,
+      "allocId": 8254
+    },
+    {
+      "transferId": 55,
+      "outLegPaymentId": 16993,
+      "allocId": 8192
+    },
+    {
+      "transferId": 56,
+      "outLegPaymentId": 16994,
+      "allocId": 8360
+    },
+    {
+      "transferId": 57,
+      "outLegPaymentId": 16995,
+      "allocId": 9094
+    },
+    {
+      "transferId": 58,
+      "outLegPaymentId": 16996,
+      "allocId": 9273
+    },
+    {
+      "transferId": 59,
+      "outLegPaymentId": 16997,
+      "allocId": 8964
+    },
+    {
+      "transferId": 60,
+      "outLegPaymentId": 16998,
+      "allocId": 8882
+    },
+    {
+      "transferId": 61,
+      "outLegPaymentId": 16999,
+      "allocId": 8939
+    },
+    {
+      "transferId": 62,
+      "outLegPaymentId": 17000,
+      "allocId": 8628
+    },
+    {
+      "transferId": 63,
+      "outLegPaymentId": 17001,
+      "allocId": 8546
+    },
+    {
+      "transferId": 64,
+      "outLegPaymentId": 17002,
+      "allocId": 8862
+    },
+    {
+      "transferId": 65,
+      "outLegPaymentId": 17003,
+      "allocId": 8936
+    },
+    {
+      "transferId": 66,
+      "outLegPaymentId": 17004,
+      "allocId": 8290
+    },
+    {
+      "transferId": 67,
+      "outLegPaymentId": 17005,
+      "allocId": 10376
+    },
+    {
+      "transferId": 68,
+      "outLegPaymentId": 17006,
+      "allocId": 8554
+    },
+    {
+      "transferId": 69,
+      "outLegPaymentId": 17007,
+      "allocId": 8550
+    },
+    {
+      "transferId": 70,
+      "outLegPaymentId": 17008,
+      "allocId": 8880
+    },
+    {
+      "transferId": 71,
+      "outLegPaymentId": 17009,
+      "allocId": 8275
+    },
+    {
+      "transferId": 72,
+      "outLegPaymentId": 17010,
+      "allocId": 8273
+    },
+    {
+      "transferId": 73,
+      "outLegPaymentId": 17011,
+      "allocId": 8234
+    },
+    {
+      "transferId": 74,
+      "outLegPaymentId": 17012,
+      "allocId": 9081
+    },
+    {
+      "transferId": 75,
+      "outLegPaymentId": 17013,
+      "allocId": 8292
+    },
+    {
+      "transferId": 76,
+      "outLegPaymentId": 17014,
+      "allocId": 8552
+    },
+    {
+      "transferId": 77,
+      "outLegPaymentId": 17015,
+      "allocId": 8212
+    },
+    {
+      "transferId": 78,
+      "outLegPaymentId": 17016,
+      "allocId": 8214
+    },
+    {
+      "transferId": 79,
+      "outLegPaymentId": 17017,
+      "allocId": 8548
+    }
+  ],
+  "relabelled": [
+    {
+      "paymentId": 3384,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 49
+    },
+    {
+      "paymentId": 3165,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 50
+    },
+    {
+      "paymentId": 3264,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 51
+    },
+    {
+      "paymentId": 3249,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 52
+    },
+    {
+      "paymentId": 4154,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 53
+    },
+    {
+      "paymentId": 3228,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 54
+    },
+    {
+      "paymentId": 3171,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 55
+    },
+    {
+      "paymentId": 3327,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 56
+    },
+    {
+      "paymentId": 4039,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 57
+    },
+    {
+      "paymentId": 4670,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 58
+    },
+    {
+      "paymentId": 3913,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 59
+    },
+    {
+      "paymentId": 3835,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 60
+    },
+    {
+      "paymentId": 3889,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 61
+    },
+    {
+      "paymentId": 3586,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 62
+    },
+    {
+      "paymentId": 3509,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 63
+    },
+    {
+      "paymentId": 3817,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 64
+    },
+    {
+      "paymentId": 3887,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 65
+    },
+    {
+      "paymentId": 3260,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 66
+    },
+    {
+      "paymentId": 4672,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 67
+    },
+    {
+      "paymentId": 3513,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 68
+    },
+    {
+      "paymentId": 3511,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 69
+    },
+    {
+      "paymentId": 3834,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 70
+    },
+    {
+      "paymentId": 3247,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 71
+    },
+    {
+      "paymentId": 3246,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 72
+    },
+    {
+      "paymentId": 3209,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 73
+    },
+    {
+      "paymentId": 4027,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 74
+    },
+    {
+      "paymentId": 3261,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 75
+    },
+    {
+      "paymentId": 3512,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 76
+    },
+    {
+      "paymentId": 3190,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 77
+    },
+    {
+      "paymentId": 3191,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 78
+    },
+    {
+      "paymentId": 3510,
+      "priorSource": "legacy",
+      "priorConfirmationBasis": "auto_allocated",
+      "priorTransferId": null,
+      "transferId": 79
+    }
+  ],
+  "ordersBefore": [
+    {
+      "id": 9339,
+      "amount_paid": "47480000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9341,
+      "amount_paid": "35610000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9346,
+      "amount_paid": "730005000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9366,
+      "amount_paid": "59350000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9369,
+      "amount_paid": "53415000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9370,
+      "amount_paid": "53415000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9372,
+      "amount_paid": "331173000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9400,
+      "amount_paid": "71220000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9407,
+      "amount_paid": "53280000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9411,
+      "amount_paid": "112480000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9414,
+      "amount_paid": "59200000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9416,
+      "amount_paid": "59200000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9423,
+      "amount_paid": "53280000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9425,
+      "amount_paid": "36704000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9427,
+      "amount_paid": "338624000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9429,
+      "amount_paid": "53280000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9430,
+      "amount_paid": "59200000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9437,
+      "amount_paid": "183520000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9452,
+      "amount_paid": "51525000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9497,
+      "amount_paid": "101460000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9500,
+      "amount_paid": "51300000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9518,
+      "amount_paid": "57000000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9531,
+      "amount_paid": "68400000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9556,
+      "amount_paid": "68400000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9801,
+      "amount_paid": "49940000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9802,
+      "amount_paid": "17025000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 9803,
+      "amount_paid": "56750000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10026,
+      "amount_paid": "215650000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10053,
+      "amount_paid": "68100000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10056,
+      "amount_paid": "51075000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10060,
+      "amount_paid": "102060000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10096,
+      "amount_paid": "225200000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10098,
+      "amount_paid": "197050000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10103,
+      "amount_paid": "67560000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10118,
+      "amount_paid": "50670000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10122,
+      "amount_paid": "50580000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10132,
+      "amount_paid": "600366000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10151,
+      "amount_paid": "208050000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10158,
+      "amount_paid": "65700000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10164,
+      "amount_paid": "175200000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10171,
+      "amount_paid": "603788000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10173,
+      "amount_paid": "65700000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10222,
+      "amount_paid": "312768000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10375,
+      "amount_paid": "98820000.00",
+      "payment_status": "Paid"
+    },
+    {
+      "id": 10537,
+      "amount_paid": "485485000.00",
+      "payment_status": "Paid"
+    }
+  ]
+}
