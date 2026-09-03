@@ -61,9 +61,31 @@ function pgCodeOf(err, depth = 4) {
   return null;
 }
 
+/**
+ * The message Drizzle throws is a wrapper — "Failed query: select …" plus the
+ * parameters — and the actual reason lives on `.cause`. Logging only the
+ * wrapper records WHICH query failed and never WHY, which is how a log full of
+ * "Failed query" lines across unrelated tables says nothing at all: a dropped
+ * connection, a missing column and a constraint violation all read identically.
+ *
+ * Walks the same bounded chain as pgCodeOf so a self-referential cause cannot
+ * loop. Log only — the response body is unchanged, and a 5xx still tells the
+ * caller nothing about the schema.
+ */
+function causeChain(err, depth = 4) {
+  const parts = [];
+  let current = err?.cause;
+  for (let i = 0; i < depth && current; i++) {
+    const code = current.code ? `[${current.code}] ` : "";
+    if (current.message) parts.push(`${code}${current.message}`);
+    current = current.cause;
+  }
+  return parts.length ? ` <- ${parts.join(" <- ")}` : "";
+}
+
 const errorHandler = (err, req, res, next) => {
   logEvents(
-    `${err.name}: ${err.message}\t${req.method}\t${req.url}\t${req.headers.origin}`,
+    `${err.name}: ${err.message}${causeChain(err)}\t${req.method}\t${req.url}\t${req.headers.origin}`,
     "errLog.log"
   );
 
