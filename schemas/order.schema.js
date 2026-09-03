@@ -191,6 +191,24 @@ const transferOrderPayment = z.object({
   reason: z.string().trim().min(3, "Say why this surplus is being moved").max(500),
 });
 
+/**
+ * The payment and transfer routes each carry TWO path params, and both have to
+ * be declared.
+ *
+ * A params schema is a whitelist — validate() replaces req.params with what the
+ * schema returns, and Zod strips anything undeclared. So validating
+ * `/:id/payments/:paymentId` against `idParam` (which declares only `id`)
+ * deleted `paymentId` on the way through: the controller read `undefined`,
+ * `Number(undefined)` gave NaN, and Postgres rejected NaN as an integer —
+ * surfacing as a flat 400 "Invalid identifier or value" on every attempt to
+ * unmatch a payment or reverse a transfer, with nothing naming the real cause.
+ *
+ * `loadParam` below already had this right for the truck routes; the payment
+ * routes simply never got their own.
+ */
+const paymentParam = z.object({ id: id("Order id"), paymentId: id("Payment id") });
+const transferParam = z.object({ id: id("Order id"), transferId: id("Transfer id") });
+
 /** Take a payment back off an order and return its line to the pool. */
 const removeOrderPayment = z.object({
   reason: z.string().trim().min(3, "Say why this payment is being removed").max(500),
@@ -315,6 +333,8 @@ module.exports = {
   confirmOrderPayment,
   transferOrderPayment,
   removeOrderPayment,
+  paymentParam,
+  transferParam,
   reviewOrderPayment,
   updateMyTrucks,
   releaseOrder,

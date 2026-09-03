@@ -118,7 +118,7 @@ router.delete(
   "/:id/payments/:paymentId",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required" }),
-  validate({ params: orderSchemas.idParam, body: orderSchemas.removeOrderPayment }),
+  validate({ params: orderSchemas.paymentParam, body: orderSchemas.removeOrderPayment }),
   removeOrderPayment
 );
 
@@ -135,7 +135,7 @@ router.delete(
   "/:id/payments/transfer/:transferId",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required" }),
-  validate({ params: orderSchemas.idParam }),
+  validate({ params: orderSchemas.transferParam }),
   reverseOrderPaymentTransfer
 );
 
@@ -154,7 +154,7 @@ router.post(
   "/:id/payments/:paymentId/review",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required to review a payment" }),
-  validate({ params: orderSchemas.idParam, body: orderSchemas.reviewOrderPayment }),
+  validate({ params: orderSchemas.paymentParam, body: orderSchemas.reviewOrderPayment }),
   reviewOrderPayment
 );
 
@@ -162,7 +162,7 @@ router.post(
   "/:id/payments/transfer/:transferId/review",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required to review a transfer" }),
-  validate({ params: orderSchemas.idParam, body: orderSchemas.reviewOrderPayment }),
+  validate({ params: orderSchemas.transferParam, body: orderSchemas.reviewOrderPayment }),
   reviewOrderPaymentTransfer
 );
 
