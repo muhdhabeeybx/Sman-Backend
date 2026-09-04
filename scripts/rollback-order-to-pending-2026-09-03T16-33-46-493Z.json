@@ -1,0 +1,43 @@
+{
+  "takenAt": "2026-09-03T16:33:46.493Z",
+  "note": "Undo: restore orders.status/payment_status/amount_paid/payment_confirmed_at from orderBefore, then re-insert ticketsRemoved and commissionsRemoved.",
+  "orderBefore": {
+    "id": 11761,
+    "orderNumber": "ORD-4F18DE695B25",
+    "status": "Released",
+    "paymentStatus": "Unpaid",
+    "amountPaid": "0.00",
+    "paymentConfirmedAt": null
+  },
+  "ticketsRemoved": [
+    {
+      "id": 1249,
+      "ticketNumber": "TCK-11761",
+      "orderId": 11761,
+      "orderTruckId": null,
+      "status": "Active",
+      "qrCodeDataUrl": "data:image/png;base64,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",
+      "redeemedAt": null,
+      "redeemedBy": null,
+      "createdAt": "2026-09-03T16:24:21.452Z",
+      "updatedAt": "2026-09-03T16:24:21.468Z"
+    }
+  ],
+  "commissionsRemoved": [
+    {
+      "id": 658,
+      "orderId": 11761,
+      "customerId": 8006,
+      "depotId": 38,
+      "productId": 27,
+      "quantity": 45000,
+      "commissionRate": "0.00",
+      "commissionAmount": "0.00",
+      "status": "pending",
+      "paidAt": null,
+      "paidBy": null,
+      "createdAt": "2026-09-03T16:24:22.099Z",
+      "updatedAt": "2026-09-03T16:24:22.099Z"
+    }
+  ]
+}
