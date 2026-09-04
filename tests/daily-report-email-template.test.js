@@ -193,9 +193,15 @@ describe("daily report email — every desk's own figures", () => {
       ])
     );
 
-    assert.match(html, /45,000 L @ ₦1,200/);
-    assert.match(html, /15,000 L @ ₦1,250/);
+    assert.match(html, /45,000 Litres @ ₦1,200/);
+    assert.match(html, /15,000 Litres @ ₦1,250/);
     assert.match(html, /Acme Fuels/);
+
+    // They are COLUMNS now, not hint lines under the row: the price table and
+    // the customer list each get a heading, so a reader scanning the figures
+    // can look past them instead of stepping over them.
+    assert.match(html, /<th[^>]*>Prices<\/th>/, "Prices should be its own column");
+    assert.match(html, /<th[^>]*>Top customers<\/th>/, "Top customers should be its own column");
   });
 
   test("a role nobody filed says so once instead of a row of dashes", () => {
@@ -224,6 +230,50 @@ describe("daily report email — every desk's own figures", () => {
     assert.match(html, /Filer One/);
     assert.match(html, /Filer Two/);
     assert.match(html, /2 sheets/);
+  });
+
+  test("the filer's name carries no approval badge", () => {
+    // The report says what each desk filed. Whether a manager has since signed
+    // that sheet off is a workflow state that belongs in the Reports Hub — a
+    // green or red chip against a person's name, in a document that goes to
+    // the whole company, reads as a verdict on the person.
+    const { html } = renderDailyReportEmail(
+      build([
+        location({
+          staffEntries: staffEntries({
+            sales_manager: [entry({ submittedBy: "Filer One", status: "approved" })],
+            product_manager: [entry({ submittedBy: "Filer Two", status: "rejected" })],
+          }),
+        }),
+      ])
+    );
+
+    assert.match(html, /Filer One/);
+    assert.match(html, /Filer Two/);
+    assert.ok(!/APPROVED|>approved</i.test(html), "no approved badge");
+    assert.ok(!/REJECTED|>rejected</i.test(html), "no rejected badge");
+  });
+
+  test("a column only appears when a sheet in that table filled it in", () => {
+    // Prices, top customers and remarks are columns now. An empty "Top
+    // customers" column on every compliance table is the same noise the hint
+    // lines were, just in a different shape.
+    const { html } = renderDailyReportEmail(
+      build([
+        location({
+          staffEntries: staffEntries({
+            product_manager: [entry({ submittedBy: "Filer One", remarks: "Pump 3 down." })],
+            security_gate: [entry({ submittedBy: "Filer Two", remarks: "" })],
+          }),
+        }),
+      ])
+    );
+
+    assert.match(html, /<th[^>]*>Remarks<\/th>/, "the sheet with a remark gets the column");
+    assert.match(html, /Pump 3 down\./);
+    // The gate sheet filed no remark, so its table has three columns, not four.
+    const gateTable = html.slice(html.indexOf("SECURITY"));
+    assert.ok(!/<th[^>]*>Remarks<\/th>/.test(gateTable), "no empty Remarks column");
   });
 });
 
@@ -265,7 +315,7 @@ describe("daily report email — stock and orders", () => {
     }
     assert.ok(html.includes("26,855,679"), "opening stock is missing");
     assert.ok(html.includes("23,460,685"), "closing stock is missing");
-    assert.ok(html.includes("₦1,265/L"), "the average rate is missing");
+    assert.ok(html.includes("₦1,265 per litre"), "the average rate is missing");
 
     // Opening − Ordered = Closing. Both sides are attributed the same way, so
     // this holds on every row and the reader can check it straight across.
@@ -275,10 +325,15 @@ describe("daily report email — stock and orders", () => {
     // the row, and gave the reader a third number to reconcile.
     assert.ok(!/Moved today/i.test(html), "the movement column should be gone");
 
-    // The unit is abbreviated: "26,855,679 Litres" made the unit wider than
-    // the figure it qualifies.
-    assert.ok(!html.includes("26,855,679 Litres"), "unit should be abbreviated in tables");
-    assert.ok(html.includes("26,855,679 L"), "abbreviated unit is missing");
+    // The unit is spelled out. It was abbreviated to "L" to keep the columns
+    // narrow, and read as a gauge reading rather than as a report.
+    assert.ok(html.includes("26,855,679 Litres"), "the unit should be spelled out");
+    assert.ok(!/26,855,679 L</.test(html), "the abbreviated unit should be gone");
+
+    // No "All PFIs" total row, however many batches a location runs: a PFI is
+    // a separate purchase at its own rate, so the summed row's "avg rate" was
+    // an average of unrelated prices.
+    assert.ok(!html.includes("All PFIs"), "the PFI totals row should be gone");
   });
 
   test("a trimmed order list says so, and the totals still cover every order", () => {
@@ -303,10 +358,12 @@ describe("daily report email — stock and orders", () => {
       ])
     );
 
-    assert.match(html, /Listing the first 60 of 87 orders/);
+    assert.match(html, /Showing 60 of 87 orders/);
     // The summary band must show the true count, not the listed one — reading
     // the totals off the capped list understated 2 September by 30 orders.
-    assert.ok(html.includes(">87<"), "the true order count is missing from the summary");
+    // The litres are the headline figure and the count is the note beneath.
+    assert.ok(html.includes(">87,000 Litres<"), "the ordered quantity should lead the cell");
+    assert.ok(html.includes(">87 orders<"), "the true order count is missing from the summary");
   });
 
   test("the plain-text alternative carries the day, not three numbers", () => {

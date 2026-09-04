@@ -380,7 +380,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
           return {
             pfiNumber: pfi?.pfi_number || `PFI #${pfiId}`,
             productName: pfi?.product_name || "",
-            unit: pfi?.product_unit || "L",
+            unit: pfi?.product_unit || "Litres",
             allocation: pfi ? num(pfi.starting_qty_litres) : 0,
             openingStock,
             closingStock,

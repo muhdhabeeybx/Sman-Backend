@@ -36,11 +36,30 @@ const { escapeHtml } = require("./email");
  * spending twelve columns saying nothing.
  */
 
-const GREEN = "#1E5F3A";
-const GREEN_SOFT = "#F1F6F3";
-const BORDER = "#CCCCCC";
-const MUTED = "#6B7280";
+/**
+ * ── Black and white, with two colours that mean something ──────────────────
+ *
+ * The report used to be green throughout: green header rows, a green tint on
+ * every key cell, green section labels, a green rule above each depot. Colour
+ * that is everywhere carries no information — it was decoration, and it made
+ * the figures harder to pick out rather than easier.
+ *
+ * So the document is ink on white, and colour is spent on the two things a
+ * reader looks for first: what came IN — revenue and litres sold — in green,
+ * and what is LEFT or STILL OWED — closing stock, balances, unpaid commission
+ * — in red. Nothing else is coloured, which is what makes those two legible.
+ */
 const INK = "#1a1a1a";
+const MUTED = "#6B7280";
+/** Header rows: black ground, white type. */
+const HEAD = "#1a1a1a";
+const HEAD_KEY = "#000000";
+/** The one tint left in the document, for the cells that anchor a row. */
+const TINT = "#F5F5F5";
+/** Money in, product moved. */
+const CREDIT = "#15803D";
+/** What is left standing: closing stock, balances, amounts not yet paid. */
+const BALANCE = "#B91C1C";
 
 /**
  * Cells carry attributes, not repeated style strings.
@@ -59,12 +78,14 @@ const INK = "#1a1a1a";
 const TABLE =
   '<table width="100%" border="1" bordercolor="#CCCCCC" cellpadding="6" cellspacing="0" ' +
   'style="border-collapse:collapse;font-size:12px;">';
-const TH_S = "background:" + GREEN + ";color:#fff;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.3px;";
+const TH_S = "background:" + HEAD + ";color:#fff;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.3px;";
 // Opening and closing stock carry the report, so they are tinted: the eye
 // finds the two ends of the day's movement without reading the headers.
-const KEY_S = "background:" + GREEN_SOFT + ";font-weight:700;";
-const TH_KEY_S = TH_S + "background:#17492D;";
-const TOTAL_S = "border-top:2px solid " + GREEN + ";font-weight:700;background:#FAFAFA;";
+const KEY_S = "background:" + TINT + ";font-weight:700;";
+const TH_KEY_S = TH_S + "background:" + HEAD_KEY + ";";
+/** The two meaning-carrying colours, as cell styles. */
+const CREDIT_S = "color:" + CREDIT + ";font-weight:600;";
+const BALANCE_S = "color:" + BALANCE + ";font-weight:600;";
 
 /**
  * A plain cell carries no style attribute at all — the table's `border` and
@@ -116,32 +137,47 @@ const plural = (count, singular, pluralForm = `${singular}s`) =>
  * real 0 renders as 0.
  */
 const FORMATTERS = {
-  litres: (v, unit) => (v === null || v === undefined ? "—" : `${n0(v)} ${unit || "L"}`),
+  litres: (v, unit) => (v === null || v === undefined ? "—" : `${n0(v)} ${unitOf(unit)}`),
   money: (v) => (v === null || v === undefined ? "—" : `₦${n0(v)}`),
-  rate: (v, unit) => (v === null || v === undefined || Number(v) === 0 ? "—" : `₦${n0(v)}/${unit || "L"}`),
+  rate: (v, unit) =>
+    v === null || v === undefined || Number(v) === 0 ? "—" : `₦${n0(v)} per ${rateWord(unit)}`,
   count: (v) => (v === null || v === undefined ? "—" : n0(v)),
   text: (v) => escapeHtml(String(v ?? "")) || "—",
 };
 
 const NUMERIC_FORMATS = new Set(["litres", "money", "rate", "count"]);
 
+const TONE_STYLE = { credit: CREDIT_S, balance: BALANCE_S };
+
 /**
- * `pfis.product_unit` holds the word ("Litres"), which is right for a form
- * label and wrong for a column of nine-figure numbers — the unit ended up
- * wider than the value. Abbreviated for the tables, unrecognised units passed
- * through as written rather than guessed at.
+ * The unit, spelled out.
+ *
+ * These columns used to abbreviate to "L" to stay narrow. It read as
+ * engineering shorthand rather than as a report — "300,000 L" is a gauge
+ * reading, "300,000 Litres" is a sentence — so the word is written in full and
+ * the table is simply allowed to be wider; it already scrolls on its own.
+ * `pfis.product_unit` spells the same unit several ways, and an unrecognised
+ * one passes through as written rather than being guessed at.
  */
-const UNIT_SHORT = {
-  litres: "L",
-  litre: "L",
-  liters: "L",
-  kilograms: "kg",
-  kilogram: "kg",
-  kg: "kg",
+const UNIT_LABEL = {
+  l: "Litres",
+  litres: "Litres",
+  litre: "Litres",
+  liters: "Litres",
+  kilograms: "Kg",
+  kilogram: "Kg",
+  kg: "Kg",
   tonnes: "MT",
   mt: "MT",
 };
-const unitOf = (u) => UNIT_SHORT[String(u || "").toLowerCase()] || String(u || "L");
+const unitOf = (u) => UNIT_LABEL[String(u || "").toLowerCase()] || String(u || "Litres");
+
+/**
+ * The denominator in a rate: "₦1,200 per litre", not "₦1,200/Litres".
+ * A rate reads as prose, so the unit goes singular and lower-case.
+ */
+const RATE_WORD = { Litres: "litre", Kg: "kg", MT: "MT" };
+const rateWord = (u) => RATE_WORD[unitOf(u)] || unitOf(u).toLowerCase();
 
 /**
  * What each desk reports, in the order its own form asks for it.
@@ -152,6 +188,11 @@ const unitOf = (u) => UNIT_SHORT[String(u || "").toLowerCase()] || String(u || "
  * different things per role spelled out: `truckCount` is "Trucks exited" on the
  * gate sheet and "Trucks sold/loaded" everywhere else, and `amountPaid` is
  * "Commission paid" on the commission sheet and cash banked elsewhere.
+ *
+ * `tone` is the only place colour is decided for these tables: "credit" for a
+ * figure that means money in or product moved, "balance" for one that means
+ * what is left standing or not yet paid. A field with no tone prints in ink,
+ * which is most of them — that is the point.
  */
 const ROLE_FIELDS = {
   security_gate: [
@@ -160,12 +201,12 @@ const ROLE_FIELDS = {
   ],
   sales_manager: [
     { key: "openingStock", label: "Opening balance", fmt: "litres" },
-    { key: "litresSold", label: "Litres sold", fmt: "litres" },
+    { key: "litresSold", label: "Litres sold", fmt: "litres", tone: "credit" },
     { key: "avgPrice", label: "Avg price", fmt: "rate" },
-    { key: "totalSalesAmount", label: "Total sales", fmt: "money" },
+    { key: "totalSalesAmount", label: "Total sales", fmt: "money", tone: "credit" },
     { key: "truckCount", label: "Trucks sold", fmt: "count" },
-    { key: "amountPaid", label: "Amount paid", fmt: "money" },
-    { key: "totalInflow", label: "Total inflow", fmt: "money" },
+    { key: "amountPaid", label: "Amount paid", fmt: "money", tone: "credit" },
+    { key: "totalInflow", label: "Total inflow", fmt: "money", tone: "credit" },
     { key: "differentials", label: "Differentials", fmt: "money" },
     { key: "yesterdayDeficitPayment", label: "Yest. deficit", fmt: "money" },
     { key: "yesterdaySurplusPayment", label: "Yest. surplus", fmt: "money" },
@@ -175,28 +216,28 @@ const ROLE_FIELDS = {
   product_manager: [
     { key: "openingStock", label: "Opening (b/f)", fmt: "litres" },
     { key: "receivedStock", label: "Ordered today", fmt: "litres" },
-    { key: "litresSold", label: "Loaded today", fmt: "litres" },
+    { key: "litresSold", label: "Loaded today", fmt: "litres", tone: "credit" },
     { key: "loadingLeftOver", label: "Loading left over", fmt: "litres" },
-    { key: "tankBalance", label: "Tank balance", fmt: "litres" },
+    { key: "tankBalance", label: "Tank balance", fmt: "litres", tone: "balance" },
     { key: "truckCount", label: "Trucks loaded", fmt: "count" },
     { key: "differentials", label: "Differentials", fmt: "money" },
   ],
   commissions: [
-    { key: "fundsReceived", label: "Funds received", fmt: "money" },
-    { key: "litresSold", label: "Litres sold", fmt: "litres" },
+    { key: "fundsReceived", label: "Funds received", fmt: "money", tone: "credit" },
+    { key: "litresSold", label: "Litres sold", fmt: "litres", tone: "credit" },
     { key: "truckCount", label: "Trucks sold", fmt: "count" },
     { key: "customerCount", label: "Customers", fmt: "count" },
     { key: "orderCount", label: "Orders", fmt: "count" },
     { key: "commissionDue", label: "Commission due", fmt: "money" },
-    { key: "amountPaid", label: "Commission paid", fmt: "money" },
-    { key: "commissionOutstanding", label: "Not yet paid", fmt: "money" },
-    { key: "fundsRemaining", label: "Funds remaining", fmt: "money" },
+    { key: "amountPaid", label: "Commission paid", fmt: "money", tone: "credit" },
+    { key: "commissionOutstanding", label: "Not yet paid", fmt: "money", tone: "balance" },
+    { key: "fundsRemaining", label: "Funds remaining", fmt: "money", tone: "balance" },
   ],
   it_compliance: [
     { key: "orderCount", label: "Orders", fmt: "count" },
-    { key: "litresSold", label: "Litres ordered", fmt: "litres" },
+    { key: "litresSold", label: "Litres ordered", fmt: "litres", tone: "credit" },
     { key: "avgPrice", label: "Avg price", fmt: "rate" },
-    { key: "totalSalesAmount", label: "Total value", fmt: "money" },
+    { key: "totalSalesAmount", label: "Total value", fmt: "money", tone: "credit" },
   ],
 };
 
@@ -204,27 +245,10 @@ const ROLE_FIELDS = {
 const HAS_PRICE_BANDS = new Set(["sales_manager", "it_compliance"]);
 const HAS_TOP_CUSTOMERS = new Set(["it_compliance"]);
 
-/**
- * Only a sheet a manager has actually ruled on gets a badge.
- *
- * `submitted` is the state every sheet starts in, so badging it put the same
- * amber chip on every row and made the two states worth noticing — approved
- * and rejected — harder to spot, not easier.
- */
-const STATUS_STYLE = {
-  approved: "background:#DCFCE7;color:#166534;",
-  rejected: "background:#FEE2E2;color:#991B1B;",
-};
-
-function statusBadge(status) {
-  const key = String(status || "").toLowerCase();
-  const style = STATUS_STYLE[key];
-  if (!style) return "";
-  return (
-    `<span style="display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;` +
-    `font-weight:700;text-transform:uppercase;letter-spacing:.3px;${style}">${escapeHtml(key)}</span>`
-  );
-}
+// No approval badge beside the filer's name. The report says what each desk
+// filed; whether a manager has since signed it off is a workflow state that
+// belongs in the Reports Hub, and a green or red chip against a person's name
+// in a document circulated to the whole company reads as a verdict on them.
 
 // ─── The at-a-glance band ───────────────────────────────────────────────────
 
@@ -234,14 +258,16 @@ function statusBadge(status) {
  * Built as a table rather than flex or grid: Outlook renders neither, and this
  * is the one block that has to survive every client intact.
  */
+const TONE_COLOR = { credit: CREDIT, balance: BALANCE };
+
 function summaryBand(cells) {
   const width = `${Math.floor(100 / cells.length)}%`;
   const tds = cells
     .map(
       (c) =>
-        `<td width="${width}" style="background:${GREEN_SOFT};vertical-align:top;">` +
+        `<td width="${width}" style="background:${TINT};vertical-align:top;">` +
         `<div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:${MUTED};">${escapeHtml(c.label)}</div>` +
-        `<div style="font-size:15px;font-weight:700;color:${GREEN};padding-top:2px;">${c.value}</div>` +
+        `<div style="font-size:15px;font-weight:700;color:${TONE_COLOR[c.tone] || INK};padding-top:2px;">${c.value}</div>` +
         (c.note ? `<div style="font-size:10px;color:${MUTED};padding-top:1px;">${escapeHtml(c.note)}</div>` : "") +
         `</td>`
     )
@@ -291,69 +317,61 @@ function stockTable(pfiStock) {
         cell(escapeHtml(r.pfiNumber)) +
         cell(escapeHtml(r.productName) || "—", { s: `color:${MUTED};` }) +
         cell(`${n0(r.openingStock)} ${u}`, { r: true, s: KEY_S }) +
-        cell(r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—", { r: true }) +
-        cell(m(r.orderedValue), { r: true }) +
-        cell(r.confirmedQty ? `${n0(r.confirmedQty)} ${u}` : "—", { r: true }) +
-        cell(m(r.confirmedValue), { r: true }) +
-        cell(r.avgRate ? `₦${n0(r.avgRate)}/${u}` : "—", { r: true }) +
-        cell(`${n0(r.closingStock)} ${u}`, { r: true, s: KEY_S }) +
-        cell(m(r.totalRevenue), { r: true }) +
+        cell(r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
+        cell(m(r.orderedValue), { r: true, s: CREDIT_S }) +
+        cell(r.confirmedQty ? `${n0(r.confirmedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
+        cell(m(r.confirmedValue), { r: true, s: CREDIT_S }) +
+        cell(r.avgRate ? `₦${n0(r.avgRate)} per ${rateWord(r.unit)}` : "—", { r: true }) +
+        cell(`${n0(r.closingStock)} ${u}`, { r: true, s: KEY_S + BALANCE_S }) +
+        cell(m(r.totalRevenue), { r: true, s: CREDIT_S }) +
         "</tr>"
       );
     })
     .join("");
 
-  const t = pfiStock.reduce(
-    (acc, r) => {
-      acc.opening += r.openingStock;
-      acc.orderedQty += r.orderedQty;
-      acc.orderedValue += r.orderedValue;
-      acc.confirmedQty += r.confirmedQty;
-      acc.confirmedValue += r.confirmedValue;
-      acc.closing += r.closingStock;
-      return acc;
-    },
-    { opening: 0, orderedQty: 0, orderedValue: 0, confirmedQty: 0, confirmedValue: 0, closing: 0 }
-  );
-  const avgRate = t.orderedQty > 0 ? t.orderedValue / t.orderedQty : 0;
-
-  const totalRow =
-    "<tr>" +
-    cell("All PFIs", { s: TOTAL_S + "text-align:left;", span: 2 }) +
-    cell(n0(t.opening), { r: true, s: TOTAL_S }) +
-    cell(t.orderedQty ? n0(t.orderedQty) : "—", { r: true, s: TOTAL_S }) +
-    cell(m(t.orderedValue), { r: true, s: TOTAL_S }) +
-    cell(t.confirmedQty ? n0(t.confirmedQty) : "—", { r: true, s: TOTAL_S }) +
-    cell(m(t.confirmedValue), { r: true, s: TOTAL_S }) +
-    cell(avgRate ? `₦${n0(avgRate)}` : "—", { r: true, s: TOTAL_S }) +
-    cell(n0(t.closing), { r: true, s: TOTAL_S }) +
-    cell("", { s: TOTAL_S }) +
-    "</tr>";
-
-  return `<div style="overflow-x:auto;">${TABLE}<thead><tr>${header}</tr></thead><tbody>${rows}${totalRow}</tbody></table></div>`;
+  // No "All PFIs" total row, however many batches a location is running.
+  //
+  // A PFI is a separate purchase at its own rate, often of a different product;
+  // summing them produced a line whose stock figures were real but whose "avg
+  // rate" was an average of unrelated prices, and whose only honest reading was
+  // "these numbers happen to be in the same table". Each row stands on its own,
+  // and the location's real totals are already in the band above.
+  return `<div style="overflow-x:auto;">${TABLE}<thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 // ─── Staff entries, one table per role ──────────────────────────────────────
 
-/** The price table a sales or compliance sheet was filed with, inline. */
-function priceBandsCell(bands) {
-  if (!bands || bands.length === 0) return "";
-  const rows = bands.map((b) => `${n0(b.litres)} L @ ₦${n0(b.price)}`).join(" &nbsp;·&nbsp; ");
-  return (
-    `<div style="padding-top:3px;font-size:11px;color:${MUTED};">` +
-    `<span style="text-transform:uppercase;letter-spacing:.3px;">Prices:</span> ${rows}</div>`
-  );
-}
+/**
+ * Prices, the customer list and remarks are COLUMNS, not notes under the row.
+ *
+ * They used to render as a second full-width row beneath each entry, each
+ * prefixed with its own little "Prices:" / "Top customers:" / "Remarks:"
+ * label — three lines of hint text per sheet filed. Across five roles and
+ * several PFIs that becomes most of the section, and a reader following a
+ * column of figures has to step over prose to reach the next number.
+ *
+ * As columns they line up with everything else, and a reader who does not want
+ * them can look past them — which is the whole reason a column exists.
+ *
+ * A column only appears when at least one sheet in that table actually filled
+ * it in: an empty "Top customers" column on every compliance table is the same
+ * noise wearing a different hat.
+ */
+const priceBandsText = (bands) =>
+  (bands || []).map((b) => `${n0(b.litres)} Litres @ ₦${n0(b.price)}`).join("<br>");
 
-/** Compliance's top five, inline. */
-function topCustomersCell(list) {
-  if (!list || list.length === 0) return "";
-  const rows = list.map((c) => `${escapeHtml(c.name) || "—"} (${n0(c.litres)} L)`).join(" &nbsp;·&nbsp; ");
-  return (
-    `<div style="padding-top:3px;font-size:11px;color:${MUTED};">` +
-    `<span style="text-transform:uppercase;letter-spacing:.3px;">Top customers:</span> ${rows}</div>`
-  );
-}
+const topCustomersText = (list) =>
+  (list || []).map((c) => `${escapeHtml(c.name) || "—"} &mdash; ${n0(c.litres)} Litres`).join("<br>");
+
+/** An array with something in it, or a string that is not just whitespace. */
+const filled = (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "");
+
+const EXTRA_COLUMNS = [
+  { key: "priceBands", label: "Prices", roles: HAS_PRICE_BANDS, render: priceBandsText },
+  { key: "topCustomers", label: "Top customers", roles: HAS_TOP_CUSTOMERS, render: topCustomersText },
+  // Every role can leave a remark, so this one is not restricted by role.
+  { key: "remarks", label: "Remarks", roles: null, render: (v) => escapeHtml(String(v)) },
+];
 
 function roleTable({ role, type, entries }) {
   const fields = ROLE_FIELDS[type] || [];
@@ -366,48 +384,46 @@ function roleTable({ role, type, entries }) {
     );
   }
 
+  const extraCols = EXTRA_COLUMNS.filter(
+    (c) => (!c.roles || c.roles.has(type)) && entries.some((e) => filled(e[c.key]))
+  );
+
   const header =
     hcell("PFI") +
     hcell("Filed by") +
-    fields.map((f) => hcell(f.label, { r: NUMERIC_FORMATS.has(f.fmt) })).join("");
+    fields.map((f) => hcell(f.label, { r: NUMERIC_FORMATS.has(f.fmt) })).join("") +
+    extraCols.map((c) => hcell(c.label)).join("");
 
   const rows = entries
     .map((e) => {
       const cells = fields
         .map((f) => {
           const fmt = FORMATTERS[f.fmt] || FORMATTERS.text;
-          return cell(fmt(e[f.key], "L"), { r: NUMERIC_FORMATS.has(f.fmt) });
+          const value = fmt(e[f.key], e.unit);
+          // An em-dash means "not filled in" and is not a figure, so it never
+          // takes a colour — a red dash reads as a problem where there is none.
+          const tone = f.tone && value !== "—" ? TONE_STYLE[f.tone] : "";
+          return cell(value, { r: NUMERIC_FORMATS.has(f.fmt), s: tone });
         })
         .join("");
 
-      // Remarks, prices and the customer list sit full-width beneath the row
-      // rather than in columns: they are prose and lists, and squeezing them
-      // into a numeric grid is what made the old single table unreadable.
-      const extras =
-        (HAS_PRICE_BANDS.has(type) ? priceBandsCell(e.priceBands) : "") +
-        (HAS_TOP_CUSTOMERS.has(type) ? topCustomersCell(e.topCustomers) : "") +
-        (e.remarks
-          ? `<div style="padding-top:3px;font-size:11px;color:${MUTED};">` +
-            `<span style="text-transform:uppercase;letter-spacing:.3px;">Remarks:</span> ${escapeHtml(e.remarks)}</div>`
-          : "");
+      const extras = extraCols
+        .map((c) => cell(filled(e[c.key]) ? c.render(e[c.key]) : "—"))
+        .join("");
 
-      const main =
+      return (
         "<tr>" +
         cell(escapeHtml(e.pfiNumber) || "—") +
-        cell(`${escapeHtml(e.submittedBy) || "—"} ${statusBadge(e.status)}`) +
+        cell(escapeHtml(e.submittedBy) || "—") +
         cells +
-        "</tr>";
-
-      const extraRow = extras
-        ? `<tr>${cell(extras, { s: "border-top:none;", span: fields.length + 2 })}</tr>`
-        : "";
-
-      return main + extraRow;
+        extras +
+        "</tr>"
+      );
     })
     .join("");
 
   return (
-    `<p style="margin:16px 0 4px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:${GREEN};font-size:12px;">` +
+    `<p style="margin:16px 0 4px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:${INK};font-size:12px;">` +
     `${escapeHtml(role)} <span style="color:${MUTED};font-weight:400;text-transform:none;letter-spacing:0;">` +
     `— ${plural(entries.length, "sheet")}</span></p>` +
     `<div style="overflow-x:auto;">${TABLE}<thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`
@@ -416,7 +432,7 @@ function roleTable({ role, type, entries }) {
 
 // ─── Orders ─────────────────────────────────────────────────────────────────
 
-const ORDER_HEADERS = ["Reference", "Customer", "Product", "Qty", "Rate", "Amount", "Status"];
+const ORDER_HEADERS = ["Reference", "Customer", "Product", "Quantity", "Rate", "Amount", "Status"];
 const ORDER_NUMERIC = new Set([3, 4, 5]);
 
 function ordersTable(orders, total) {
@@ -424,11 +440,12 @@ function ordersTable(orders, total) {
     return `<p style="color:${MUTED};margin:4px 0;">No orders today.</p>`;
   }
   // Say so when the list is trimmed, rather than letting the reader count the
-  // rows and believe that was the whole day.
+  // rows and believe that was the whole day. Kept to one short line: it is the
+  // only note in the section, and it changes how the table is read.
   const trimmed =
     total > orders.length
       ? `<p style="margin:4px 0 0;color:${MUTED};font-size:11px;">` +
-        `Listing the first ${n0(orders.length)} of ${n0(total)} orders — the figures above cover all ${n0(total)}.</p>`
+        `Showing ${n0(orders.length)} of ${n0(total)} orders. The figures above cover all ${n0(total)}.</p>`
       : "";
   const header = ORDER_HEADERS.map((label, i) => hcell(label, { r: ORDER_NUMERIC.has(i) })).join("");
   const rows = orders
@@ -437,8 +454,8 @@ function ordersTable(orders, total) {
         escapeHtml(o.reference),
         escapeHtml(o.customer) || "—",
         escapeHtml(o.product) || "—",
-        `${n0(o.quantity)} L`,
-        o.rate ? `₦${n0(o.rate)}/L` : "—",
+        `${n0(o.quantity)} ${unitOf(o.unit)}`,
+        o.rate ? `₦${n0(o.rate)} per ${rateWord(o.unit)}` : "—",
         o.amount ? `₦${n0(o.amount)}` : "—",
         escapeHtml(o.status),
       ];
@@ -450,20 +467,33 @@ function ordersTable(orders, total) {
 
 // ─── Assembly ────────────────────────────────────────────────────────────────
 
-const SECTION_LABEL = `margin:22px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${GREEN};font-size:12px;`;
+const SECTION_LABEL = `margin:22px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${INK};font-size:12px;`;
 
 function locationSection(loc) {
   const filed = loc.staffEntries.reduce((count, s) => count + s.entries.length, 0);
 
   return (
-    `<div style='margin-top:26px;padding:0 0 4px;border-top:2px solid ${GREEN};'>` +
-    `<h3 style='margin:12px 0 2px;font-size:15px;color:${GREEN};'>${escapeHtml(loc.name)}</h3>` +
+    `<div style='margin-top:26px;padding:0 0 4px;border-top:2px solid ${INK};'>` +
+    `<h3 style='margin:12px 0 2px;font-size:15px;color:${INK};'>${escapeHtml(loc.name)}</h3>` +
     summaryBand([
-      { label: "Opening stock", value: `${n0(loc.stock.opening)} L` },
-      { label: "Ordered", value: n0(loc.orderCount), note: `${n0(loc.orderLitres)} L` },
-      { label: "Sales value", value: m(loc.orderValue) },
-      { label: "Confirmed", value: `${n0(loc.stock.confirmedQty)} L`, note: m(loc.stock.confirmedValue) },
-      { label: "Closing stock", value: `${n0(loc.stock.closing)} L` },
+      { label: "Opening stock", value: `${n0(loc.stock.opening)} Litres` },
+      // The quantity is the headline; the order count is the footnote. It was
+      // the other way round, so the biggest figure in the cell was "12" — a
+      // number nobody trades on — while the litres sat underneath in grey.
+      {
+        label: "Ordered",
+        value: `${n0(loc.orderLitres)} Litres`,
+        note: plural(loc.orderCount, "order"),
+        tone: "credit",
+      },
+      { label: "Sales value", value: m(loc.orderValue), tone: "credit" },
+      {
+        label: "Confirmed",
+        value: `${n0(loc.stock.confirmedQty)} Litres`,
+        note: m(loc.stock.confirmedValue),
+        tone: "credit",
+      },
+      { label: "Closing stock", value: `${n0(loc.stock.closing)} Litres`, tone: "balance" },
       { label: "Sheets filed", value: `${filed} of 5` },
     ]) +
     `<p style='${SECTION_LABEL}'>PFI stock &amp; sales</p>` +
@@ -493,16 +523,21 @@ function combinedReportBody(d) {
   } = d.totals || {};
 
   const header =
-    `<h2 style='margin:0 0 2px;font-size:18px;color:${GREEN};'>Daily Report &mdash; ${plainDate(d.reportDate)}</h2>` +
+    `<h2 style='margin:0 0 2px;font-size:18px;color:${INK};'>Daily Report &mdash; ${plainDate(d.reportDate)}</h2>` +
     `<p style='margin:0 0 4px;color:${MUTED};font-size:12px;'>` +
     `${plural(locations.length, "location")} &nbsp;&bull;&nbsp; ` +
     `${plural(staffEntries, "sheet")} filed</p>` +
     summaryBand([
-      { label: "Opening stock", value: `${n0(openingStock)} L` },
-      { label: "Ordered", value: n0(orderCount), note: `${n0(qtyLitres)} L` },
-      { label: "Sales value", value: m(amountNaira) },
-      { label: "Confirmed", value: `${n0(confirmedQty)} L`, note: m(confirmedValue) },
-      { label: "Closing stock", value: `${n0(closingStock)} L` },
+      { label: "Opening stock", value: `${n0(openingStock)} Litres` },
+      {
+        label: "Ordered",
+        value: `${n0(qtyLitres)} Litres`,
+        note: plural(orderCount, "order"),
+        tone: "credit",
+      },
+      { label: "Sales value", value: m(amountNaira), tone: "credit" },
+      { label: "Confirmed", value: `${n0(confirmedQty)} Litres`, note: m(confirmedValue), tone: "credit" },
+      { label: "Closing stock", value: `${n0(closingStock)} Litres`, tone: "balance" },
     ]);
 
   return header + locations.map(locationSection).join("");
@@ -540,19 +575,20 @@ function renderDailyReportEmail(d) {
   const text =
     `Dear Sir,\n\n` +
     `Daily Report for ${subjectDate}\n\n` +
-    `Opening stock: ${n0(openingStock)} L\n` +
-    `Ordered:       ${n0(orderCount)} order(s), ${n0(qtyLitres)} L\n` +
+    `Opening stock: ${n0(openingStock)} Litres\n` +
+    `Ordered:       ${n0(qtyLitres)} Litres, ${plural(orderCount, "order")}\n` +
     `Sales value:   ${n0(amountNaira)}\n` +
-    `Confirmed:     ${n0(confirmedQty)} L, ${n0(confirmedValue)}\n` +
-    `Closing stock: ${n0(closingStock)} L\n` +
+    `Confirmed:     ${n0(confirmedQty)} Litres, ${n0(confirmedValue)}\n` +
+    `Closing stock: ${n0(closingStock)} Litres\n` +
     `Sheets filed:  ${n0(staffEntries)}\n\n` +
     (d.locations || [])
       .map(
         (loc) =>
           `${loc.name}\n` +
-          `  opening ${n0(loc.stock.opening)} L / ordered ${n0(loc.stock.orderedQty)} L / ` +
-          `confirmed ${n0(loc.stock.confirmedQty)} L / closing ${n0(loc.stock.closing)} L\n` +
-          `  ${loc.orderCount} order(s), ${loc.staffEntries.reduce((c, s) => c + s.entries.length, 0)} sheet(s) filed`
+          `  opening ${n0(loc.stock.opening)} Litres / ordered ${n0(loc.stock.orderedQty)} Litres / ` +
+          `confirmed ${n0(loc.stock.confirmedQty)} Litres / closing ${n0(loc.stock.closing)} Litres\n` +
+          `  ${plural(loc.orderCount, "order")}, ` +
+          `${plural(loc.staffEntries.reduce((c, s) => c + s.entries.length, 0), "sheet")} filed`
       )
       .join("\n") +
     `\n\nBest regards,\nSoroman System`;
