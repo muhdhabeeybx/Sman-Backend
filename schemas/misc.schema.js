@@ -571,10 +571,6 @@ const optPfiDate = (label = "Date") =>
 const pfiBase = {
   pfiNumber: z.string().trim().max(100).optional(),
   pfi_number: z.string().trim().max(100).optional(),
-  // Not "finished": closing a batch records closure figures and is the
-  // /finish endpoint's job. Letting a plain PATCH set it would close a cargo
-  // with no closure date, no handler and no inflow on record.
-  status: enumOf("Status", ["not_started", "active"]).optional(),
   // Coastal batches arrive by sea and are billed on a BL; gantry batches are
   // an allocation bought at the loading gantry and split into tickets. Absent
   // means coastal — the only kind that existed before the distinction did.
@@ -635,7 +631,11 @@ const pfiBase = {
   surveyorPhone: optPfiStr("Surveyor phone", 50),
   surveyor_phone: optPfiStr("Surveyor phone", 50),
   notes: optPfiStr("Notes", 1000),
-  status: enumOf("Status", ["active", "finished"]).optional(),
+  // All three states. `finished` stays reachable here because the PFI detail
+  // page closes a batch through this PATCH rather than through /finish — it
+  // sends the closure figures in the same request. Narrowing this to the two
+  // live states would break that form.
+  status: enumOf("Status", ["not_started", "active", "finished"]).optional(),
   closureDate: optPfiDate("Closure date"),
   closure_date: optPfiDate("Closure date"),
   closureBank: optPfiStr("Closure bank", 255),
