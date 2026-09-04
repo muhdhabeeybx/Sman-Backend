@@ -28,12 +28,77 @@ const ROLE_TAGS = [
   { type: "it_compliance", label: "IT_COMPLIANCE" },
 ];
 
-const dayBounds = (date) => {
-  const start = new Date(date);
-  start.setUTCHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 1);
-  return { start, end };
+/**
+ * The reporting day is a LAGOS day, not a UTC one.
+ *
+ * This used to take UTC midnight either side, which put the window an hour out
+ * from the day the business actually trades: "2026-09-04" meant 01:00 WAT on
+ * the 4th to 01:00 WAT on the 5th.
+ *
+ * On its own that is merely odd. Combined with sending the report at 23:50 WAT
+ * it opened a hole: the last 1h10m of each window had not happened yet when the
+ * email went out, and the next night's window began after it — so every order
+ * placed between 23:50 and 01:00 appeared in NO report, every day. A daily
+ * report that is quietly incomplete is worse than one that is late.
+ *
+ * Anchoring on the Lagos calendar day closes it. `daily_reports.report_date`
+ * is the date staff typed on the form in Lagos, so this also makes the staff
+ * sheets line up with the orders they were filed against.
+ */
+const REPORT_TZ = process.env.REPORT_TIMEZONE || "Africa/Lagos";
+
+/** "2026-09-04" — the calendar date at this instant, in the reporting zone. */
+const localDateStr = (date, tz = REPORT_TZ) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+
+/** How far the reporting zone is ahead of UTC at a given instant, in ms. */
+const zoneOffsetMs = (date, tz = REPORT_TZ) => {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+      .formatToParts(date)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, Number(p.value)])
+  );
+  // `hour` comes back as 24 at midnight under hour12:false in some ICU builds.
+  const asIfUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour % 24, parts.minute, parts.second);
+  return asIfUtc - Math.floor(date.getTime() / 1000) * 1000;
+};
+
+/**
+ * The UTC instant at which a given local calendar day begins.
+ *
+ * Two passes: the first guess uses the offset at UTC midnight, the second
+ * re-reads the offset at that guess. Lagos has no DST so one pass would do,
+ * but a zone that does would land an hour out on two days a year.
+ */
+const zonedDayStart = (dayStr, tz = REPORT_TZ) => {
+  const guess = new Date(`${dayStr}T00:00:00Z`);
+  let instant = new Date(guess.getTime() - zoneOffsetMs(guess, tz));
+  instant = new Date(guess.getTime() - zoneOffsetMs(instant, tz));
+  return instant;
+};
+
+const dayBounds = (date, tz = REPORT_TZ) => {
+  const dayStr = localDateStr(date, tz);
+  const start = zonedDayStart(dayStr, tz);
+  const next = new Date(`${dayStr}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const end = zonedDayStart(localDateStr(next, "UTC"), tz);
+  return { start, end, dayStr };
 };
 
 const num = (v) => Number(v || 0);
@@ -124,10 +189,13 @@ const normaliseTopCustomers = (raw) =>
     .filter((c) => c.name || c.litres > 0);
 
 const buildCombinedDailyReportData = async (date = new Date()) => {
-  const { start, end } = dayBounds(date);
-  const reportDateStr = start.toISOString().slice(0, 10);
+  const { start, end, dayStr } = dayBounds(date);
+  // The Lagos calendar date, NOT start.toISOString() — `start` is now 23:00 UTC
+  // on the previous day, so slicing it would name the wrong report date and
+  // would not match what staff typed on their sheets.
+  const reportDateStr = dayStr;
 
-  const [depots, activePfis, reports, ordersToday, pfiLifetimeRevenue, pfiTrading] =
+  const [depots, activePfis, reports, ordersToday, priorDays, pfiLifetimeRevenue, pfiTrading] =
     await Promise.all([
       client`SELECT id, name, city, state FROM depots ORDER BY city ASC`,
       client`
@@ -161,6 +229,22 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         LEFT JOIN products pr ON pr.id = o.product_id
         WHERE o.created_at >= ${start.toISOString()} AND o.created_at < ${end.toISOString()}
         ORDER BY o.created_at ASC
+      `,
+      // The seven days BEFORE this one, a day at a time. The summary needs
+      // something to compare today against: a figure on its own says nothing —
+      // "190,000 Litres" is only good or bad next to what the other days did.
+      // Bucketed in SQL by the reporting zone so the days line up with the
+      // report's own window rather than with UTC.
+      client`
+        SELECT (o.created_at AT TIME ZONE ${REPORT_TZ})::date AS day,
+               COUNT(*)::int                       AS order_count,
+               COALESCE(SUM(o.quantity), 0)::bigint AS qty,
+               COALESCE(SUM(o.total_amount), 0)::text AS value
+        FROM orders o
+        WHERE o.created_at >= ${new Date(start.getTime() - 7 * 86400000).toISOString()}
+          AND o.created_at <  ${start.toISOString()}
+        GROUP BY 1
+        ORDER BY 1 DESC
       `,
       client`
         SELECT pfi_id, COALESCE(SUM(total_amount), 0)::text AS total
@@ -468,7 +552,21 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
     }
   );
 
-  return { reportDate: reportDateStr, totals, locations };
+  /**
+   * The seven days before this one, so the summary can say whether today was a
+   * good day rather than only what today was.
+   *
+   * `yesterday` is the immediately preceding day only if it actually traded —
+   * a gap in the data must not be reported as "down 100%".
+   */
+  const history = priorDays.map((r) => ({
+    date: typeof r.day === "string" ? r.day : localDateStr(new Date(r.day)),
+    orderCount: num(r.order_count),
+    qtyLitres: num(r.qty),
+    amountNaira: num(r.value),
+  }));
+
+  return { reportDate: reportDateStr, totals, locations, history };
 };
 
-module.exports = { buildCombinedDailyReportData, createDepotMatcher, ROLE_TAGS };
+module.exports = { buildCombinedDailyReportData, createDepotMatcher, ROLE_TAGS, dayBounds, localDateStr, REPORT_TZ };

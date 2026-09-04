@@ -8,10 +8,16 @@
  *   npm run report:daily -- --to=a@b.com,c@d.com
  *   npm run report:daily -- --only=staff-sales
  *
- * Django ran these from Celery Beat. There is no scheduler in this codebase, so
- * the trigger is deliberately a plain script: cron, a Render job, or a GitHub
- * Action can all call it, and none of them need a broker. If pg-boss ever grows
- * a schedule, it calls exactly the same two functions.
+ * Django ran these from Celery Beat. The scheduled trigger now lives in
+ * jobs/scheduler.js, as a pg-boss cron at 23:50 Africa/Lagos — and it calls the
+ * SAME function this script does, services/dailyReportDispatch.js. That is the
+ * point: two triggers, one send path, so the scheduled report and the hand-run
+ * one cannot drift apart.
+ *
+ * This script stays because a report sometimes has to be re-sent by hand, for a
+ * past date, or previewed without mailing anybody.
+ *
+ *   --force  send again even though tonight's is already logged as sent
  *
  * The two reports are shaped differently on purpose:
  *   "daily"        the combined HTML report (staff entries / PFI stock / orders
@@ -28,10 +34,10 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const { notifyAndWait } = require("../notifications");
 const { buildStaffSalesReport } = require("../services/reportWorkbook.service");
 const { buildCombinedDailyReportData } = require("../services/dailyCombinedReport.service");
 const { renderDailyReportEmail } = require("../notifications/templates/dailyReportEmail");
+const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { client } = require("../db");
 
 const arg = (name) => {
@@ -50,68 +56,56 @@ const flag = (name) => process.argv.includes(`--${name}`);
 
   const only = arg("only");
   const dry = flag("dry");
-  const recipients = (arg("to") || process.env.REPORT_RECIPIENTS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const force = flag("force");
 
-  if (!dry && recipients.length === 0) {
-    console.error(
-      "No recipients. Set REPORT_RECIPIENTS in .env or pass --to=a@b.com.\n" +
-        "Refusing to build a report nobody receives."
-    );
-    process.exit(1);
-  }
-
-  const reportDate = date.toISOString().slice(0, 10);
-
-  if (only !== "staff-sales") {
-    const data = await buildCombinedDailyReportData(date);
-    console.log(
-      `→ reports.daily  ${data.locations.length} location(s), ${data.totals.orderCount} order(s), ` +
-        `${data.totals.qtyLitres.toLocaleString()} L, ₦${data.totals.amountNaira.toLocaleString()}`
-    );
-
-    if (dry) {
+  // --dry never sends, so it never goes through the dispatcher: it builds the
+  // same artefacts and writes them to disk for inspection.
+  if (dry) {
+    const reportDate = new Date(date).toISOString().slice(0, 10);
+    if (only !== "staff-sales") {
+      const data = await buildCombinedDailyReportData(date);
       const { html, text, subject } = renderDailyReportEmail(data);
-      const out = path.join(process.cwd(), `daily-report-${reportDate}.html`);
+      const out = path.join(process.cwd(), `daily-report-${data.reportDate}.html`);
       fs.writeFileSync(out, html);
+      console.log(
+        `→ reports.daily  ${data.locations.length} location(s), ${data.totals.orderCount} order(s), ` +
+          `${data.totals.qtyLitres.toLocaleString()} L, ₦${data.totals.amountNaira.toLocaleString()}`
+      );
       console.log(`  subject: ${subject}`);
       console.log(`  text part:\n${text.split("\n").map((l) => `    ${l}`).join("\n")}`);
       console.log(`  html written to ${out} — nothing sent (--dry)`);
-    } else {
-      const res = await notifyAndWait("reports.daily", {
-        to: recipients.map((email) => ({ email })),
-        data,
-      });
-      console.log(`  sent to ${recipients.join(", ")}`, res?.skipped ? res : "");
     }
-  }
-
-  if (only !== "daily") {
-    const result = await buildStaffSalesReport(date);
-    console.log(`→ ${result.filename}  (${result.buffer.length.toLocaleString()} bytes)`);
-
-    if (dry) {
+    if (only !== "daily") {
+      const result = await buildStaffSalesReport(date);
       const out = path.join(process.cwd(), result.filename);
       fs.writeFileSync(out, result.buffer);
+      console.log(`→ ${result.filename}  (${result.buffer.length.toLocaleString()} bytes)`);
       console.log(`  written to ${out} — nothing sent (--dry)`);
-    } else {
-      const res = await notifyAndWait("reports.daily_staff_sales", {
-        to: recipients.map((email) => ({ email })),
-        data: {
-          reportDate,
-          filename: result.filename,
-          attachmentBase64: result.buffer.toString("base64"),
-        },
-      });
-      console.log(`  sent to ${recipients.join(", ")}`, res?.skipped ? res : "");
+    }
+    void reportDate;
+  } else {
+    const recipients = resolveRecipients(arg("to"));
+    if (recipients.length === 0) {
+      console.error(
+        "No recipients. Set REPORT_RECIPIENTS in .env or pass --to=a@b.com.\n" +
+          "Refusing to build a report nobody receives."
+      );
+      process.exit(1);
+    }
+
+    const result = await dispatchDailyReports({ date, to: arg("to"), only, force });
+    console.log(`→ daily report ${result.reportDate}`);
+    if (result.sent.length) console.log(`  sent: ${result.sent.join(", ")} → ${result.recipients.join(", ")}`);
+    if (result.skipped.length) {
+      console.log(
+        `  skipped (already sent today): ${result.skipped.join(", ")}  — re-send with --force`
+      );
     }
   }
 
   await client.end({ timeout: 5 });
   process.exit(0);
 })().catch((err) => {
-  console.error("send-daily-report failed:", err);
+  console.error("send-daily-report failed:", err.message || err);
   process.exit(1);
 });

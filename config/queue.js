@@ -175,11 +175,19 @@ const registerWorker = async (queue, handler) => {
   });
 };
 
-/** Schedule a cron job (the session sweep, template sync). Idempotent per name. */
-const scheduleCron = async (queue, cron, data = {}) => {
+/**
+ * Schedule a cron job (the session sweep, template sync). Idempotent per name.
+ *
+ * `options` reaches pg-boss verbatim. The one that matters here is `tz`:
+ * pg-boss evaluates a cron expression in UTC unless told otherwise, so a job
+ * meant for 23:50 in Lagos written as "50 23 * * *" would fire at 00:50 WAT —
+ * an hour late, and on the wrong calendar day. Passing tz keeps the expression
+ * readable as the time somebody actually asked for.
+ */
+const scheduleCron = async (queue, cron, data = {}, options = {}) => {
   const b = await startQueue();
   await b.createQueue(queue).catch(() => {});
-  return b.schedule(queue, cron, data);
+  return b.schedule(queue, cron, data, options);
 };
 
 const stopQueue = async () => {

@@ -1,10 +1,24 @@
 const { registerWorker, scheduleCron } = require("../config/queue");
 const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
+const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
+const { notify } = require("../notifications");
 
 // An ad-hoc pg-boss queue created on demand, mirroring the WhatsApp maintenance
 // cron — not part of the WhatsApp queue set.
 const EXPIRY_QUEUE = "order-expiry-sweep";
+const DAILY_REPORT_QUEUE = "daily-report-send";
+
+/**
+ * 23:50 Africa/Lagos, every day.
+ *
+ * Written as local time with an explicit tz rather than as "50 22 * * *" UTC.
+ * Nigeria has no DST so the two are equivalent today, but the UTC form is a
+ * silent trap: it reads as 22:50 to anyone checking whether the report went out
+ * on time, and it would break the day Nigeria ever changed its offset.
+ */
+const DAILY_REPORT_CRON = process.env.DAILY_REPORT_CRON || "50 23 * * *";
+const DAILY_REPORT_TZ = process.env.REPORT_TIMEZONE || "Africa/Lagos";
 
 /**
  * Opt-in in-process scheduler. Runs only when SCHEDULED_JOBS_ENABLED=true, so
@@ -26,6 +40,58 @@ const start = async () => {
   const cron = process.env.ORDER_EXPIRY_CRON || "* * * * *";
   await scheduleCron(EXPIRY_QUEUE, cron);
   console.log(`[scheduler] order-expiry sweep scheduled (${cron})`);
+
+  // ── The daily report ──────────────────────────────────────────────────────
+  //
+  // Fails loudly on purpose. Throwing hands the job back to pg-boss, which
+  // retries it with backoff and finally dead-letters it; swallowing the error
+  // would leave the queue believing the report went out. The send itself is
+  // idempotent per report date, so a retry cannot mail the list twice.
+  await registerWorker(DAILY_REPORT_QUEUE, async () => {
+    try {
+      const result = await dispatchDailyReports();
+      console.log(
+        `[scheduler] daily report ${result.reportDate} — sent [${result.sent.join(", ") || "none"}]` +
+          `${result.skipped.length ? `, already sent [${result.skipped.join(", ")}]` : ""}` +
+          ` to ${result.recipients.length} recipient(s)`
+      );
+      return result;
+    } catch (err) {
+      // A report nobody hears about failing is the failure. Staff get told
+      // before the error is re-thrown for pg-boss to retry.
+      console.error("[scheduler] daily report FAILED:", err.message);
+      try {
+        await notify("staff.report_send_failed", {
+          to: { roles: ["admin", "super_admin"] },
+          data: { reason: err.message, at: new Date().toISOString() },
+        });
+      } catch (notifyErr) {
+        console.error("[scheduler] could not raise the failure alert:", notifyErr.message);
+      }
+      throw err;
+    }
+  });
+
+  await scheduleCron(DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, {}, { tz: DAILY_REPORT_TZ });
+  console.log(
+    `[scheduler] daily report scheduled (${DAILY_REPORT_CRON} ${DAILY_REPORT_TZ})`
+  );
+
+  // Say at boot whether this can actually work, rather than at 23:50 when
+  // nobody is looking. An unset REPORT_RECIPIENTS is the single most likely
+  // reason for a report that "just stopped arriving".
+  try {
+    const recipients = resolveRecipients();
+    if (recipients.length === 0) {
+      console.warn(
+        "[scheduler] WARNING: REPORT_RECIPIENTS is empty — the daily report will fail at send time."
+      );
+    } else {
+      console.log(`[scheduler] daily report recipients: ${recipients.length} configured`);
+    }
+  } catch (err) {
+    console.warn(`[scheduler] WARNING: ${err.message}`);
+  }
 };
 
-module.exports = { start, EXPIRY_QUEUE };
+module.exports = { start, EXPIRY_QUEUE, DAILY_REPORT_QUEUE, DAILY_REPORT_CRON };

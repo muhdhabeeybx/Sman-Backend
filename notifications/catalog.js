@@ -1298,6 +1298,50 @@ const CATALOG = {
     dedupe: (d) => (d.reportId ? `staff.daily_report_submitted:${d.reportId}` : null),
   },
 
+  /**
+   * The nightly report did not go out.
+   *
+   * data: reason, at
+   *
+   * The whole value of an automated report is that nobody has to remember it,
+   * which is exactly why silent failure is the dangerous mode: the first sign
+   * is somebody noticing weeks later that they have not seen one in a while.
+   * SMS as well as email, because the most likely cause of a failed report
+   * email is that email itself is not working.
+   */
+  "staff.report_send_failed": {
+    audience: "staff",
+    category: "reports",
+    priority: "urgent",
+    channels: EMAIL_AND_SMS,
+    title: () => "Daily report FAILED to send",
+    body: (d) => `Tonight's daily report did not go out.${d.reason ? ` ${d.reason}` : ""}`,
+    // One alert per day however many times the job retries.
+    dedupe: (d) => `staff.report_send_failed:${String(d.at || "").slice(0, 10)}`,
+    email: (d) =>
+      simpleEmail({
+        subject: "ACTION NEEDED — the daily report did not send",
+        subtitle: "Scheduled reports",
+        heading: "Tonight's daily report failed to send",
+        intro:
+          "The scheduled 23:50 send did not complete. It will be retried automatically, " +
+          "but if this alert repeats the report needs a look.",
+        rows: [
+          { label: "Reason", value: d.reason },
+          { label: "Time", value: d.at },
+        ],
+        note: "Run `npm run report:daily` to send it by hand once the cause is fixed.",
+        tone: "danger",
+      }),
+    sms: (d) => {
+      // The reason comes from an exception message and may or may not end in a
+      // full stop; without this the alert reads "...returned 401 It will retry".
+      const reason = String(d.reason || "").trim();
+      const because = reason ? ` ${reason.replace(/[.\s]*$/, "")}.` : "";
+      return `${smsPrefix()}tonight's daily report did not send.${because} It will retry automatically.`;
+    },
+  },
+
   /** data: reportId, location, reportDate — to the SUBMITTER */
   "staff.daily_report_approved": {
     audience: "staff",
