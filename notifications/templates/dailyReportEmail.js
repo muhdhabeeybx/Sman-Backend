@@ -1,4 +1,5 @@
 const { escapeHtml } = require("./email");
+const { buildDailySummary, summaryText } = require("./dailyReportSummary");
 
 /**
  * The daily combined report email — the day's stock movement, what each desk
@@ -522,11 +523,51 @@ function combinedReportBody(d) {
     confirmedValue = 0,
   } = d.totals || {};
 
+  const { paragraphs, remarks } = buildDailySummary(d);
+
+  /**
+   * The day in words, above the numbers.
+   *
+   * Deliberately the first thing in the document and deliberately not a table:
+   * somebody opening this at midnight should read five short statements, know
+   * how the day went, and stop. The tables are there for when the answer is
+   * "look closer".
+   *
+   * One statement per paragraph rather than a packed block — the confirmed
+   * figure is the one people hunt for, and it should sit on its own line.
+   *
+   * REMARKS renders only when there is something to remark on. An empty
+   * section heading reads as a section that failed to load.
+   */
+  const summaryBlock =
+    `<div style="margin:14px 0 4px;padding:14px 16px;background:${TINT};border-left:3px solid ${INK};">` +
+    paragraphs
+      .map(
+        (para) =>
+          `<p style="margin:0 0 10px;font-size:13px;line-height:1.55;color:${INK};">${escapeHtml(para)}</p>`
+      )
+      .join("") +
+    (remarks.length
+      ? `<p style="margin:14px 0 6px;font-size:11px;font-weight:700;text-transform:uppercase;` +
+        `letter-spacing:.6px;color:${BALANCE};">Remarks</p>` +
+        remarks
+          .map(
+            (r) =>
+              `<p style="margin:0 0 4px;font-size:12.5px;line-height:1.5;color:${INK};">` +
+              `<span style="font-weight:700;">${escapeHtml(r.depot)}:</span> ${escapeHtml(r.note)}</p>`
+          )
+          .join("")
+      : "") +
+    `</div>`;
+
   const header =
     `<h2 style='margin:0 0 2px;font-size:18px;color:${INK};'>Daily Report &mdash; ${plainDate(d.reportDate)}</h2>` +
     `<p style='margin:0 0 4px;color:${MUTED};font-size:12px;'>` +
     `${plural(locations.length, "location")} &nbsp;&bull;&nbsp; ` +
     `${plural(staffEntries, "sheet")} filed</p>` +
+    // Words before figures: the summary leads, the at-a-glance band follows it,
+    // and the tables come after both.
+    summaryBlock +
     summaryBand([
       { label: "Opening stock", value: `${n0(openingStock)} Litres` },
       {
@@ -575,6 +616,9 @@ function renderDailyReportEmail(d) {
   const text =
     `Dear Sir,\n\n` +
     `Daily Report for ${subjectDate}\n\n` +
+    // The same summary the HTML leads with. A text-only client should get the
+    // day in words too — it is the part that survives having no layout at all.
+    `${summaryText(d)}\n\n` +
     `Opening stock: ${n0(openingStock)} Litres\n` +
     `Ordered:       ${n0(qtyLitres)} Litres, ${plural(orderCount, "order")}\n` +
     `Sales value:   ${n0(amountNaira)}\n` +
