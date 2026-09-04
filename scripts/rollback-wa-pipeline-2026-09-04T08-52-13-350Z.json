@@ -1,0 +1,1115 @@
+{
+  "deletedAt": "2026-09-04T08:52:13.351Z",
+  "note": "Re-insert in reverse of ORDER_OF_DELETION: customers, products, depots, bank_accounts, pfis, prices, orders, allocations, sessions, messages.",
+  "runs": [
+    {
+      "run": "1788500087462",
+      "phone": "+2348170874620",
+      "rows": {
+        "pfis": [
+          {
+            "id": 52,
+            "pfi_number": "PFI-PIP-1788500087462",
+            "status": "active",
+            "description": "",
+            "pfi_date": null,
+            "location_id": 52,
+            "lpg_station_id": null,
+            "location_name": "",
+            "product_id": 45,
+            "product_name": "",
+            "product_unit": "Litres",
+            "starting_qty_litres": 1000000,
+            "bl_qty_litres": null,
+            "bl_qty_mt": null,
+            "qty_volume_mt": "0.00",
+            "sold_qty_litres": 5000,
+            "total_amount": "0.00",
+            "unit_price": "0.00",
+            "credit_balance": "0.00",
+            "audit_officer_id": null,
+            "audit_officer_name": "",
+            "product_officer_id": null,
+            "product_officer_name": "",
+            "it_compliance_officer_id": null,
+            "it_compliance_officer_name": "",
+            "security_exit_officer_id": null,
+            "security_exit_officer_name": "",
+            "commission_officer_id": null,
+            "commission_officer_name": "",
+            "sales_manager_id": null,
+            "sales_manager_name": "",
+            "vessel_broker": "",
+            "vessel_name": "",
+            "surveyor_name": "",
+            "surveyor_phone": "",
+            "closure_date": null,
+            "total_inflow": "0.00",
+            "closure_bank": "",
+            "purchase_cost": "0.00",
+            "aggregate_expenses": "0.00",
+            "closure_handler": "",
+            "closure_remarks": "",
+            "created_at": "2026-09-04T05:34:51.984Z",
+            "updated_at": "2026-09-04T05:36:00.697Z",
+            "pfi_type": "coastal",
+            "ticket_count": null
+          }
+        ],
+        "depots": [
+          {
+            "id": 52,
+            "name": "Pipe Depot 7462",
+            "code": "PIP87462",
+            "address": "1 Rd",
+            "city": "Warri",
+            "state": "Delta",
+            "country": "NG",
+            "postcode": "332211",
+            "parked_trucks_count": 0,
+            "max_capacity": 10000000,
+            "status": "Maintenance",
+            "established_year": "2020",
+            "paystack_subaccount_code": "",
+            "subaccount_active": false,
+            "subaccount_split_percentage": 100,
+            "created_at": "2026-09-04T05:34:48.794Z",
+            "updated_at": "2026-09-04T06:46:17.218Z"
+          }
+        ],
+        "products": [
+          {
+            "id": 45,
+            "name": "Pipe PMS 7462",
+            "sku": "PIP-87462",
+            "category": "PMS",
+            "product_type": "soroman",
+            "grade_class": "",
+            "description": "",
+            "density": "",
+            "flash_point": "",
+            "un_number": "",
+            "hazard_class": "None",
+            "stock_level": 0,
+            "unit": "Liters",
+            "supplier": "",
+            "created_at": "2026-09-04T05:34:51.352Z",
+            "updated_at": "2026-09-04T05:34:51.352Z"
+          }
+        ],
+        "bank_accounts": [
+          {
+            "id": 38,
+            "bank_name": "Test Bank",
+            "account_name": "Pipe Depot Account",
+            "account_number": "PIPACC087462",
+            "bank_code": "",
+            "branch_name": "",
+            "currency": "NGN",
+            "status": "Active",
+            "is_default": true,
+            "depot_ids": [
+              52
+            ],
+            "lpg_station_ids": [],
+            "notes": "",
+            "created_at": "2026-09-04T05:34:49.806Z",
+            "updated_at": "2026-09-04T05:34:49.806Z",
+            "usage": [],
+            "pfi_ids": []
+          }
+        ],
+        "depot_product_prices": [
+          {
+            "id": 641,
+            "depot_id": 52,
+            "product_id": 45,
+            "current_price": "0.00",
+            "created_at": "2026-09-04T05:34:51.642Z",
+            "updated_at": "2026-09-04T06:46:17.223Z"
+          }
+        ],
+        "depot_price_history": [
+          {
+            "id": 341,
+            "depot_product_price_id": 641,
+            "price": "0.00",
+            "set_at": "2026-09-04T06:46:17.228Z"
+          }
+        ],
+        "orders": [
+          {
+            "id": 11763,
+            "order_number": "ORD-52B9E1ACC885",
+            "customer_id": 8133,
+            "state": "Delta",
+            "depot_id": 52,
+            "product_id": 45,
+            "quantity": 5000,
+            "price": "100.00",
+            "total_amount": "500000.00",
+            "delivery_type": "pickup",
+            "delivery_address": "",
+            "company_name": "Acme Fuels Ltd",
+            "pfi_id": 52,
+            "virtual_account_number": "PIPACC087462",
+            "virtual_account_bank": "Test Bank",
+            "virtual_account_name": "Pipe Depot Account",
+            "payment_status": "Unpaid",
+            "status": "Pending",
+            "payment_confirmed_at": null,
+            "released_at": null,
+            "released_by": null,
+            "loading_started_at": null,
+            "completed_at": null,
+            "cancelled_at": null,
+            "cancelled_by": null,
+            "cancellation_reason": null,
+            "expired_at": null,
+            "idempotency_key": "wamid.PIPE-1788500087462-11",
+            "created_at": "2026-09-04T05:36:00.989Z",
+            "updated_at": "2026-09-04T05:36:00.989Z",
+            "amount_paid": "0.00"
+          }
+        ],
+        "order_pfi_allocations": [
+          {
+            "id": 13862,
+            "order_id": 11763,
+            "pfi_id": 52,
+            "quantity": 5000,
+            "created_at": "2026-09-04T05:36:00.989Z"
+          }
+        ],
+        "order_trucks": [
+          {
+            "id": 28697,
+            "order_id": 11763,
+            "truck_index": 1,
+            "truck_id": null,
+            "truck_number": "ABC-123-XY",
+            "quantity": "5000.00",
+            "compartments": null,
+            "driver_name": null,
+            "driver_phone": null,
+            "entry_driver_name": null,
+            "entry_driver_phone": null,
+            "gantry": null,
+            "loader_name": null,
+            "loader_phone": null,
+            "status": "pending",
+            "security_entered_at": null,
+            "security_entered_by": null,
+            "loaded_at": null,
+            "loaded_by": null,
+            "security_exited_at": null,
+            "security_exited_by": null,
+            "created_at": "2026-09-04T05:36:00.989Z",
+            "updated_at": "2026-09-04T05:36:00.989Z"
+          }
+        ],
+        "customers": [
+          {
+            "id": 8133,
+            "name": "Chinedu Okeke",
+            "email": "",
+            "phone": "+2348170874620",
+            "company_name": "",
+            "address": "",
+            "status": "Active",
+            "marketing_opt_out": false,
+            "created_via": "whatsapp",
+            "balance": "0.00",
+            "deposit": "0.00",
+            "previous_deposit": "0.00",
+            "paystack_customer_id": "",
+            "virtual_account_number": "",
+            "virtual_account_bank": "",
+            "virtual_account_name": "",
+            "dva_subaccount_code": "",
+            "commission_bank_name": "",
+            "commission_account_name": "",
+            "commission_account_number": "",
+            "phone_verified_at": "2026-09-04T05:35:08.949Z",
+            "last_login_at": null,
+            "created_at": "2026-09-04T05:35:09.395Z",
+            "updated_at": "2026-09-04T05:35:09.395Z",
+            "phone_normalized": "8170874620"
+          }
+        ],
+        "wa_sessions": [
+          {
+            "id": 337,
+            "wa_phone": "+2348170874620",
+            "customer_id": 8133,
+            "state": "MENU",
+            "cart": {},
+            "last_order_id": 11763,
+            "failure_count": 0,
+            "expires_at": "2026-09-04T06:07:04.157Z",
+            "created_at": "2026-09-04T05:36:59.126Z",
+            "updated_at": "2026-09-04T05:37:04.157Z"
+          }
+        ],
+        "wa_messages": [
+          {
+            "id": 683,
+            "wamid": null,
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": 337,
+            "customer_id": null,
+            "in_reply_to": null,
+            "payload": {
+              "body": "Payment received ✅",
+              "kind": "text"
+            },
+            "status": "skipped",
+            "error": "WHATSAPP_ENABLED is off",
+            "created_at": "2026-09-04T04:37:12.466Z",
+            "updated_at": "2026-09-04T05:37:13.765Z"
+          },
+          {
+            "id": 668,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjlGMTgyNDExN0QzMzQ4REQyMgA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 667,
+            "payload": {
+              "body": "Please check your order.\n\nProduct: 5,000 L Pipe PMS 7462\nDepot: Pipe Depot 7462\nCompany: Acme Fuels Ltd\nLoading by my truck: ABC-123-XY\nPrice: ₦100/L\n*Total: ₦500,000*\n\nSelect Confirm for your invoice and payment details.",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "confirm:6fe456d7",
+                  "title": "Confirm"
+                },
+                {
+                  "id": "edit",
+                  "title": "Edit"
+                },
+                {
+                  "id": "cancel",
+                  "title": "Cancel"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:53.805Z",
+            "updated_at": "2026-09-04T05:35:57.001Z"
+          },
+          {
+            "id": 658,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjM1QjIzQ0IwOEVFNDg0M0E1OQA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 657,
+            "payload": {
+              "body": "How many litres of Pipe PMS 7462 do you want at Pipe Depot 7462?",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:27.729Z",
+            "updated_at": "2026-09-04T05:35:31.137Z"
+          },
+          {
+            "id": 657,
+            "wamid": "wamid.PIPE-1788500087462-5",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-5",
+              "from": "2348170874620",
+              "text": {
+                "body": "Pipe PMS 7462"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:24.357Z",
+            "updated_at": "2026-09-04T05:35:28.581Z"
+          },
+          {
+            "id": 664,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjJBNzYwRUYwN0JCNjM3MzA5RgA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 663,
+            "payload": {
+              "body": "Do you want to list your truck numbers now, or leave them for security at the gate?",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "declare_trucks",
+                  "title": "List truck numbers"
+                },
+                {
+                  "id": "defer_trucks",
+                  "title": "Skip for now"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:44.414Z",
+            "updated_at": "2026-09-04T05:35:46.908Z"
+          },
+          {
+            "id": 681,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjJBNEJFQTY0OUY2MjdBMDVCQwA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": 337,
+            "customer_id": 8133,
+            "in_reply_to": 680,
+            "payload": {
+              "body": "You can use these at any time:\n\n• *menu*: back to the main menu\n• *track*: check your orders\n• *cancel*: cancel the order in progress\n• *help*: this message\n\nTo order, select *Place depot order* from the menu.",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:37:04.921Z",
+            "updated_at": "2026-09-04T05:37:07.954Z"
+          },
+          {
+            "id": 660,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjNFRUZCNkFENDBCQjg1MzU2MQA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 659,
+            "payload": {
+              "body": "Which company is this order for?",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:33.394Z",
+            "updated_at": "2026-09-04T05:35:34.949Z"
+          },
+          {
+            "id": 661,
+            "wamid": "wamid.PIPE-1788500087462-7",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-7",
+              "from": "2348170874620",
+              "text": {
+                "body": "Acme Fuels Ltd"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:35.080Z",
+            "updated_at": "2026-09-04T05:35:39.268Z"
+          },
+          {
+            "id": 667,
+            "wamid": "wamid.PIPE-1788500087462-10",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-10",
+              "from": "2348170874620",
+              "text": {
+                "body": "abc-123-xy"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:50.644Z",
+            "updated_at": "2026-09-04T05:35:53.915Z"
+          },
+          {
+            "id": 669,
+            "wamid": "wamid.PIPE-1788500087462-11",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-11",
+              "from": "2348170874620",
+              "text": {
+                "body": "confirm"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:55.356Z",
+            "updated_at": "2026-09-04T05:36:07.910Z"
+          },
+          {
+            "id": 680,
+            "wamid": "wamid.PIPE-1788500087462-14",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": 337,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-14",
+              "from": "2348170874620",
+              "text": {
+                "body": "help"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:37:01.929Z",
+            "updated_at": "2026-09-04T05:37:07.646Z"
+          },
+          {
+            "id": 682,
+            "wamid": null,
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": 337,
+            "customer_id": null,
+            "in_reply_to": 1,
+            "payload": {
+              "body": "What name should we put on your orders?",
+              "kind": "text"
+            },
+            "status": "skipped",
+            "error": "stale — conversational reply expired undelivered",
+            "created_at": "2026-09-04T05:26:10.387Z",
+            "updated_at": "2026-09-04T05:37:11.022Z"
+          },
+          {
+            "id": 650,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjdERjYzREQzMEQzMjNDRjFDMQA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": null,
+            "in_reply_to": 649,
+            "payload": {
+              "body": "Welcome to Soroman Energy.\n\nPlease send the name to use on your orders.",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:34:56.117Z",
+            "updated_at": "2026-09-04T05:35:06.535Z"
+          },
+          {
+            "id": 662,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjk1N0NGN0YwRjAzMDdCNEJEMAA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 661,
+            "payload": {
+              "body": "How do you want to receive your order?",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "pickup",
+                  "title": "Loading by my truck"
+                },
+                {
+                  "id": "delivery",
+                  "title": "Delivery by Soroman…"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:39.217Z",
+            "updated_at": "2026-09-04T05:35:40.930Z"
+          },
+          {
+            "id": 649,
+            "wamid": "wamid.PIPE-1788500087462-1",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": null,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-1",
+              "from": "2348170874620",
+              "text": {
+                "body": "hi"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:34:52.446Z",
+            "updated_at": "2026-09-04T05:35:02.781Z"
+          },
+          {
+            "id": 651,
+            "wamid": "wamid.PIPE-1788500087462-2",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-2",
+              "from": "2348170874620",
+              "text": {
+                "body": "Chinedu Okeke"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:05.985Z",
+            "updated_at": "2026-09-04T05:35:10.482Z"
+          },
+          {
+            "id": 653,
+            "wamid": "wamid.PIPE-1788500087462-3",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-3",
+              "from": "2348170874620",
+              "text": {
+                "body": "order"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:12.569Z",
+            "updated_at": "2026-09-04T05:35:17.496Z"
+          },
+          {
+            "id": 655,
+            "wamid": "wamid.PIPE-1788500087462-4",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-4",
+              "from": "2348170874620",
+              "text": {
+                "body": "pipe depot 7462"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:19.144Z",
+            "updated_at": "2026-09-04T05:35:22.503Z"
+          },
+          {
+            "id": 659,
+            "wamid": "wamid.PIPE-1788500087462-6",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-6",
+              "from": "2348170874620",
+              "text": {
+                "body": "5,000"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:30.182Z",
+            "updated_at": "2026-09-04T05:35:33.522Z"
+          },
+          {
+            "id": 652,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjEyOUVGNzQ5ODU3MzM3NEVBNwA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 651,
+            "payload": {
+              "body": "Thank you, Chinedu Okeke. Your account has been set up.\n\nWhat would you like to do?",
+              "kind": "list",
+              "button": "Menu",
+              "sections": [
+                {
+                  "rows": [
+                    {
+                      "id": "order",
+                      "title": "Place depot order"
+                    },
+                    {
+                      "id": "prices",
+                      "title": "Check prices"
+                    }
+                  ],
+                  "title": ""
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:10.423Z",
+            "updated_at": "2026-09-04T05:35:12.936Z"
+          },
+          {
+            "id": 654,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEkQ5MzEwNkJGM0ZCQzQ0NDJDNQA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 653,
+            "payload": {
+              "body": "Which depot are you ordering from?",
+              "kind": "list",
+              "button": "Choose a depot",
+              "sections": [
+                {
+                  "rows": [
+                    {
+                      "id": "depot:52",
+                      "title": "Pipe Depot 7462"
+                    }
+                  ],
+                  "title": ""
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:17.318Z",
+            "updated_at": "2026-09-04T05:35:18.949Z"
+          },
+          {
+            "id": 656,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjNDOTlFQzRGNkM5RUEyNEJDQQA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 655,
+            "payload": {
+              "body": "Which product do you want at Pipe Depot 7462?",
+              "kind": "list",
+              "button": "Choose a product",
+              "sections": [
+                {
+                  "rows": [
+                    {
+                      "id": "product:45",
+                      "title": "Pipe PMS 7462",
+                      "description": "₦100/L"
+                    }
+                  ],
+                  "title": ""
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:22.384Z",
+            "updated_at": "2026-09-04T05:35:25.196Z"
+          },
+          {
+            "id": 663,
+            "wamid": "wamid.PIPE-1788500087462-8",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-8",
+              "from": "2348170874620",
+              "text": {
+                "body": "pickup"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:41.063Z",
+            "updated_at": "2026-09-04T05:35:44.457Z"
+          },
+          {
+            "id": 665,
+            "wamid": "wamid.PIPE-1788500087462-9",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-9",
+              "from": "2348170874620",
+              "text": {
+                "body": "declare_trucks"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:35:45.934Z",
+            "updated_at": "2026-09-04T05:35:49.099Z"
+          },
+          {
+            "id": 666,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjkwQjhFRjQzNTRFNEU0RjRDRAA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 665,
+            "payload": {
+              "body": "Send your truck number.",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "defer_trucks",
+                  "title": "Skip for now"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:35:48.909Z",
+            "updated_at": "2026-09-04T05:35:51.169Z"
+          },
+          {
+            "id": 670,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEkQ2ODVDNDgyQTY3Njc5RTkzOAA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 669,
+            "payload": {
+              "body": "One moment, your order is being created.",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:06.722Z",
+            "updated_at": "2026-09-04T05:36:11.200Z"
+          },
+          {
+            "id": 671,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjU1MjQxMjZDOTc2RTQ0NzYwNgA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 669,
+            "payload": {
+              "body": "Order *AF11763* created.\n\n*Total: ₦500,000*\n\nTransfer to the account for this order:\nBank: Test Bank\nAccount Number: *PIPACC087462*\nAccount Name: Pipe Depot Account",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "cancelorder",
+                  "title": "Cancel this order"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:07.142Z",
+            "updated_at": "2026-09-04T05:36:11.788Z"
+          },
+          {
+            "id": 672,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjA3RjY5NTRDQjhERDlGQ0FGNAA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 669,
+            "payload": {
+              "body": "One more thing, and it is optional.\n\nWho is sending the money? If more than one person or company is paying for this order, list each one. That is how we match your transfer when it lands.\n\nSend them one at a time, amount first:\n*5,000,000 Rure Oil and Gas*\n\nTap *Done* when you have listed everyone, or *Skip*.",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "expectdone",
+                  "title": "Done"
+                },
+                {
+                  "id": "expectskip",
+                  "title": "Skip"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:07.479Z",
+            "updated_at": "2026-09-04T05:36:12.389Z"
+          },
+          {
+            "id": 673,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjI5NzNERDU0MTAxQjgyMjkwNwA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 669,
+            "payload": {
+              "body": "To change a truck or truck number later, manage this order at http://localhost:5173",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:07.827Z",
+            "updated_at": "2026-09-04T05:36:12.958Z"
+          },
+          {
+            "id": 674,
+            "wamid": "wamid.PIPE-1788500087462-12",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-12",
+              "from": "2348170874620",
+              "text": {
+                "body": "confirm"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:36:41.959Z",
+            "updated_at": "2026-09-04T05:36:46.141Z"
+          },
+          {
+            "id": 675,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEkU1MERFNkE4RkRCNEVCMzg3NgA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 674,
+            "payload": {
+              "body": "I did not get that. Send the amount first, then the name it will arrive under, like *5,000,000 Rure Oil and Gas*.\n\nOr tap *Done* if you have finished, *Skip* to leave it.",
+              "kind": "buttons",
+              "buttons": [
+                {
+                  "id": "expectdone",
+                  "title": "Done"
+                },
+                {
+                  "id": "expectskip",
+                  "title": "Skip"
+                }
+              ]
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:46.096Z",
+            "updated_at": "2026-09-04T05:36:47.855Z"
+          },
+          {
+            "id": 676,
+            "wamid": "wamid.PIPE-1788500087462-13",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-13",
+              "from": "2348170874620",
+              "text": {
+                "body": "track"
+              },
+              "type": "text"
+            },
+            "status": "processed",
+            "error": "",
+            "created_at": "2026-09-04T05:36:48.032Z",
+            "updated_at": "2026-09-04T05:36:51.497Z"
+          },
+          {
+            "id": 677,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEjQ2MjdERUE3NjgzMzUyQkQxMgA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": 676,
+            "payload": {
+              "url": "http://localhost:5173",
+              "body": "Order *AF11763*: 5,000 L Pipe PMS 7462, Pipe Depot 7462.\n\nStatus: *Awaiting payment*\n\nWe are waiting on ₦500,000. Transfer to Test Bank PIPACC087462, then select *Finish payment* from the menu.",
+              "kind": "cta",
+              "buttonText": "View full timeline"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:51.290Z",
+            "updated_at": "2026-09-04T05:36:53.505Z"
+          },
+          {
+            "id": 678,
+            "wamid": "wamid.HBgNMjM0ODE3MDg3NDYyMBUCABEYEkU3MjdCNzlDOUQzQjgzQTc1QwA=",
+            "direction": "outbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": 8133,
+            "in_reply_to": null,
+            "payload": {
+              "body": "Payment received. Order *AF11763* is confirmed.\n\nWe will keep you posted at each stage: release, loading and completion.",
+              "kind": "text"
+            },
+            "status": "failed",
+            "error": "Message undeliverable",
+            "created_at": "2026-09-04T05:36:55.692Z",
+            "updated_at": "2026-09-04T05:36:57.603Z"
+          },
+          {
+            "id": 679,
+            "wamid": "wamid.PIPE-1788500087462-STALE",
+            "direction": "inbound",
+            "wa_phone": "+2348170874620",
+            "session_id": null,
+            "customer_id": null,
+            "in_reply_to": null,
+            "payload": {
+              "id": "wamid.PIPE-1788500087462-STALE",
+              "from": "2348170874620",
+              "text": {
+                "body": "hi"
+              },
+              "type": "text"
+            },
+            "status": "skipped",
+            "error": "stale — recovered too late to answer",
+            "created_at": "2026-09-04T05:25:59.465Z",
+            "updated_at": "2026-09-04T05:37:00.454Z"
+          }
+        ],
+        "notifications": [
+          {
+            "id": 12625,
+            "recipient_type": "customer",
+            "staff_id": null,
+            "customer_id": 8133,
+            "type": "order.created",
+            "category": "orders",
+            "priority": "high",
+            "title": "Order AF11763 received",
+            "body": "Your order for 5,000 Liters of Pipe PMS 7462 is awaiting payment — ₦500,000.",
+            "data": {
+              "screen": "OrderDetail",
+              "orderId": 11763,
+              "orderNumber": "AF11763"
+            },
+            "entity_type": "order",
+            "entity_id": "11763",
+            "action_url": "http://localhost:5173/orders/11763",
+            "image_url": null,
+            "dedupe_key": "customer:8133|order.created:11763",
+            "read_at": null,
+            "archived_at": null,
+            "created_at": "2026-09-04T05:36:04.295Z"
+          }
+        ],
+        "notification_deliveries": [
+          {
+            "id": 28246,
+            "notification_id": 12625,
+            "principal_type": "customer",
+            "staff_id": null,
+            "customer_id": 8133,
+            "type": "order.created",
+            "channel": "push",
+            "destination": "",
+            "status": "skipped",
+            "attempts": 0,
+            "provider_message_id": "",
+            "error": "No registered devices",
+            "sent_at": null,
+            "created_at": "2026-09-04T05:36:05.872Z",
+            "updated_at": "2026-09-04T05:36:05.755Z",
+            "campaign_id": null,
+            "recipient_name": "Chinedu Okeke",
+            "provider_status": "",
+            "delivered_at": null
+          }
+        ],
+        "audit_logs": [
+          {
+            "id": 66527,
+            "entity_type": "order",
+            "entity_id": 11763,
+            "action": "order.created",
+            "prev_state": null,
+            "new_state": null,
+            "actor_type": "customer",
+            "actor_staff_id": null,
+            "actor_customer_id": 8133,
+            "metadata": {
+              "quantity": 5000,
+              "orderNumber": "ORD-52B9E1ACC885",
+              "totalAmount": "500000",
+              "deliveryType": "pickup"
+            },
+            "ip_address": null,
+            "user_agent": null,
+            "created_at": "2026-09-04T05:36:00.989Z"
+          },
+          {
+            "id": 66528,
+            "entity_type": "order_truck",
+            "entity_id": 28697,
+            "action": "order_truck.allocated",
+            "prev_state": null,
+            "new_state": null,
+            "actor_type": "customer",
+            "actor_staff_id": null,
+            "actor_customer_id": 8133,
+            "metadata": {
+              "via": "pickup-declaration",
+              "orderId": 11763,
+              "quantity": "5000",
+              "truckIndex": 1,
+              "truckNumber": "ABC-123-XY"
+            },
+            "ip_address": null,
+            "user_agent": null,
+            "created_at": "2026-09-04T05:36:00.989Z"
+          }
+        ]
+      }
+    }
+  ]
+}
