@@ -9,6 +9,16 @@ const {
   layout,
 } = require("./templates/email");
 const { renderDailyReportEmail } = require("./templates/dailyReportEmail");
+// SMS is written differently from email: plain sentences, nothing in brackets,
+// and N rather than ₦ so the body stays in GSM-7 and bills as one part rather
+// than two. Shared with services/sms.service.js — see templates/sms.js.
+const {
+  money: smsMoney,
+  quantity: smsQuantity,
+  rateClause: smsRate,
+  payTo: smsPayTo,
+  thanks: smsThanks,
+} = require("./templates/sms");
 const {
   companyName,
   companyLongName,
@@ -259,7 +269,7 @@ function expenseStages() {
           ],
           note: "Please review it on the Expenses page.",
         }),
-      sms: (d) => `${smsPrefix()}${expenseRef(d)} (${what(d)}) awaiting your verification.`,
+      sms: (d) => `${smsPrefix()}${expenseRef(d)} for ${what(d)} is awaiting your verification.`,
     },
 
     "expense.verified": {
@@ -275,7 +285,7 @@ function expenseStages() {
           lead: `${who(d)} has verified an expense request. It now needs CFO approval.`,
           rows: payeeRows(d),
         }),
-      sms: (d) => `${smsPrefix()}${expenseRef(d)} (${what(d)}) verified, awaiting your CFO approval.`,
+      sms: (d) => `${smsPrefix()}${expenseRef(d)} for ${what(d)} has been verified and is awaiting your CFO approval.`,
     },
 
     "expense.audit_approved": {
@@ -292,7 +302,7 @@ function expenseStages() {
           rows: payeeRows(d),
         }),
       sms: (d) =>
-        `${smsPrefix()}${expenseRef(d)} (${what(d)}) CFO-approved, awaiting your final approval.`,
+        `${smsPrefix()}${expenseRef(d)} for ${what(d)} has CFO approval and is awaiting your final approval.`,
     },
 
     "expense.admin_approved": {
@@ -313,7 +323,7 @@ function expenseStages() {
           ],
         }),
       sms: (d) =>
-        `${smsPrefix()}${expenseRef(d)} (${what(d)}) approved for payment. Please pay and mark it paid.`,
+        `${smsPrefix()}${expenseRef(d)} for ${what(d)} is approved for payment. Please pay it and mark it paid.`,
     },
 
     "expense.paid": {
@@ -331,7 +341,7 @@ function expenseStages() {
             { label: "Paid to", value: [d.payeeAccountName, d.payeeBankName].filter(Boolean).join(" · ") },
           ],
         }),
-      sms: (d) => `${smsPrefix()}${expenseRef(d)} (${what(d)}) has been PAID.`,
+      sms: (d) => `${smsPrefix()}${expenseRef(d)} for ${what(d)} has been paid.`,
     },
 
     "expense.rejected": {
@@ -350,7 +360,7 @@ function expenseStages() {
           tone: "danger",
         }),
       sms: (d) =>
-        `${smsPrefix()}${expenseRef(d)} (${what(d)}) rejected.${d.note ? ` Reason: ${d.note}` : ""}`,
+        `${smsPrefix()}${expenseRef(d)} for ${what(d)} was rejected.${d.note ? ` Reason: ${d.note}` : ""}`,
     },
 
     "expense.changes_requested": {
@@ -369,7 +379,7 @@ function expenseStages() {
           tone: "warning",
         }),
       sms: (d) =>
-        `${smsPrefix()}${expenseRef(d)} (${what(d)}) sent back for changes.` +
+        `${smsPrefix()}${expenseRef(d)} for ${what(d)} was sent back for changes.` +
         `${d.note ? ` Reason: ${d.note}` : ""}`,
     },
 
@@ -409,7 +419,24 @@ function expenseStages() {
  */
 function deliverySms() {
   const P = () => smsPrefixLoud();
-  const plate = (d) => `[${d.plateNumber || d.truckNumber || "—"}]`;
+
+  /**
+   * The truck number, unbracketed.
+   *
+   * These texts used to print every value inside square brackets — "your truck
+   * [ABC123XY] has been assigned for loading at [Calabar Depot] depot" — and
+   * every phone number inside parentheses. A driver reading that on a feature
+   * phone is reading a database row, not a message. The brackets are gone and
+   * the values sit in the sentence.
+   *
+   * "TBA" rather than an em-dash when it is unknown: — is not in GSM-7, so one
+   * missing truck number was silently doubling the cost of the message.
+   * `plateNumber` is still read first because that is what the delivery rows
+   * are keyed on; the word the customer sees is "truck".
+   */
+  const truck = (d) => String(d.plateNumber || d.truckNumber || "").trim() || "TBA";
+  /** " on 08012345678" — or nothing, never an empty bracket. */
+  const on = (phone) => (phone ? ` on ${phone}` : "");
   const entity = (d) => ({ type: "delivery_inventory", id: d.inventoryId });
 
   const make = (title, sms, priority = "normal") => ({
@@ -427,42 +454,41 @@ function deliverySms() {
     "delivery.truck_loaded": make(
       "Truck assigned for loading",
       (d) =>
-        `${P()}Your truck ${plate(d)} has been assigned for loading at [${d.depotName || "the depot"}] depot. ` +
-        `Please report for loading.${d.inventoryId ? ` Ref: INV-${d.inventoryId}` : ""}`
+        `${P()}your truck ${truck(d)} has been assigned for loading at ` +
+        `${d.depotName || "the depot"}. Please report for loading.` +
+        `${d.inventoryId ? ` Reference INV-${d.inventoryId}.` : ""}`
     ),
 
     "delivery.assigned_driver": make(
       "Customer assigned to your truck",
       (d) =>
-        `${P()}Your truck ${plate(d)} has been assigned to deliver to [${d.customerName || "a customer"}]. ` +
-        `${d.customerPhone ? `Customer contact: ${d.customerPhone}. ` : ""}Await further instructions.`
+        `${P()}your truck ${truck(d)} has been assigned to deliver to ` +
+        `${d.customerName || "a customer"}${on(d.customerPhone)}. Await further instructions.`
     ),
 
     "delivery.assigned_customer": make(
       "A truck is assigned to your order",
       (d) =>
-        `${P()}Truck ${plate(d)} has been assigned to deliver your order. ` +
-        `${d.driverName ? `Driver: ${d.driverName}, ` : ""}` +
-        `${d.driverPhone ? `Contact: ${d.driverPhone}. ` : ""}` +
-        "You will be notified when loading is confirmed."
+        `${P()}truck ${truck(d)} has been assigned to deliver your order.` +
+        `${d.driverName ? ` The driver is ${d.driverName}${on(d.driverPhone)}.` : ""}` +
+        " You will be notified when loading is confirmed."
     ),
 
     "delivery.paid_driver": make(
       "Product sold — contact the customer",
       (d) =>
-        `${P()}Product in your truck ${plate(d)} has been sold to ${d.payerName || "the payer"}` +
-        `${d.payerPhone ? ` (${d.payerPhone})` : ""}. ` +
-        `Contact ${d.customerName || "the customer"}` +
-        `${d.customerPhone ? ` (${d.customerPhone})` : ""} for delivery details.`,
+        `${P()}the product in your truck ${truck(d)} has been sold to ` +
+        `${d.payerName || "the payer"}${on(d.payerPhone)}. ` +
+        `Please contact ${d.customerName || "the customer"}${on(d.customerPhone)} for delivery details.`,
       "high"
     ),
 
     "delivery.paid_customer": make(
       "Payment received for your delivery",
       (d) =>
-        `${P()}Payment received for truck ${plate(d)}. ` +
-        `Contact driver ${d.driverName || ""}${d.driverPhone ? ` (${d.driverPhone})` : ""}`.trimEnd() +
-        " for delivery coordination.",
+        `${P()}payment received for truck ${truck(d)}. ` +
+        `Please contact the driver ${d.driverName || ""}${on(d.driverPhone)}`.replace(/ +/g, " ").trimEnd() +
+        " to arrange delivery.",
       "high"
     ),
 
@@ -471,31 +497,30 @@ function deliverySms() {
     "delivery.paid_payer": make(
       "Payment confirmed",
       (d) =>
-        `${P()}Payment confirmed. Truck ${plate(d)} is on the way to deliver your product. ` +
-        `${d.driverName ? `Driver: ${d.driverName}, ` : ""}` +
-        `${d.driverPhone ? `Contact: ${d.driverPhone}.` : ""}`.trimEnd(),
+        `${P()}payment confirmed. Truck ${truck(d)} is on the way with your product.` +
+        `${d.driverName ? ` The driver is ${d.driverName}${on(d.driverPhone)}.` : ""}`,
       "high"
     ),
 
     "delivery.release_confirmed": make(
       "Release confirmed",
-      (d) => `${P()}Release confirmed for truck ${plate(d)}. Proceed to the exit gate.`,
+      (d) => `${P()}release confirmed for truck ${truck(d)}. Proceed to the exit gate.`,
       "high"
     ),
 
     "delivery.ticket_driver": make(
       "Ticket generated — cleared for departure",
       (d) =>
-        `${P()}Ticket [${d.ticketNumber || "—"}] generated for truck ${plate(d)}. ` +
-        "You are cleared for departure.",
+        `${P()}${d.ticketNumber ? `ticket ${d.ticketNumber} has been generated` : "your ticket has been generated"}` +
+        ` for truck ${truck(d)}. You are cleared for departure.`,
       "high"
     ),
 
     "delivery.ticket_customer": make(
       "Your delivery is on the way",
       (d) =>
-        `${P()}Dear ${d.customerName || "Customer"}, your delivery is on the way! ` +
-        `Truck: ${plate(d)}, Ticket: [${d.ticketNumber || "—"}].`,
+        `${P()}Dear ${d.customerName || "Customer"}, your delivery is on the way on truck ${truck(d)}` +
+        `${d.ticketNumber ? `, ticket ${d.ticketNumber}` : ""}.`,
       "high"
     ),
   };
@@ -556,17 +581,27 @@ const CATALOG = {
     // any other deployment silently told customers to pay the wrong company.
     // Here the account is a per-order virtual account, so if it is missing the
     // line is simply omitted and the customer is pointed at the portal.
+    //
+    // One sentence, no bracketed asides and no four-line block of account
+    // details: what we received, at what rate, what to pay, where to pay it.
+    // The reference is dropped from the account path on purpose — the account
+    // IS the reference, being issued per order, and a customer who is told to
+    // quote one into a virtual-account transfer is being given work that
+    // changes nothing. It stays on the no-account path, where it is the only
+    // thing identifying the order.
     sms: (d) => {
       const head =
-        `Your order for ${formatQuantity(d.quantity, unitLabel(d))} of ${d.product || "fuel"} has been received.`;
-      const bank = [d.accountNumber, d.bankName, d.accountName].filter(Boolean);
-      if (!bank.length) {
-        return `${head} Open the ${companyName()} app to complete payment. Ref: ${ref(d)}`;
+        `${greet(d.customerName)}we have received your order of ` +
+        `${smsQuantity(d.quantity, unitLabel(d))} of ${d.product || "fuel"}` +
+        `${smsRate(d.price ?? d.unitPrice, unitLabel(d))}.`;
+      const account = smsPayTo(d);
+      if (!account) {
+        return `${head} Open the ${companyName()} app to complete payment. Your reference is ${ref(d)}.`;
       }
       const ask = d.totalAmount
-        ? `Please pay ${formatMoney(d.totalAmount, { decimals: 0 })} to:`
-        : "Please make payment to:";
-      return `${head}\n${ask}\n${bank.join("\n")}\nKindly use ${ref(d)} as payment reference`;
+        ? `Please pay ${smsMoney(d.totalAmount)} to ${account}.`
+        : `Please pay to ${account}.`;
+      return `${head} ${ask} ${smsThanks()}`;
     },
   },
 
@@ -586,10 +621,11 @@ const CATALOG = {
     dedupe: (d) => (d.orderId ? `order.paid:${d.orderId}` : null),
     // Django build_short_sms("payment_received")
     sms: (d) =>
-      `We just received your payment${d.amountPaid ? ` of ${formatMoney(d.amountPaid, { decimals: 0 })}` : ""}` +
-      ` for ${formatQuantity(d.quantity, unitLabel(d))} of ${d.product || "Petrol"}` +
+      `${greet(d.customerName)}we have received your payment` +
+      `${d.amountPaid ? ` of ${smsMoney(d.amountPaid)}` : ""}` +
+      ` for ${smsQuantity(d.quantity, unitLabel(d))} of ${d.product || "Petrol"}` +
       `${d.depotName ? ` at ${d.depotName}` : ""}. ` +
-      `Order is confirmed! Thank you for choosing ${companyName()}.`,
+      `Your order is confirmed. ${smsThanks()}`,
 
     // Django: "Payment Confirmation & Order Processing – {order_reference}"
     email: (d) =>
@@ -623,7 +659,7 @@ const CATALOG = {
     dedupe: (d) => (d.orderId ? `order.released:${d.orderId}` : null),
     sms: (d) =>
       `${greet(d.customerName)}your order ${ref(d)} has been released` +
-      `${d.depotName ? ` at ${d.depotName}` : ""} and is ready for loading. Thank you for choosing Soroman!`,
+      `${d.depotName ? ` at ${d.depotName}` : ""} and is ready for loading. ${smsThanks()}`,
   },
 
   /** data: orderId, reference, customerName, truckNumber, depotName */
@@ -660,8 +696,8 @@ const CATALOG = {
     // `company` argument and then ignored it, hardcoding the name — reading it
     // from config/brand is the fix.
     sms: (d) =>
-      `Your order ${ref(d)} has been successfully completed. ` +
-      `Thank you for choosing ${companyName()}. We look forward to serving you again.`,
+      `${greet(d.customerName)}your order ${ref(d)} is complete. ` +
+      `${smsThanks()} We look forward to serving you again.`,
 
     // Django: "Order Successfully Completed – {order_reference}"
     email: (d) =>
@@ -695,7 +731,7 @@ const CATALOG = {
     actionUrl: (d) => portalLink(`/orders/${d.orderId}`),
     dedupe: (d) => (d.orderId ? `order.cancelled:${d.orderId}` : null),
     sms: (d) =>
-      `${greet(d.customerName)}your Soroman order ${ref(d)} has been cancelled.` +
+      `${greet(d.customerName)}your ${companyName()} order ${ref(d)} has been cancelled.` +
       `${d.reason ? ` Reason: ${d.reason}` : ""}`,
   },
 
@@ -814,8 +850,8 @@ const CATALOG = {
     data: (d) => ({ screen: "DangoteOrderDetail", requestId: d.requestId, requestNumber: d.requestNumber }),
     dedupe: (d) => (d.requestId ? `dangote.rejected:${d.requestId}` : null),
     sms: (d) =>
-      `${greet(d.customerName, { formal: false })}your Dangote request ${d.requestNumber} was declined.` +
-      `${d.reason ? ` Reason: ${d.reason}` : ""} Contact Soroman for help.`,
+      `${greet(d.customerName)}your Dangote request ${d.requestNumber} was declined.` +
+      `${d.reason ? ` Reason: ${d.reason}` : ""} Please contact ${companyName()} for help.`,
   },
 
   // ═══ LPG cooking gas (customer) ═══════════════════════════════════════════
@@ -881,8 +917,7 @@ const CATALOG = {
     data: (d) => ({ screen: "LpgOrderDetail", requestId: d.requestId, requestNumber: d.requestNumber }),
     dedupe: (d) => (d.requestId ? `lpg.delivered:${d.requestId}` : null),
     sms: (d) =>
-      `${greet(d.customerName, { formal: false })}your LPG order ${d.requestNumber} has been delivered. ` +
-      `Thank you for choosing Soroman!`,
+      `${greet(d.customerName)}your LPG order ${d.requestNumber} has been delivered. ${smsThanks()}`,
   },
 
   // ═══ Wallet & payments (customer) ═════════════════════════════════════════
@@ -902,8 +937,8 @@ const CATALOG = {
     actionUrl: () => portalLink("/wallet"),
     dedupe: (d) => (d.reference ? `wallet.credited:${d.reference}` : null),
     sms: (d) =>
-      `${greet(d.customerName)}your Soroman wallet has been credited with ${formatMoney(d.amount, { decimals: 0 })}.` +
-      `${d.balanceAfter !== undefined ? ` New balance: ${formatMoney(d.balanceAfter, { decimals: 0 })}.` : ""}`,
+      `${greet(d.customerName)}your ${companyName()} wallet has been credited with ${smsMoney(d.amount)}.` +
+      `${d.balanceAfter !== undefined ? ` Your new balance is ${smsMoney(d.balanceAfter)}.` : ""}`,
   },
 
   /** data: amount, balanceAfter, reference, description, customerName */
@@ -953,11 +988,10 @@ const CATALOG = {
     // Django build_short_sms("commission_paid"). Falls back to the bare phrase
     // "your commission" when no amount is supplied, as Django did.
     sms: (d) => {
-      const amount = formatMoney(d.commissionAmount, { decimals: 0 });
+      const amount = smsMoney(d.commissionAmount);
       return (
-        `${amount ? `Your commission of ${amount}` : "Your commission"}` +
-        `${ref(d) ? ` for order ${ref(d)}` : ""} has been paid. ` +
-        `Thank you for choosing ${companyName()}.`
+        `${greet(d.customerName)}${amount ? `your commission of ${amount}` : "your commission"}` +
+        `${ref(d) ? ` for order ${ref(d)}` : ""} has been paid. ${smsThanks()}`
       );
     },
   },
@@ -977,10 +1011,9 @@ const CATALOG = {
     entity: (d) => ({ type: "delivery", id: d.deliveryId || d.allocationCode }),
     data: (d) => ({ screen: "DeliveryDetail", allocationCode: d.allocationCode, truckNumber: d.truckNumber }),
     dedupe: (d) => (d.allocationCode ? `delivery.released:${d.allocationCode}` : null),
-    // Preserves the exact wording the previous notification.service.js sent.
     sms: (d) =>
-      `Soroman: your delivery ${d.allocationCode || ""} has been released. ` +
-      `Truck ${d.truckNumber || "TBA"}, ${Number(d.quantityAllocated || 0).toLocaleString()}L.`,
+      `${smsPrefix()}your delivery ${d.allocationCode || ""} has been released on truck ` +
+      `${d.truckNumber || "TBA"} with ${smsQuantity(d.quantityAllocated, "Litres")}.`,
   },
 
   /** data: allocationCode, truckNumber, customerName, deliveryId */
@@ -1279,7 +1312,8 @@ const CATALOG = {
     dedupe: (d) => (d.reportId ? `staff.daily_report_approved:${d.reportId}` : null),
     // Wording preserved from the previous notification.service.js listener.
     sms: (d) =>
-      `Soroman: your daily report for ${d.location || ""} (${d.reportDate || ""}) was approved.`,
+      `${smsPrefix()}your daily report for ${d.location || "your site"}` +
+      `${d.reportDate ? ` on ${d.reportDate}` : ""} was approved.`,
   },
 
   /** data: reportId, location, reportDate, comment — to the SUBMITTER */
@@ -1297,7 +1331,8 @@ const CATALOG = {
     actionUrl: (d) => adminLink(`/daily-reports/${d.reportId}`),
     dedupe: (d) => (d.reportId ? `staff.daily_report_rejected:${d.reportId}` : null),
     sms: (d) =>
-      `Soroman: your daily report for ${d.location || ""} (${d.reportDate || ""}) was rejected.` +
+      `${smsPrefix()}your daily report for ${d.location || "your site"}` +
+      `${d.reportDate ? ` on ${d.reportDate}` : ""} was rejected.` +
       `${d.comment ? ` Reason: ${d.comment}` : ""}`,
   },
 

@@ -1,6 +1,10 @@
 const axios = require("axios");
 const { virtualAccountName } = require("../utils/helpers");
 const { toSmsRecipient } = require("../utils/phone");
+// How a Soroman text is written — plain sentences, nothing in brackets, and
+// N rather than ₦ so the body stays in GSM-7. Shared with the catalog
+// templates so the two senders cannot drift into two voices again.
+const { money, quantity: qty, rateClause, payTo, greet } = require("../notifications/templates/sms");
 
 // Termii v3 API. Config is read at call time inside sendSMSTermii — not frozen
 // at module load — so a deploy or a test can override the key, sender, or
@@ -155,34 +159,41 @@ const sendSMSWithFallback = async (phone, sms, { from } = {}) => {
   return { success: false, message: attempts.join(" | ") || "All Termii channels failed" };
 };
 
-const sendOrderSummarySMS = async (phone, orderData) => {
-  const { orderNumber, customerName, product, quantity, unit, totalAmount, accountNumber, bankName, accountName } = orderData;
-
-  const formattedAmount = new Intl.NumberFormat("en-NG", {
-    style: "currency",
-    currency: "NGN",
-    minimumFractionDigits: 0,
-  }).format(totalAmount);
-
-  const formattedAccountName = accountName || virtualAccountName(customerName);
-  const sms = `Dear ${customerName}, your order for ${quantity?.toLocaleString()}${unit ? ` ${unit}` : ""} of ${product} (${formattedAmount}) has been received. Pay to: ${bankName} - ${accountNumber} (Account Name: ${formattedAccountName}). Thank you for choosing Soroman!`;
-  // const sms = `Dear ${customerName}, your order ${orderNumber} for ${quantity?.toLocaleString()}${unit ? ` ${unit}` : ""} of ${product} (${formattedAmount}) has been received. Pay to: ${bankName} - ${accountNumber} (Account Name: ${formattedAccountName}). Thank you for choosing Soroman!`;
-  // Try generic (transactional) channel first, fall back to dnd
+/**
+ * The generic → dnd walk every bespoke sender was carrying its own copy of.
+ *
+ * Termii's `generic` route is the cheaper transactional one; `dnd` is the only
+ * route that reaches a number on Nigeria's Do-Not-Disturb register. Trying
+ * generic first keeps the cheap route as the default and still gets the
+ * message to a DND-registered customer.
+ */
+const deliver = async (phone, sms, label) => {
   for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
     try {
       const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) {
-        return { success: true, message: "SMS sent successfully" };
-      }
+      if (result.success) return { success: true, message: `${label} sent successfully` };
       console.warn(`Termii ${channel} channel failed:`, result.message);
     } catch (error) {
-      const errMsg =
-        error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
+      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
+      console.warn(`Termii ${channel} channel error during ${label}:`, errMsg);
     }
   }
-
   return { success: false, message: "All Termii channels failed" };
+};
+
+const sendOrderSummarySMS = async (phone, orderData) => {
+  const { customerName, product, quantity, unit, price, totalAmount, accountNumber, bankName, accountName } = orderData;
+
+  const sms =
+    `${greet(customerName)}we have received your order of ${qty(quantity, unit)} of ${product}` +
+    `${rateClause(price, unit)}. ` +
+    `Please pay ${money(totalAmount)} to ${payTo({
+      accountName: accountName || virtualAccountName(customerName),
+      accountNumber,
+      bankName,
+    })}. Thank you for your patronage.`;
+
+  return deliver(phone, sms, "Order SMS");
 };
 
 const sendTicketSummarySMS = async (phone, ticketData) => {
@@ -194,129 +205,64 @@ const sendTicketSummarySMS = async (phone, ticketData) => {
   // branches on deliveryType.
   const sms =
     deliveryType === "delivery"
-      ? `Dear ${customerName}, your order for ${quantity?.toLocaleString()} ${unit} of ${productName} from ${depotName || "Soroman depot"} is confirmed and being prepared for delivery. We'll keep you updated. Thank you for choosing Soroman!`
-      : `Dear ${customerName}, your loading ticket for ${quantity?.toLocaleString()} ${unit} of ${productName} at ${depotName || "Soroman depot"} has been generated. Thank you for choosing Soroman!`;
+      ? `${greet(customerName)}your order of ${qty(quantity, unit)} of ${productName} from ${depotName || "our depot"} is confirmed and being prepared for delivery. We will keep you posted. Thank you for your patronage.`
+      : `${greet(customerName)}your loading ticket for ${qty(quantity, unit)} of ${productName} at ${depotName || "our depot"} is ready. Thank you for your patronage.`;
 
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) {
-        return { success: true, message: "Ticket SMS sent successfully" };
-      }
-    } catch (error) {
-      console.warn(`Termii ${channel} channel error during ticket SMS:`, error.message);
-    }
-  }
-  return { success: false, message: "All Termii channels failed for ticket SMS" };
+  return deliver(phone, sms, "Ticket SMS");
 };
 
 const sendDangoteDeliveryOrderSMS = async (phone, orderData) => {
   const { requestNumber, customerName, product, quantity, quantityUnit, totalAmount, accountNumber, bankName, accountName } = orderData;
 
-  const formattedAmount = new Intl.NumberFormat("en-NG", {
-    style: "currency",
-    currency: "NGN",
-    minimumFractionDigits: 0,
-  }).format(totalAmount);
+  const sms =
+    `${greet(customerName)}your Dangote delivery order ${requestNumber} for ` +
+    `${qty(quantity, quantityUnit)} of ${product} has been approved. ` +
+    `Please pay ${money(totalAmount)} to ${payTo({
+      accountName: accountName || virtualAccountName(customerName),
+      accountNumber,
+      bankName,
+    })}. Thank you for your patronage.`;
 
-  const formattedAccountName = accountName || virtualAccountName(customerName);
-
-  const sms = `Dear ${customerName}, your Dangote delivery order ${requestNumber} for ${quantity?.toLocaleString()} ${quantityUnit} of ${product} (${formattedAmount}) has been approved. Pay to: ${bankName} - ${accountNumber} (${formattedAccountName}). Thank you for choosing Soroman!`;
-
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) {
-        return { success: true, message: "Dangote delivery order SMS sent successfully" };
-      }
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
-    }
-  }
-
-  return { success: false, message: "All Termii channels failed" };
+  return deliver(phone, sms, "Dangote delivery order SMS");
 };
 
 const sendLpgOrderSMS = async (phone, orderData) => {
   const { requestNumber, customerName, cylinderSizeKg, cylinderQuantity, totalAmount, accountNumber, bankName, accountName } = orderData;
 
-  const formattedAmount = new Intl.NumberFormat("en-NG", {
-    style: "currency",
-    currency: "NGN",
-    minimumFractionDigits: 0,
-  }).format(totalAmount);
+  const cylinders = `${cylinderQuantity} x ${cylinderSizeKg}Kg cylinder${Number(cylinderQuantity) === 1 ? "" : "s"}`;
+  const sms =
+    `${greet(customerName)}your LPG order ${requestNumber} for ${cylinders} has been approved. ` +
+    `Please pay ${money(totalAmount)} to ${payTo({
+      accountName: accountName || virtualAccountName(customerName),
+      accountNumber,
+      bankName,
+    })}. Thank you for your patronage.`;
 
-  const formattedAccountName = accountName || virtualAccountName(customerName);
-
-  const sms = `Dear ${customerName}, your LPG order ${requestNumber} for ${cylinderQuantity}x ${cylinderSizeKg}Kg cylinders (${formattedAmount}) has been approved. Pay to: ${bankName} - ${accountNumber} (${formattedAccountName}). Thank you for choosing Soroman!`;
-
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) {
-        return { success: true, message: "LPG order SMS sent successfully" };
-      }
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
-    }
-  }
-
-  return { success: false, message: "All Termii channels failed" };
+  return deliver(phone, sms, "LPG order SMS");
 };
 
 const sendOrderExpiredSMS = async (phone, { orderNumber, customerName }) => {
-  const name = customerName ? `Dear ${customerName}, ` : "";
-  const sms = `${name}your order ${orderNumber} has expired because payment wasn't received in time. The price is no longer valid, place a new order at current price whenever you're ready.`;
+  const sms =
+    `${greet(customerName)}your order ${orderNumber} has expired because payment was not received in time. ` +
+    `The price is no longer held. Please place a new order at today's price whenever you are ready.`;
 
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) return { success: true, message: "SMS sent successfully" };
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
-    }
-  }
-  return { success: false, message: "All Termii channels failed" };
+  return deliver(phone, sms, "Order expiry SMS");
 };
 
 const sendDangoteOrderExpiredSMS = async (phone, { requestNumber, customerName }) => {
-  const name = customerName ? `Hi ${customerName}, ` : "";
-  const sms = `${name}your Dangote delivery order ${requestNumber} has expired because payment wasn't received in time. The price is no longer held — submit a new request at today's prices whenever you're ready.`;
+  const sms =
+    `${greet(customerName)}your Dangote delivery order ${requestNumber} has expired because payment was not ` +
+    `received in time. The price is no longer held. Please send a new request at today's price whenever you are ready.`;
 
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) return { success: true, message: "SMS sent successfully" };
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
-    }
-  }
-  return { success: false, message: "All Termii channels failed" };
+  return deliver(phone, sms, "Dangote expiry SMS");
 };
 
 const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) => {
-  const name = customerName ? `Hi ${customerName}, ` : "";
-  const sms = `${name}your LPG cooking gas order ${requestNumber} has expired because payment wasn't received in time. The price is no longer held — submit a new order at today's prices whenever you're ready.`;
+  const sms =
+    `${greet(customerName)}your LPG order ${requestNumber} has expired because payment was not received in time. ` +
+    `The price is no longer held. Please place a new order at today's price whenever you are ready.`;
 
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) return { success: true, message: "SMS sent successfully" };
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error:`, errMsg);
-    }
-  }
-  return { success: false, message: "All Termii channels failed" };
+  return deliver(phone, sms, "LPG expiry SMS");
 };
 
 module.exports = { sendSMSTermii, getTermiiBalance, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS };

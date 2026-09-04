@@ -966,7 +966,7 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
       }
       if (!String(t.driverName || "").trim()) throw httpErr(400, `${where}: driver name is required`);
       if (!String(t.driverPhone || "").trim()) throw httpErr(400, `${where}: driver phone is required`);
-      if (!String(t.truckNumber || "").trim()) throw httpErr(400, `${where}: plate number is required`);
+      if (!String(t.truckNumber || "").trim()) throw httpErr(400, `${where}: truck number is required`);
     });
 
     // ── Quantity ceiling ──────────────────────────────────────────────────

@@ -480,7 +480,7 @@ describe("track — status in chat", () => {
     assert.equal(r.session.failureCount, 0);
     assert.deepEqual(kinds(r), [REPLY.CTA]);
     assert.ok(r.replies[0].body.includes("SOR-102"));
-    assert.ok(r.replies[0].body.includes("being loaded for delivery"), "delivery wording for a delivery order");
+    assert.ok(r.replies[0].body.includes("loading for delivery"), "delivery wording for a delivery order");
   });
 
   it("a stale picker row (order closed since) gets an honest answer", () => {
@@ -759,13 +759,13 @@ describe("COLLECT and LOGISTICS", () => {
     assert.equal(r.session.state, STATES.CONFIRM);
     assert.equal(r.session.cart.trucksDeferred, true);
     assert.equal(r.session.cart.trucks, undefined);
-    assert.match(r.replies[0].body, /plates captured at the gate/i);
+    assert.match(r.replies[0].body, /truck numbers taken at the gate/i);
   });
 
   it("declare-now then one plate reaches CONFIRM", () => {
     const choice = reduce(mkSession(STATES.LOGISTICS, { ...cart, deliveryType: "pickup" }), btn("declare_trucks"), baseCtx());
     assert.equal(choice.session.cart.declareTrucks, true);
-    assert.deepEqual(buttonIds(choice.replies[0]), ["defer_trucks"], "escape stays on the plate prompt");
+    assert.deepEqual(buttonIds(choice.replies[0]), ["defer_trucks"], "escape stays on the truck-number prompt");
     const r = reduce(choice.session, txt("abc-123-xy"), baseCtx());
     assert.equal(r.session.state, STATES.CONFIRM);
     assert.deepEqual(r.session.cart.trucks, [{ quantity: 30000, plate: "ABC-123-XY" }]);
@@ -804,7 +804,7 @@ describe("COLLECT and LOGISTICS", () => {
 
     const asked = reduce(choice.session, btn("declare_trucks"), baseCtx());
     assert.equal(asked.session.state, STATES.LOGISTICS);
-    assert.match(asked.replies[asked.replies.length - 1].body, /number of trucks you will be sending/i);
+    assert.match(asked.replies[asked.replies.length - 1].body, /how many trucks are you sending/i);
     assert.deepEqual(buttonIds(asked.replies[0]), ["defer_trucks"]);
 
     // 1 truck can't carry 110,000 L.
@@ -1184,7 +1184,7 @@ describe("order outcomes", () => {
     const s = mkSession(STATES.AWAIT_PAYMENT, { awaiting: { orderNumber: "SOR-501" } }, { lastOrderId: 501 });
     const r = reduce(s, { type: INBOUND.ORDER_FAILED, reason: "cancel" }, baseCtx());
     assert.equal(r.session.state, STATES.AWAIT_PAYMENT);
-    assert.match(r.replies[0].body, /unable to cancel/i);
+    assert.match(r.replies[0].body, /could not cancel/i);
   });
 
   it("AWAIT_PAYMENT nudges with the account details on random text", () => {

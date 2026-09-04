@@ -589,6 +589,10 @@ async function placeOrder({
       product: fullOrder.productName || "N/A",
       quantity: order.quantity,
       unit: fullOrder.productUnit || "Liters",
+      // The rate the order was struck at. The text used to name a quantity and
+      // a total and leave the customer to divide one by the other; it is the
+      // first thing he checks, so it is now in the sentence.
+      price: order.price,
       totalAmount: order.totalAmount,
       accountNumber: virtualAccountNumber,
       bankName: virtualAccountBank,
@@ -619,6 +623,7 @@ async function placeOrder({
         product: fullOrder.productName || "",
         quantity: order.quantity,
         unit: fullOrder.productUnit || "Liters",
+        price: order.price,
         totalAmount: order.totalAmount,
         depotName: depot.name,
         deliveryType: order.deliveryType,

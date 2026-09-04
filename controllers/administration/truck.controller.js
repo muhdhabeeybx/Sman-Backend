@@ -41,7 +41,7 @@ const createTruck = asyncHandler(async (req, res) => {
   if (!plateNumber || !model || !capacity) {
     return res.status(400).json({
       success: false,
-      message: "Plate number, model, and capacity are required",
+      message: "Truck number, model, and capacity are required",
     });
   }
 
@@ -49,7 +49,7 @@ const createTruck = asyncHandler(async (req, res) => {
   if (existing) {
     return res.status(409).json({
       success: false,
-      message: "A truck with this plate number already exists",
+      message: "A truck with this number already exists",
     });
   }
 
