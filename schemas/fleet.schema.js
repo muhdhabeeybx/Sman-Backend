@@ -73,6 +73,31 @@ const fleetLedgerEntrySchema = z.object({
   description: z.string().max(5000).optional(),
 });
 
+/**
+ * A batch posting: one fully-resolved line per truck.
+ *
+ * Lines are spelled out rather than expressed as "these fields × those
+ * trucks", because the screen lets the operator vary the amount and the
+ * description per truck before committing, and the server must store the set
+ * they actually approved. The 200 cap is a fat-finger guard — no real fleet
+ * posts more in one go.
+ */
+const fleetLedgerBatchSchema = z.object({
+  entries: z
+    .array(
+      z.object({
+        truckId: z.coerce.number().int().positive(),
+        entryType: z.enum(["expense", "income"]),
+        category: z.string().min(1).max(100),
+        amount: z.coerce.number().positive().max(1000000000),
+        entryDate: z.string().date(),
+        description: z.string().max(5000).optional(),
+      })
+    )
+    .min(1)
+    .max(200),
+});
+
 const fleetLedgerQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(50),
@@ -88,5 +113,6 @@ module.exports = {
   updateFleetTruckSchema,
   fleetQuerySchema,
   fleetLedgerEntrySchema,
+  fleetLedgerBatchSchema,
   fleetLedgerQuerySchema,
 };

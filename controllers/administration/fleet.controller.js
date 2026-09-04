@@ -43,6 +43,17 @@ const recordLedgerEntry = asyncHandler(async (req, res) => {
   sendServiceResult(res, result, { successStatus: 201, message: "Ledger entry recorded" });
 });
 
+/** POST /api/fleet/ledger/batch — one posting spread across many trucks. */
+const recordLedgerBatch = asyncHandler(async (req, res) => {
+  const result = await fleetService.recordLedgerEntriesBatch(req.body.entries, {
+    actor: staffActor(req),
+  });
+  sendServiceResult(res, result, {
+    successStatus: 201,
+    message: `${req.body.entries.length} ledger entries recorded`,
+  });
+});
+
 const getLedgerEntries = asyncHandler(async (req, res) => {
   const result = await fleetTruckRepo.findLedgerEntries({ ...req.query, truckId: req.params.id });
   const summary = await fleetTruckRepo.summarizeLedger({
@@ -145,6 +156,7 @@ module.exports = {
   updateFleetTruck,
   getComplianceWatchlist,
   recordLedgerEntry,
+  recordLedgerBatch,
   getLedgerEntries,
   getAllLedgerEntries,
   updateLedgerEntry,

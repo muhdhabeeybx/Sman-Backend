@@ -8,6 +8,7 @@ const {
   updateFleetTruckSchema,
   fleetQuerySchema,
   fleetLedgerEntrySchema,
+  fleetLedgerBatchSchema,
   fleetLedgerQuerySchema,
 } = require("../../schemas/fleet.schema");
 const {
@@ -17,6 +18,7 @@ const {
   updateFleetTruck,
   getComplianceWatchlist,
   recordLedgerEntry,
+  recordLedgerBatch,
   getLedgerEntries,
   getAllLedgerEntries,
   updateLedgerEntry,
@@ -29,6 +31,14 @@ router.get("/", verifyStaff, validate({ query: fleetQuerySchema }), getFleetTruc
 router.get("/compliance", verifyStaff, getComplianceWatchlist);
 // Flat ledger: the Directory rolls money up across every truck.
 router.get("/ledger", verifyStaff, getAllLedgerEntries);
+// Before "/ledger/:entryId" would ever be considered, and before "/:id" —
+// "batch" is a verb here, never an entry id.
+router.post(
+  "/ledger/batch",
+  verifyStaff,
+  validate({ body: fleetLedgerBatchSchema }),
+  recordLedgerBatch
+);
 router.patch("/ledger/:entryId", verifyStaff, updateLedgerEntry);
 router.delete("/ledger/:entryId", verifyStaff, deleteLedgerEntry);
 router.delete("/:id", verifyStaff, deleteFleetTruck);

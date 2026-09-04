@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, desc, asc, count, lte, gte, sql } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, asc, count, lte, gte, sql, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { fleetTrucks, fleetLedgerEntries } = require("../db/schema");
 
@@ -14,6 +14,13 @@ const findByPlate = async (plateNumber) => {
     .where(eq(fleetTrucks.plateNumber, plateNumber))
     .limit(1);
   return row || null;
+};
+
+/** Several trucks in one round trip — what a batch posting validates against. */
+const findByIds = async (ids) => {
+  const wanted = [...new Set((ids || []).map(Number).filter(Number.isFinite))];
+  if (wanted.length === 0) return [];
+  return db.select().from(fleetTrucks).where(inArray(fleetTrucks.id, wanted));
 };
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
@@ -102,6 +109,19 @@ const createLedgerEntry = async (data) => {
   return row;
 };
 
+/**
+ * Many entries in one statement.
+ *
+ * A single multi-row INSERT rather than a loop, so a batch posting is one
+ * round trip and one implicit transaction: either every truck gets its line
+ * or none does. A half-applied "July salaries" is the one outcome worth
+ * ruling out at the database.
+ */
+const createLedgerEntries = async (rows) => {
+  if (!rows || rows.length === 0) return [];
+  return db.insert(fleetLedgerEntries).values(rows).returning();
+};
+
 const findLedgerEntries = async ({
   truckId,
   entryType,
@@ -175,11 +195,13 @@ const summarizeLedger = async ({ truckId, dateFrom, dateTo } = {}) => {
 module.exports = {
   findById,
   findByPlate,
+  findByIds,
   findAll,
   create,
   update,
   findExpiringCompliance,
   createLedgerEntry,
+  createLedgerEntries,
   findLedgerEntries,
   summarizeLedger,
 };
