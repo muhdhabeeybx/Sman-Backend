@@ -25,10 +25,35 @@ PgTimestamp.prototype.mapToDriverValue = function (value) {
   return value;
 };
 
-// Under `npm test`, use TEST_DATABASE_URL when provided so fixtures never touch
+// Under a test run, use TEST_DATABASE_URL when provided so fixtures never touch
 // the app's real database. Everything else (the server, migrations, seeds) runs
 // against DATABASE_URL as before.
-const isTest = process.env.NODE_ENV === "test";
+
+/**
+ * Are we running under a test runner?
+ *
+ * This asked `NODE_ENV === "test"` and nothing else, which is only what the
+ * `npm test` script sets. That is not enough, and the gap is not theoretical:
+ *
+ *   node --test tests/wa-pipeline.test.js
+ *
+ * is the obvious way to run one suite, and it is what an editor's "run test"
+ * button does. It leaves NODE_ENV unset, so `isTest` was false, so the guard
+ * below — the entire point of which is to stop this — never evaluated, and the
+ * suite connected to DATABASE_URL and inserted its fixtures into production.
+ * That is how a depot called "Pipe Depot 7462", a product called "Pipe PMS
+ * 7462", a PFI, a customer and a live order reached the dashboard, and how
+ * "Dash Depot"/"Cust N" got into the dev database before them.
+ *
+ * A safety check that only fires when invoked the least convenient way is not
+ * a safety check. Node's own runner sets NODE_TEST_CONTEXT in every test child
+ * process, so ask that too; the argv checks catch a runner that sets neither.
+ */
+const isTest =
+  process.env.NODE_ENV === "test" ||
+  process.env.NODE_TEST_CONTEXT !== undefined ||
+  process.argv.includes("--test") ||
+  process.argv.some((a) => /\.test\.[cm]?js$/.test(a));
 const connectionString =
   isTest && process.env.TEST_DATABASE_URL
     ? process.env.TEST_DATABASE_URL
