@@ -100,7 +100,21 @@ const orderTruckStatusEnum = pgEnum("order_truck_status", [
   "gated_out",
 ]);
 
-const pfiStatusEnum = pgEnum("pfi_status", ["active", "finished"]);
+/**
+ * A batch's trading life.
+ *
+ * `not_started` exists because a cargo is bought, shipped and paid for long
+ * before it sells anything. Those costs have to land somewhere, and the only
+ * place they belong is the batch that incurred them — but a batch that is not
+ * selling yet must not answer "how much PMS is on hand", or the stock tiles
+ * count product nobody can ship today. So it carries expenses like any other
+ * PFI and stays out of every stock and revenue rollup until it is started.
+ *
+ * Ordered as the lifecycle runs. Nothing depends on the enum's own ordinal —
+ * lists are sorted in the application — but a type read straight out of the
+ * database should still read in the order the thing actually happens.
+ */
+const pfiStatusEnum = pgEnum("pfi_status", ["not_started", "active", "finished"]);
 
 /**
  * The expense approval chain.

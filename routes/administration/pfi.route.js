@@ -9,6 +9,7 @@ const {
   createPfi,
   updatePfi,
   deletePfi,
+  startPfi,
   finishPfi,
   getPfiSummary,
   getPfiExpenses,
@@ -30,6 +31,7 @@ router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getPfiById);
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updatePfi }), updatePfi);
 router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deletePfi);
 
+router.post("/:id/start", verifyStaff, validate({ params: misc.idParam }), startPfi);
 router.post("/:id/finish", verifyStaff, validate({ params: misc.idParam }), finishPfi);
 router.get("/:id/summary", verifyStaff, validate({ params: misc.idParam }), getPfiSummary);
 router.get("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), getPfiExpenses);

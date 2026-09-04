@@ -1,0 +1,21 @@
+-- A PFI that exists but is not selling yet.
+--
+-- A cargo is bought, shipped, cleared and paid for weeks before the first
+-- litre leaves the depot. Those costs are real and belong to the batch that
+-- incurred them, so the batch has to exist to receive them — but until it is
+-- trading it must not count towards "PMS remaining", or the stock tiles
+-- report product nobody can ship today.
+--
+-- Written by hand in the style of the files beside it rather than generated:
+-- drizzle-kit has never been run against this database, and generating from
+-- the schema folds in earlier hand-applied changes it has no snapshot for.
+--
+-- Idempotent, so re-running is a no-op. ADD VALUE is safe inside the implicit
+-- transaction the apply script runs each file in on PostgreSQL 12+, because
+-- this file only adds the label — nothing here writes a row using it.
+--
+-- Placed BEFORE 'active' so the type reads in lifecycle order. Existing rows
+-- are untouched: every PFI on record was created to trade, and silently
+-- reclassifying live batches as not-started would empty the stock tiles.
+
+ALTER TYPE "pfi_status" ADD VALUE IF NOT EXISTS 'not_started' BEFORE 'active';

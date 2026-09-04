@@ -76,7 +76,7 @@ const listPfis = pagination.extend({
     .string()
     .trim()
     .toLowerCase()
-    .pipe(enumOf("Status", ["active", "finished", "all"]))
+    .pipe(enumOf("Status", ["not_started", "active", "finished", "all"]))
     .optional()
     .or(z.literal("")),
   location: z.union([z.string(), z.number()]).transform((v) => String(v).trim()).optional().or(z.literal("")),
@@ -571,6 +571,10 @@ const optPfiDate = (label = "Date") =>
 const pfiBase = {
   pfiNumber: z.string().trim().max(100).optional(),
   pfi_number: z.string().trim().max(100).optional(),
+  // Not "finished": closing a batch records closure figures and is the
+  // /finish endpoint's job. Letting a plain PATCH set it would close a cargo
+  // with no closure date, no handler and no inflow on record.
+  status: enumOf("Status", ["not_started", "active"]).optional(),
   // Coastal batches arrive by sea and are billed on a BL; gantry batches are
   // an allocation bought at the loading gantry and split into tickets. Absent
   // means coastal — the only kind that existed before the distinction did.

@@ -180,9 +180,15 @@ const createPfi = asyncHandler(async (req, res) => {
     officerNames[nameKey] = await resolveOfficerName(val);
   }
 
+  // Defaults to active, because that is what every batch was before this
+  // status existed and what most of them still are on the day they are
+  // raised. A cargo bought ahead of trading says so explicitly.
+  const requestedStatus = req.body.status === "not_started" ? "not_started" : "active";
+
   const pfi = await pfiRepo.create({
     pfiNumber: String(pfi_number).trim(),
     pfiType: pfi_type,
+    status: requestedStatus,
     description: description || "",
     pfiDate: parseDate(pfi_date),
     locationId: location_id_val,
@@ -397,6 +403,34 @@ const deletePfi = asyncHandler(async (req, res) => {
  * the computed pair alongside so a mismatch is visible at the moment of
  * closing rather than discovered later.
  */
+/**
+ * Put a batch into trading.
+ *
+ * The counterpart to /finish, and deliberately as small as that one is large:
+ * closing a cargo records what it settled for, whereas starting one asserts a
+ * single fact — from now on this batch's stock is stock anyone can sell, and
+ * its remaining quantity belongs in the portfolio totals.
+ *
+ * Its own endpoint rather than a PATCH so the transition is one call with one
+ * meaning, and so a batch cannot be un-finished by a field update: a closed
+ * cargo has closure figures on it, and reopening it would leave them
+ * describing a batch that is trading again.
+ */
+const startPfi = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+  if (pfi.status === "active") throw httpErr(409, "This PFI is already active");
+  if (pfi.status === "finished") throw httpErr(409, "This PFI is closed and cannot be restarted");
+
+  const updated = await withFinancials(await pfiRepo.update(pfi.id, { status: "active" }));
+
+  res.json({
+    success: true,
+    message: `${pfi.pfiNumber} is now active`,
+    data: { pfi: updated },
+  });
+});
+
 const finishPfi = asyncHandler(async (req, res) => {
   const pfi = await pfiRepo.findById(req.params.id);
   if (!pfi) throw httpErr(404, "PFI not found");
@@ -651,6 +685,7 @@ module.exports = {
   createPfi,
   updatePfi,
   deletePfi,
+  startPfi,
   finishPfi,
   getPfiSummary,
   getPfiExpenses,
