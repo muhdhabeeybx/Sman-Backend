@@ -468,14 +468,55 @@ function ordersTable(orders, total) {
 
 // ─── Assembly ────────────────────────────────────────────────────────────────
 
-const SECTION_LABEL = `margin:22px 0 6px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${INK};font-size:12px;`;
+/**
+ * Telling the sections apart.
+ *
+ * A depot used to be an <h3> and its three sections were three lines of bold
+ * uppercase text, all the same size and weight. Scrolling a six-depot report,
+ * there was nothing to catch the eye at a boundary: "Orders" for Warri and
+ * "PFI stock & sales" for Calabar looked identical, so finding a depot meant
+ * reading rather than scanning.
+ *
+ * The fix is hierarchy, not hue. Colour in this document already means
+ * something — green is money in, red is what is left standing — and giving
+ * each section its own colour would spend that meaning on decoration and make
+ * the figures harder to read again, which is the exact problem the black and
+ * white pass was undoing. So the levels are told apart by WEIGHT instead:
+ *
+ *   depot    a solid black bar, white type, full width — unmissable
+ *   section  a grey band with a black left rule — clearly subordinate
+ *
+ * Both are single-cell tables rather than styled divs, because Outlook drops
+ * `background` on a div and would render a bar as bare text on white.
+ */
+const band = (html, { bg, color, size, weight = 700, extra = "" }) =>
+  `<table width="100%" border="0" cellpadding="0" cellspacing="0"><tr>` +
+  `<td style="background:${bg};color:${color};padding:7px 10px;font-size:${size}px;` +
+  `font-weight:${weight};text-transform:uppercase;letter-spacing:.6px;${extra}">${html}</td>` +
+  `</tr></table>`;
+
+/** The depot. */
+const locationBar = (name) =>
+  band(escapeHtml(name), { bg: INK, color: "#ffffff", size: 14 });
+
+/** A section within a depot. */
+const sectionBar = (label) =>
+  band(escapeHtml(label), {
+    bg: "#EDEDED",
+    color: INK,
+    size: 11,
+    extra: `border-left:4px solid ${INK};`,
+  });
 
 function locationSection(loc) {
   const filed = loc.staffEntries.reduce((count, s) => count + s.entries.length, 0);
 
   return (
-    `<div style='margin-top:26px;padding:0 0 4px;border-top:2px solid ${INK};'>` +
-    `<h3 style='margin:12px 0 2px;font-size:15px;color:${INK};'>${escapeHtml(loc.name)}</h3>` +
+    // Generous space above: the gap is what says "a new depot starts here"
+    // before the bar itself is even read.
+    `<div style='margin-top:34px;padding:0 0 4px;'>` +
+    locationBar(loc.name) +
+    `<div style='height:8px;line-height:8px;'>&nbsp;</div>` +
     summaryBand([
       { label: "Opening stock", value: `${n0(loc.stock.opening)} Litres` },
       // The quantity is the headline; the order count is the footnote. It was
@@ -497,11 +538,16 @@ function locationSection(loc) {
       { label: "Closing stock", value: `${n0(loc.stock.closing)} Litres`, tone: "balance" },
       { label: "Sheets filed", value: `${filed} of 5` },
     ]) +
-    `<p style='${SECTION_LABEL}'>PFI stock &amp; sales</p>` +
+    `<div style='height:18px;line-height:18px;'>&nbsp;</div>` +
+    sectionBar("PFI stock & sales") +
+    `<div style='height:6px;line-height:6px;'>&nbsp;</div>` +
     stockTable(loc.pfiStock) +
-    `<p style='${SECTION_LABEL}'>Staff entries</p>` +
+    `<div style='height:18px;line-height:18px;'>&nbsp;</div>` +
+    sectionBar("Staff entries") +
     loc.staffEntries.map(roleTable).join("") +
-    `<p style='${SECTION_LABEL}'>Orders</p>` +
+    `<div style='height:18px;line-height:18px;'>&nbsp;</div>` +
+    sectionBar("Orders") +
+    `<div style='height:6px;line-height:6px;'>&nbsp;</div>` +
     ordersTable(loc.orders, loc.orderCount) +
     `</div>`
   );

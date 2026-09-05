@@ -504,7 +504,13 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         .slice(0, ORDERS_PER_LOCATION)
         .map((o) => ({
           reference: generateOrderReference(o.company_name, o.id),
-          customer: o.customer_name || "",
+          // The company, not the person who placed it. An order belongs to the
+          // company being invoiced, and that is the name the desk reconciles a
+          // transfer against — a report listing "Ada Obi" where the bank line
+          // says "Rure Oil and Gas" is a name nobody can match. Falls back to
+          // the customer's own name only when no company is on the order,
+          // which is what an individual buyer looks like.
+          customer: o.company_name || o.customer_name || "",
           product: o.product_name || "",
           quantity: num(o.quantity),
           rate: num(o.price),
