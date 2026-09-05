@@ -168,11 +168,22 @@ describe("daily report summary — the day in words", () => {
     assert.match(remarks[0].note, /PFI\/CAL\/01 is nearly exhausted, with 50 litres remaining\./);
   });
 
-  test("partial submissions agree with their number", () => {
-    const one = buildRemarks({ locations: [{ name: "A", orderCount: 1, stock: { closing: 0 }, pfiStock: [], staffEntries: [{ entries: [{}] }] }] });
-    const three = buildRemarks({ locations: [{ name: "A", orderCount: 1, stock: { closing: 0 }, pfiStock: [], staffEntries: [{ entries: [{}, {}, {}] }] }] });
-    assert.equal(one[0].note, "Only 1 of 5 report was submitted.");
-    assert.equal(three[0].note, "Only 3 of 5 reports were submitted.");
+  test("a depot that filed some but not all of its sheets is NOT remarked on", () => {
+    // Most depots file some but not all five most days, so a partial count is
+    // a permanent condition rather than an exception. Reporting it put five
+    // lines in REMARKS and buried the one depot that filed nothing.
+    const remarks = buildRemarks({
+      locations: [
+        { name: "AVIDOR", orderCount: 1, stock: { closing: 0 }, pfiStock: [], staffEntries: [{ entries: [{}] }] },
+        { name: "KEONAMEX", orderCount: 1, stock: { closing: 0 }, pfiStock: [], staffEntries: [{ entries: [{}, {}, {}] }] },
+        { name: "DANGOTE", orderCount: 1, stock: { closing: 0 }, pfiStock: [], staffEntries: [] },
+      ],
+    });
+    assert.deepEqual(
+      remarks,
+      [{ depot: "DANGOTE", note: "No report was submitted today." }],
+      "only the depot that filed nothing appears"
+    );
   });
 
   test("a clean day has no remarks at all, and no REMARKS heading", () => {

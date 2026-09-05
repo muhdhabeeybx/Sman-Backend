@@ -39,8 +39,6 @@ const litres = (v) => `${n0(v)} litres`;
 const pct = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
 const plural = (c, s, p = `${s}s`) => `${n0(c)} ${Number(c) === 1 ? s : p}`;
 
-const ROLES_PER_DEPOT = 5;
-
 // ─── The statements, one per paragraph ──────────────────────────────────────
 
 /** "29 orders were received today, totaling … across 6 depots." */
@@ -144,14 +142,18 @@ function buildRemarks(d) {
   for (const loc of locations) {
     const filed = (loc.staffEntries || []).reduce((n, s) => n + s.entries.length, 0);
 
+    // Only a depot that filed NOTHING is remarked on.
+    //
+    // A partial count used to be reported too — "Only 3 of 5 reports were
+    // submitted" — and on a real day that was five of the six lines here,
+    // burying the one depot that had filed nothing at all. Most depots file
+    // some but not all of their five sheets most days, so the partial count
+    // was a permanent condition rather than an exception, and a REMARKS block
+    // full of permanent conditions is one people stop reading. The per-role
+    // detail is still in the Staff entries tables, where a role nobody filed
+    // says so on its own line.
     if (filed === 0) {
       add(loc.name, "No report was submitted today.");
-    } else if (filed < ROLES_PER_DEPOT) {
-      add(
-        loc.name,
-        `Only ${filed} of ${ROLES_PER_DEPOT} report${filed === 1 ? "" : "s"} ` +
-          `${filed === 1 ? "was" : "were"} submitted.`
-      );
     }
 
     if (loc.orderCount === 0 && loc.stock && loc.stock.closing > 0) {
