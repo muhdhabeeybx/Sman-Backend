@@ -10,8 +10,7 @@ const {
   jsonb,
   index,
   uniqueIndex,
-  check,
-} = require("drizzle-orm/pg-core");
+  check, char } = require("drizzle-orm/pg-core");
 const { sql } = require("drizzle-orm");
 const { expenseStatusEnum } = require("./enums");
 const { pfis } = require("./pfi");
@@ -98,8 +97,43 @@ const pfiExpenses = pgTable(
     invoiceNumber: varchar("invoice_number", { length: 100 }).default("").notNull(),
     // "Purpose" on the schedule.
     description: text("description").default(""),
-    /** What the request asks for: invoice amount less any WHT withheld. */
+    /**
+     * What the request asks for: invoice amount less any WHT withheld,
+     * denominated in `currency` below — NOT necessarily naira.
+     */
     amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+
+    // ── Currency ──────────────────────────────────────────────────────────
+    //
+    // The cargo accounts (5010 Vessel Hire, 5020 Freight, 5030 Demurrage,
+    // 5310 Marine Insurance…) are billed by counterparties who invoice in
+    // dollars. The foreign figure is the debt — it is what the vendor chases
+    // and what the document an auditor reads actually says. Naira is a
+    // translation of it, and it is translated twice: at the rate when the
+    // request was raised, and again at the rate on the day it was paid.
+    /** ISO 4217. 'NGN' for all but the vessel side. */
+    currency: char("currency", { length: 3 }).default("NGN").notNull(),
+    /** Naira per unit of `currency`, at the time of raising. Exactly 1 on NGN. */
+    exchangeRate: decimal("exchange_rate", { precision: 18, scale: 6 }).default("1").notNull(),
+    /**
+     * The rate on the day it actually cleared. NULL until paid, and NULL
+     * forever on a naira expense — "no conversion happened" and "the
+     * conversion happened at parity" are different facts.
+     */
+    paidExchangeRate: decimal("paid_exchange_rate", { precision: 18, scale: 6 }),
+
+    /**
+     * The naira translations. GENERATED ALWAYS by the database — never written
+     * from here, and Postgres refuses any attempt to.
+     *
+     * Every total in the system sums these rather than `amount`. The failure
+     * mode if one is missed is silent: a $50,000 invoice adds 50,000 into a
+     * naira total and understates it seventyfold, and nothing about the number
+     * looks wrong. Deriving them in the database rather than in application
+     * code is what makes that structurally impossible. See migration 0026.
+     */
+    amountNgn: decimal("amount_ngn", { precision: 15, scale: 2 }),
+    amountPaidNgn: decimal("amount_paid_ngn", { precision: 15, scale: 2 }),
 
     // ── The invoice behind the payment ────────────────────────────────────
     // Null, not zero, when there is no invoice to document: a cash payment with

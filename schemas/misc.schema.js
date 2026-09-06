@@ -360,11 +360,52 @@ const optInvoiceMoney = (label = "Amount") =>
     .optional()
     .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : String(v)));
 
+/**
+ * An ISO 4217 code. Upper-cased on the way in, so a requester typing "usd"
+ * does not trip the database's own three-upper-case-letters constraint.
+ */
+const optCurrency = (label = "Currency") =>
+  z
+    .union([z.string(), z.literal(""), z.null()])
+    .optional()
+    .transform((v) => (v === "" || v === null || v === undefined ? undefined : String(v).trim().toUpperCase()))
+    .refine((v) => v === undefined || /^[A-Z]{3}$/.test(v), {
+      message: `${label} must be a three-letter code such as NGN or USD`,
+    });
+
+/**
+ * Naira per unit of the invoice's currency.
+ *
+ * Strictly positive. A rate of zero translates a foreign invoice to nothing at
+ * all and reads as a free expense, which is the one wrong answer that looks
+ * like a right one.
+ */
+const optRate = (label = "Exchange rate") =>
+  z
+    .union([
+      numberLike(label).pipe(z.number().positive(`${label} must be greater than zero`)),
+      z.literal(""),
+      z.null(),
+    ])
+    .optional()
+    .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : Number(v)));
+
 const expenseBase = {
   // A description is genuinely optional — the category, vendor and amount
   // already identify the line, and forcing prose here just gets "expense".
   description: optionalString("Description", 500),
+  /**
+   * What the vendor is owed, in `currency` below — NOT in naira.
+   *
+   * The foreign figure is the debt: it is what the invoice says, what the
+   * vendor will chase, and what an auditor reads off the document. Naira is a
+   * translation of it, derived by the database from `exchange_rate` and never
+   * written by this API. See db/migrations/0026.
+   */
   amount: money("Amount", { min: 0.01 }),
+  currency: optCurrency("Currency"),
+  exchange_rate: optRate("Exchange rate"),
+  exchangeRate: optRate("Exchange rate"),
   // The GL account the cost is posted to. Accepted as an id in either casing.
   category: id("Category").optional().nullable(),
   category_id: id("Category").optional().nullable(),
@@ -429,6 +470,11 @@ const recordAsPaidFields = {
   recordAsPaid: z.boolean().optional(),
   amount_paid: optInvoiceMoney("Amount paid"),
   amountPaid: optInvoiceMoney("Amount paid"),
+  // The rate on the day it actually cleared, which is not the rate it was
+  // raised at. The gap between the two is a real gain or loss and the only
+  // way to see it is to keep both.
+  paid_exchange_rate: optRate("Payment exchange rate"),
+  paidExchangeRate: optRate("Payment exchange rate"),
   payment_reference: optionalString("Payment reference", 100),
   paymentReference: optionalString("Payment reference", 100),
   payment_date: optionalString("Payment date", 40),

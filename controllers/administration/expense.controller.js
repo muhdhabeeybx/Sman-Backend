@@ -423,7 +423,10 @@ const createExpense = asyncHandler(async (req, res) => {
     throw httpErr(403, "Only a super admin can record an expense as already paid.");
   }
 
-  const payment = directToPaid ? paymentFor(req.body, { amount: String(amount) }) : null;
+  const money_ = currencyFor(req.body);
+  const payment = directToPaid
+    ? paymentFor(req.body, { amount: String(amount), currency: money_.currency })
+    : null;
 
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
@@ -434,9 +437,10 @@ const createExpense = asyncHandler(async (req, res) => {
     tin_number: pick(req.body, "tin_number", "tinNumber") ?? "",
     invoice_number: pick(req.body, "invoice_number", "invoiceNumber") ?? "",
     description: req.body.description || "",
-    // The money that leaves the bank. The invoice columns document it; they
-    // never replace it.
+    // What the vendor is owed, in money_.currency. The naira translation is
+    // the database's to derive — see db/migrations/0026.
     amount: String(amount),
+    ...money_,
     ...invoiceFigures(req.body),
     bank_paid_from: req.body.bank_paid_from ?? req.body.bankPaidFrom ?? "",
     receipt_reference: req.body.receipt_reference ?? req.body.receiptReference ?? "",
@@ -529,6 +533,24 @@ const updateExpense = asyncHandler(async (req, res) => {
       throw httpErr(400, "Amount must be a positive number");
     }
     data.amount = String(amount);
+  }
+
+  /**
+   * Currency and rate move together or not at all.
+   *
+   * Editing one without the other is how a $50,000 invoice ends up carrying
+   * yesterday's rate, or a naira row ends up multiplied by one. Both are
+   * re-validated as a pair against whatever the row already holds, so an edit
+   * that names only a rate still has a currency to be judged against.
+   */
+  if (
+    pick(req.body, "currency") !== undefined
+    || pick(req.body, "exchange_rate", "exchangeRate") !== undefined
+  ) {
+    Object.assign(data, currencyFor({
+      currency: pick(req.body, "currency") ?? existing.currency,
+      exchange_rate: pick(req.body, "exchange_rate", "exchangeRate") ?? existing.exchange_rate,
+    }));
   }
 
   const date = req.body.expense_date ?? req.body.expenseDate;
@@ -819,6 +841,38 @@ const addComment = asyncHandler(async (req, res) => {
  * The amount is captured separately from `amount` rather than overwriting it,
  * so the request and the settlement can be compared afterwards.
  */
+/**
+ * The currency an expense is denominated in, and the rate that translates it.
+ *
+ * The foreign amount is the debt; naira is derived from it by the database
+ * (db/migrations/0026), so nothing here ever writes a naira figure. What this
+ * validates is the pair: a rate is meaningless without the currency it applies
+ * to, and a naira expense has no rate at all.
+ */
+const currencyFor = (body) => {
+  const raw = pick(body, "currency");
+  const currency = raw === undefined || raw === null || raw === "" ? "NGN" : String(raw).trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) {
+    throw httpErr(400, "Currency must be a three-letter code such as NGN or USD");
+  }
+
+  const rateRaw = pick(body, "exchange_rate", "exchangeRate");
+  const given = rateRaw === undefined || rateRaw === null || rateRaw === "" ? null : Number(rateRaw);
+
+  if (currency === "NGN") {
+    // Silently forcing 1 would let a rate typed against a naira request pass
+    // unnoticed and then be trusted by whoever reads the row later.
+    if (given !== null && given !== 1) {
+      throw httpErr(400, "A naira expense has no exchange rate — leave it blank, or pick the invoice's own currency");
+    }
+    return { currency, exchange_rate: "1" };
+  }
+
+  if (given === null) throw httpErr(400, `Enter the naira rate for this ${currency} invoice`);
+  if (!Number.isFinite(given) || given <= 0) throw httpErr(400, "Exchange rate must be greater than zero");
+  return { currency, exchange_rate: String(given) };
+};
+
 const paymentFor = (body, existing) => {
   const bank = String(pick(body, "bank_paid_from", "bankPaidFrom") ?? "").trim();
   if (!bank) throw httpErr(400, "Say which account this was paid from");
@@ -837,9 +891,37 @@ const paymentFor = (body, existing) => {
 
   const paymentDate = parseDate(pick(body, "payment_date", "paymentDate")) || new Date().toISOString();
 
+  /**
+   * The rate on the day it actually cleared — a fact of the payment, not of
+   * the request.
+   *
+   * Required on a foreign invoice rather than defaulted to the raising rate,
+   * because defaulting computes a gain or loss of exactly zero and so hides
+   * the very thing this column exists to show.
+   */
+  const currency = String(existing.currency || "NGN").toUpperCase();
+  const paidRateRaw = pick(body, "paid_exchange_rate", "paidExchangeRate");
+  const paidRate = paidRateRaw === undefined || paidRateRaw === null || paidRateRaw === ""
+    ? null
+    : Number(paidRateRaw);
+
+  if (currency === "NGN") {
+    if (paidRate !== null && paidRate !== 1) {
+      throw httpErr(400, "A naira expense has no exchange rate");
+    }
+  } else {
+    if (paidRate === null) {
+      throw httpErr(400, `Enter the naira rate this ${currency} payment was made at`);
+    }
+    if (!Number.isFinite(paidRate) || paidRate <= 0) {
+      throw httpErr(400, "Exchange rate must be greater than zero");
+    }
+  }
+
   return {
     bank_paid_from: bank,
     amount_paid: String(paid),
+    ...(currency === "NGN" ? {} : { paid_exchange_rate: String(paidRate) }),
     payment_reference: String(pick(body, "payment_reference", "paymentReference") ?? "").trim(),
     payment_date: paymentDate,
     payment_method: String(pick(body, "payment_method", "paymentMethod") ?? "").trim(),

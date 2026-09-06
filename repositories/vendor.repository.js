@@ -93,9 +93,12 @@ const vendorRepo = {
     const [row] = await client`
       SELECT
         COUNT(*)::int AS expense_count,
-        COALESCE(SUM(e.amount), 0)::text AS total_requested,
-        COALESCE(SUM(e.amount) FILTER (WHERE ${APPROVED}), 0)::text AS total_approved,
-        COALESCE(SUM(e.amount_paid) FILTER (WHERE e.status = 'paid'), 0)::text AS total_paid,
+        -- Naira, from the generated columns: a vendor billing in dollars and
+        -- one billing in naira both roll into the same running total, and
+        -- neither is understated by being added as a bare number.
+        COALESCE(SUM(e.amount_ngn), 0)::text AS total_requested,
+        COALESCE(SUM(e.amount_ngn) FILTER (WHERE ${APPROVED}), 0)::text AS total_approved,
+        COALESCE(SUM(e.amount_paid_ngn) FILTER (WHERE e.status = 'paid'), 0)::text AS total_paid,
         MAX(e.payment_date) FILTER (WHERE e.status = 'paid') AS last_payment_date
       FROM pfi_expenses e
       WHERE e.vendor_id = ${numericId} AND e.deleted_at IS NULL
