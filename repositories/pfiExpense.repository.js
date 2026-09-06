@@ -547,7 +547,15 @@ const listExpenses = async ({
         COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NOT NULL), 0)::text AS pfi_total,
         COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NULL), 0)::text AS general_total,
         COALESCE(SUM(${SPEND}) FILTER (WHERE e.status = 'paid'), 0)::text AS paid_total,
-        COALESCE(SUM(e.amount_ngn) FILTER (WHERE e.status = ANY(${OPEN_STATES})), 0)::text AS open_total
+        COALESCE(SUM(e.amount_ngn) FILTER (WHERE e.status = ANY(${OPEN_STATES})), 0)::text AS open_total,
+        -- How much of the set above the naira totals could NOT include.
+        --
+        -- A foreign invoice may be recorded without a rate, and then it has no
+        -- naira value: amount_ngn is NULL and SUM skips it. A count here is
+        -- enough for the summary to say the total is partial; the per-currency
+        -- residue is worked out on the client, which already holds the rows and
+        -- can group them without adding dollars to euros to say so.
+        COUNT(*) FILTER (WHERE e.exchange_rate IS NULL)::int AS unconverted_count
       FROM pfi_expenses e
       JOIN expense_categories c ON c.id = e.category_id
       LEFT JOIN pfis p ON p.id = e.pfi_id

@@ -868,7 +868,16 @@ const currencyFor = (body) => {
     return { currency, exchange_rate: "1" };
   }
 
-  if (given === null) throw httpErr(400, `Enter the naira rate for this ${currency} invoice`);
+  /**
+   * A foreign invoice may be left unconverted.
+   *
+   * The desk often does not know what it will buy the currency at, and an
+   * invented rate is worse than none because it reads as a fact. The row then
+   * has no naira value at all — amount_ngn is NULL, not a guess — and the
+   * aggregates report it separately rather than letting a naira total quietly
+   * omit it.
+   */
+  if (given === null) return { currency, exchange_rate: null };
   if (!Number.isFinite(given) || given <= 0) throw httpErr(400, "Exchange rate must be greater than zero");
   return { currency, exchange_rate: String(given) };
 };
@@ -909,19 +918,22 @@ const paymentFor = (body, existing) => {
     if (paidRate !== null && paidRate !== 1) {
       throw httpErr(400, "A naira expense has no exchange rate");
     }
-  } else {
-    if (paidRate === null) {
-      throw httpErr(400, `Enter the naira rate this ${currency} payment was made at`);
-    }
+  } else if (paidRate !== null) {
     if (!Number.isFinite(paidRate) || paidRate <= 0) {
       throw httpErr(400, "Exchange rate must be greater than zero");
+    }
+    // A payment rate on a request that was never converted would put a naira
+    // figure on the settlement of something with no naira value to compare it
+    // against. The database refuses the pair too.
+    if (existing.exchange_rate === null || existing.exchange_rate === undefined) {
+      throw httpErr(400, `This ${currency} request has no rate on it — set one on the request before recording a rate for the payment`);
     }
   }
 
   return {
     bank_paid_from: bank,
     amount_paid: String(paid),
-    ...(currency === "NGN" ? {} : { paid_exchange_rate: String(paidRate) }),
+    ...(currency === "NGN" || paidRate === null ? {} : { paid_exchange_rate: String(paidRate) }),
     payment_reference: String(pick(body, "payment_reference", "paymentReference") ?? "").trim(),
     payment_date: paymentDate,
     payment_method: String(pick(body, "payment_method", "paymentMethod") ?? "").trim(),

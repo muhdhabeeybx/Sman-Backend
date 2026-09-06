@@ -23,6 +23,20 @@
 -- loss, and the point of storing both rates is that it can be seen rather than
 -- silently absorbed into the expense.
 --
+-- ── A rate is OPTIONAL on a foreign invoice ───────────────────────────────
+--
+-- An invoice can be recorded in dollars and left in dollars. Forcing a rate at
+-- the moment of raising would mean inventing one: the desk often does not know
+-- what it will buy the currency at, and a made-up rate is worse than no rate
+-- because it looks like a fact.
+--
+-- The consequence is that such a row HAS no naira value, and `amount_ngn` is
+-- NULL rather than a guess. SUM() skips nulls, so a naira total silently
+-- excludes it — which is why every aggregate over these rows also counts what
+-- it could not convert, so a total can say "and USD 50,000 besides" instead of
+-- quietly under-reporting. Naira rows are unaffected: their rate is 1, always,
+-- and the constraint below refuses anything else.
+--
 -- ── Why the naira columns are GENERATED ───────────────────────────────────
 --
 -- Every total in the system sums `amount`: two in pfiExpense.repository, three
@@ -39,14 +53,23 @@
 
 -- ── 1. The currency and the rate at the time of raising ───────────────────
 --
--- Defaulted so all 295 existing rows are correct without touching them: they
--- were all naira, and a naira row is one whose rate is exactly 1.
+-- Currency defaults to NGN so all 295 existing rows are correct without being
+-- touched. The rate does not default, and is backfilled explicitly below.
 
 ALTER TABLE pfi_expenses
   ADD COLUMN IF NOT EXISTS currency CHAR(3) NOT NULL DEFAULT 'NGN';
 
+-- Nullable, and deliberately WITHOUT a default. A default of 1 would silently
+-- translate an unconverted $50,000 into ₦50,000 for any insert that omitted
+-- the column — the exact error this migration exists to prevent. Every writer
+-- states the rate, or states that there isn't one.
 ALTER TABLE pfi_expenses
-  ADD COLUMN IF NOT EXISTS exchange_rate NUMERIC(18, 6) NOT NULL DEFAULT 1;
+  ADD COLUMN IF NOT EXISTS exchange_rate NUMERIC(18, 6);
+
+-- Every row that exists today is naira, and a naira row's rate is exactly 1.
+UPDATE pfi_expenses
+   SET exchange_rate = 1
+ WHERE currency = 'NGN' AND exchange_rate IS NULL;
 
 -- ── 2. The rate on the day it actually cleared ────────────────────────────
 --
@@ -125,14 +148,33 @@ BEGIN
       CHECK (currency ~ '^[A-Z]{3}$');
   END IF;
 
-  -- A naira expense has nothing to convert. Catching it here stops a rate
-  -- typed against an NGN request from quietly multiplying it.
+  -- A naira expense has nothing to convert, and its rate is NOT optional:
+  -- NULL there would make amount_ngn NULL and drop the row out of every naira
+  -- total.
+  --
+  -- IS NOT DISTINCT FROM, not `= 1`. Written as `exchange_rate = 1` this
+  -- constraint does not hold: for an NGN row with a NULL rate the test is
+  -- `false OR NULL`, which is NULL, and a CHECK passes on NULL. The exact row
+  -- it exists to refuse was the one row it let through — caught by testing the
+  -- guard rather than reading it. IS NOT DISTINCT FROM returns false on NULL
+  -- instead, so the row is rejected.
+  --
+  -- Dropped and recreated rather than skipped when present, so a database that
+  -- already took the unsound version is corrected by re-running this file.
+  ALTER TABLE pfi_expenses DROP CONSTRAINT IF EXISTS pfi_expenses_ngn_rate_is_one;
+  ALTER TABLE pfi_expenses
+    ADD CONSTRAINT pfi_expenses_ngn_rate_is_one
+    CHECK (currency <> 'NGN' OR exchange_rate IS NOT DISTINCT FROM 1);
+
+  -- A payment rate on a request that never had a raising rate would put a
+  -- naira figure on the settlement of something with no naira value to
+  -- compare it against, so the pair moves together.
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'pfi_expenses_ngn_rate_is_one'
+    SELECT 1 FROM pg_constraint WHERE conname = 'pfi_expenses_paid_rate_needs_rate'
   ) THEN
     ALTER TABLE pfi_expenses
-      ADD CONSTRAINT pfi_expenses_ngn_rate_is_one
-      CHECK (currency <> 'NGN' OR exchange_rate = 1);
+      ADD CONSTRAINT pfi_expenses_paid_rate_needs_rate
+      CHECK (paid_exchange_rate IS NULL OR exchange_rate IS NOT NULL);
   END IF;
 END $$;
 
@@ -144,6 +186,11 @@ END $$;
 CREATE INDEX IF NOT EXISTS pfi_expenses_currency_idx
   ON pfi_expenses (currency)
   WHERE currency <> 'NGN';
+
+-- The rows no naira total can include. Few, and asked for on every summary.
+CREATE INDEX IF NOT EXISTS pfi_expenses_unconverted_idx
+  ON pfi_expenses (currency)
+  WHERE exchange_rate IS NULL;
 
 -- ── Verification ──────────────────────────────────────────────────────────
 --
