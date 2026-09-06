@@ -117,7 +117,21 @@ const emailReportsHubSchema = z.object({
   pfi: z.string().max(50).optional(),
 });
 
+/**
+ * Numbers rather than emails, and validated loosely on purpose.
+ *
+ * The shapes people type — 0803…, +234803…, 234 803 … — all mean the same
+ * number, so normalising is the service's job (see whatsappReport.service) and
+ * this only rejects what could not be a phone number at all. A stricter rule
+ * here would reject a correct number typed in a correct-but-unexpected way.
+ */
+const whatsappReportSchema = z.object({
+  recipients: z.array(z.string().min(7).max(25)).min(1).max(25),
+  reportDate: z.string().date(),
+});
+
 module.exports = {
+  whatsappReportSchema,
   idParamSchema,
   submitDailyReportSchema,
   amendDailyReportSchema,

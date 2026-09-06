@@ -10,6 +10,7 @@ const {
   reviewDailyReportSchema,
   dailyReportQuerySchema,
   emailReportsHubSchema,
+  whatsappReportSchema,
 } = require("../../schemas/dailyReport.schema");
 const {
   getDailyReports,
@@ -19,6 +20,7 @@ const {
   amendDailyReport,
   reviewDailyReport,
   emailDailyReports,
+  whatsappDailyReports,
   CAN_VIEW_ALL_REPORTS,
 } = require("../../controllers/administration/dailyReport.controller");
 
@@ -30,6 +32,15 @@ router.post(
   validate({ body: emailReportsHubSchema }),
   emailDailyReports
 );
+// Same gate as the email: whoever may read the whole hub may send it on.
+router.post(
+  "/whatsapp",
+  verifyStaff,
+  requireRole(...CAN_VIEW_ALL_REPORTS, { message: "Reports Hub access required" }),
+  validate({ body: whatsappReportSchema }),
+  whatsappDailyReports
+);
+
 router.get("/:id", verifyStaff, validate({ params: idParamSchema }), getDailyReportById);
 router.delete("/:id", verifyStaff, deleteDailyReport);
 router.post("/", verifyStaff, validate({ body: submitDailyReportSchema }), submitDailyReport);

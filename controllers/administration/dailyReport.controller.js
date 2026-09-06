@@ -4,6 +4,7 @@ const dailyReportService = require("../../services/dailyReport.service");
 const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
 const { notifyAndWait } = require("../../notifications");
+const { sendDailyReportToWhatsApp } = require("../../services/whatsappReport.service");
 const { buildCombinedDailyReportData } = require("../../services/dailyCombinedReport.service");
 
 // Roles that manage reports rather than file them — the Reports Hub's own
@@ -93,6 +94,33 @@ const deleteDailyReport = asyncHandler(async (req, res) => {
  * else — no attachment, and the location/PFI filter is ignored, since the
  * combined report already covers every depot for the date in one email.
  */
+/**
+ * The day's trading as a WhatsApp message, sent when somebody presses send.
+ *
+ * Text only and no attachment: this is read on a phone, and a workbook there
+ * is a file nobody opens. Manual rather than scheduled for the same reason the
+ * email is not — an email waits in an inbox, a WhatsApp message interrupts, so
+ * who gets interrupted is a decision rather than a cron expression.
+ */
+const whatsappDailyReports = asyncHandler(async (req, res) => {
+  const { recipients, reportDate } = req.body;
+
+  const result = await sendDailyReportToWhatsApp({ date: reportDate, recipients });
+
+  // Partial success is reported as partial. A send that reached two of five
+  // managers and said "sent" is how the desk ends up believing somebody was
+  // told something they never saw.
+  const ok = result.sent.length > 0;
+  res.status(ok ? 200 : 502).json({
+    success: ok,
+    message: ok
+      ? `Sent to ${result.sent.length} number${result.sent.length === 1 ? "" : "s"}` +
+        (result.failed.length ? `, ${result.failed.length} failed` : "")
+      : "Could not send to any of those numbers",
+    data: result,
+  });
+});
+
 const emailDailyReports = asyncHandler(async (req, res) => {
   const { recipients, reportDate } = req.body;
 
@@ -154,5 +182,6 @@ module.exports = {
   amendDailyReport,
   reviewDailyReport,
   emailDailyReports,
+  whatsappDailyReports,
   CAN_VIEW_ALL_REPORTS,
 };
