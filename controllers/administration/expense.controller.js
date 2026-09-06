@@ -543,14 +543,34 @@ const updateExpense = asyncHandler(async (req, res) => {
    * re-validated as a pair against whatever the row already holds, so an edit
    * that names only a rate still has a currency to be judged against.
    */
-  if (
-    pick(req.body, "currency") !== undefined
-    || pick(req.body, "exchange_rate", "exchangeRate") !== undefined
-  ) {
-    Object.assign(data, currencyFor({
-      currency: pick(req.body, "currency") ?? existing.currency,
-      exchange_rate: pick(req.body, "exchange_rate", "exchangeRate") ?? existing.exchange_rate,
-    }));
+  const currencySent = sent(req.body, "currency", "currency");
+  const rateSent = sent(req.body, "exchange_rate", "exchangeRate");
+  if (currencySent || rateSent) {
+    /**
+     * Read the raw values, NOT through pick().
+     *
+     * pick() is `body[snake] ?? body[camel]`, which collapses an explicit null
+     * to undefined — and clearing a rate is exactly a null. Routed through it,
+     * "leave this invoice in dollars" arrived here as "field absent", fell back
+     * to the rate already on the row, and the edit did nothing. sent() exists
+     * for this distinction; it should have been used the first time.
+     */
+    const rawRate = req.body.exchange_rate !== undefined ? req.body.exchange_rate : req.body.exchangeRate;
+    const next = currencyFor({
+      currency: currencySent ? req.body.currency : existing.currency,
+      exchange_rate: rateSent ? rawRate : existing.exchange_rate,
+    });
+    Object.assign(data, next);
+
+    /**
+     * Dropping the rate drops the payment rate with it.
+     *
+     * A rate recorded for the payment of a request that no longer has one is a
+     * naira figure with nothing to compare it against, and the database refuses
+     * the pair outright (pfi_expenses_paid_rate_needs_rate). Without this the
+     * edit would fail on a constraint rather than doing what was asked.
+     */
+    if (next.exchange_rate === null) data.paid_exchange_rate = null;
   }
 
   const date = req.body.expense_date ?? req.body.expenseDate;
