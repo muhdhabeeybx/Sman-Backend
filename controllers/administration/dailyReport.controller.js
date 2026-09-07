@@ -120,18 +120,29 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
     });
   }
 
-  // Partial success is reported as partial. A send that reached two of five
-  // managers and said "sent" is how the desk ends up believing somebody was
-  // told something they never saw.
+  /**
+   * Always 200 on a request that was understood and carried out.
+   *
+   * This used to answer 502 when nothing sent, which was wrong twice over.
+   * A gateway error describes infrastructure, and the commonest reason for
+   * sending nothing is a setting — WHATSAPP_ENABLED being off. Worse, a
+   * non-2xx makes the browser client throw, so the per-recipient reasons in
+   * `failed` were discarded and the operator saw "502 Bad Gateway" with no
+   * hint of the cause. The outcome belongs in the body, where it can be read.
+   *
+   * Partial success is still reported as partial: a send that reached two of
+   * five managers and said "sent" is how the desk ends up believing somebody
+   * was told something they never saw.
+   */
   const ok = result.sent.length > 0;
-  res.status(ok ? 200 : 502).json({
-    success: ok,
-    message: ok
-      ? `Sent to ${result.sent.length} number${result.sent.length === 1 ? "" : "s"}` +
-        (result.failed.length ? `, ${result.failed.length} failed` : "")
-      : "Could not send to any of those numbers",
-    data: result,
-  });
+  const message = ok
+    ? `Sent to ${result.sent.length} number${result.sent.length === 1 ? "" : "s"}` +
+      (result.failed.length ? `, ${result.failed.length} failed` : "")
+    : result.disabled
+      ? "WhatsApp sending is switched off — set WHATSAPP_ENABLED=true to send"
+      : "Could not send to any of those numbers";
+
+  res.json({ success: ok, message, data: result });
 });
 
 const emailDailyReports = asyncHandler(async (req, res) => {

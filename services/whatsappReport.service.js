@@ -311,6 +311,28 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
     };
   }
 
+  /**
+   * WhatsApp being switched off is one fact about the system, not a failure of
+   * each number in turn.
+   *
+   * Reported per recipient it read as five separate delivery problems, and the
+   * one thing that would fix all of them — a setting — was never named as a
+   * setting. Answered up front instead, so the message says what to change.
+   */
+  if (String(process.env.WHATSAPP_ENABLED || "").trim() !== "true") {
+    return {
+      reportDate: data.reportDate,
+      channel: templateName ? "template" : "text",
+      templateName: templateName || null,
+      parameters,
+      body,
+      disabled: true,
+      sent: [],
+      failed: valid.map(({ raw }) => ({ to: raw, error: "WhatsApp sending is switched off" })),
+      skipped: invalid,
+    };
+  }
+
   const deadline = Date.now() + SEND_DEADLINE_MS;
   const results = await Promise.all(
     valid.map(async ({ to, raw }) => {
