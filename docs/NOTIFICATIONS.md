@@ -288,6 +288,13 @@ a **404, not a 403** — a 403 would confirm the row exists.
 customer on the platform should not be one mistyped request away; it must be an
 explicit list.
 
+It also carries a `category`, `"system"` (the default) or `"marketing"`, which
+picks between the two announcement types the catalog builds from one shape.
+They say the same thing in the same words; the only difference is which
+preference mutes them. A promotion sent as `system` is reaching people who
+muted promotions, so label promos `marketing` — that is the entire reason the
+opt-out is worth anything.
+
 ---
 
 ## Observability

@@ -526,6 +526,58 @@ function deliverySms() {
   };
 }
 
+/**
+ * The admin broadcast, built once and registered under two categories.
+ *
+ * Copy comes from the sender rather than from here, which is exactly why these
+ * are the only entries whose title/body are pass-through.
+ *
+ * `system.announcement` is operational news nobody should miss — a depot
+ * closure, a price change, a maintenance window. `marketing.announcement` is a
+ * promotion. They differ ONLY in `category`, which is the unit preferences are
+ * expressed in, and that difference is the whole point: a customer who does not
+ * want the promos can mute `marketing` and still be told the depot is shut.
+ * Before the split, both rode on `system` and muting the adverts meant muting
+ * the outage notices too, so nobody sensibly could.
+ *
+ * Sharing the builder is what stops the two drifting — the deep link, the
+ * pass-through copy and the SMS shape have to stay identical, because the
+ * category is a routing decision and not a difference in the message.
+ *
+ * data: title, body, actionUrl, imageUrl, announcementId, link
+ */
+const announcement = (category) => ({
+  audience: "both",
+  category,
+  priority: "normal",
+  channels: APP_ONLY,
+  title: (d) => d.title || "Announcement",
+  body: (d) => d.body || "",
+  entity: (d) => ({ type: "announcement", id: d.announcementId || "" }),
+  data: (d) => ({ screen: "Announcement", ...(d.link ? { link: d.link } : {}) }),
+  actionUrl: (d) => d.actionUrl || null,
+  imageUrl: (d) => d.imageUrl || null,
+  // Only reached when a caller overrides `channels` to include email/sms
+  // (e.g. the messaging page) — the default APP_ONLY set above never
+  // touches either of these.
+  // proseEmail, not simpleEmail: the messaging composer's body can be
+  // multi-line (e.g. an inserted price list), and simpleEmail's `intro` is
+  // one <p> that would collapse every line break into a single paragraph.
+  email: (d) =>
+    proseEmail({
+      subject: d.title || "Announcement",
+      subtitle: "Announcement",
+      heading: d.title || "Announcement",
+      paragraphs: String(d.body || "").split("\n"),
+      cta: d.actionUrl ? { url: d.actionUrl, label: "Learn more" } : undefined,
+    }),
+  // Without this, the engine's defaultSmsText fallback sends
+  // "Soroman: {title}. {body}" — doubling up the title (composed for the
+  // email subject/in-app heading, not for a 160-char text) ahead of the
+  // body the sender actually wrote. Just the brand prefix + body instead.
+  sms: (d) => `${smsPrefix()}${String(d.body || d.title || "").trim()}`,
+});
+
 // ─── The catalog ────────────────────────────────────────────────────────────
 
 const CATALOG = {
@@ -1514,42 +1566,12 @@ const CATALOG = {
 
   // ═══ System ═══════════════════════════════════════════════════════════════
 
-  /**
-   * The admin broadcast. Copy comes from the sender rather than from here,
-   * which is exactly why it is the only entry whose title/body are pass-through.
-   * data: title, body, actionUrl, imageUrl
-   */
-  "system.announcement": {
-    audience: "both",
-    category: "system",
-    priority: "normal",
-    channels: APP_ONLY,
-    title: (d) => d.title || "Announcement",
-    body: (d) => d.body || "",
-    entity: (d) => ({ type: "announcement", id: d.announcementId || "" }),
-    data: (d) => ({ screen: "Announcement", ...(d.link ? { link: d.link } : {}) }),
-    actionUrl: (d) => d.actionUrl || null,
-    imageUrl: (d) => d.imageUrl || null,
-    // Only reached when a caller overrides `channels` to include email/sms
-    // (e.g. the messaging page) — the default APP_ONLY set above never
-    // touches either of these.
-    // proseEmail, not simpleEmail: the messaging composer's body can be
-    // multi-line (e.g. an inserted price list), and simpleEmail's `intro` is
-    // one <p> that would collapse every line break into a single paragraph.
-    email: (d) =>
-      proseEmail({
-        subject: d.title || "Announcement",
-        subtitle: "Announcement",
-        heading: d.title || "Announcement",
-        paragraphs: String(d.body || "").split("\n"),
-        cta: d.actionUrl ? { url: d.actionUrl, label: "Learn more" } : undefined,
-      }),
-    // Without this, the engine's defaultSmsText fallback sends
-    // "Soroman: {title}. {body}" — doubling up the title (composed for the
-    // email subject/in-app heading, not for a 160-char text) ahead of the
-    // body the sender actually wrote. Just the brand prefix + body instead.
-    sms: (d) => `${smsPrefix()}${String(d.body || d.title || "").trim()}`,
-  },
+  /** See the `announcement` builder above for both of these. */
+  "system.announcement": announcement("system"),
+
+  // ═══ Marketing ════════════════════════════════════════════════════════════
+  // Separately mutable by design — see the builder's note.
+  "marketing.announcement": announcement("marketing"),
 
   // ═══ Ported from Django's raw-HTML templates ══════════════════════════════
   // These three were authored as HTML in Django, so the sender saw a leading
