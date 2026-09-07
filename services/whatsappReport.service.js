@@ -187,6 +187,32 @@ const templateParameters = (fields) => {
 };
 
 /**
+ * How long the whole send may take before the endpoint answers anyway.
+ *
+ * This is an interactive request — somebody pressed a button and is watching a
+ * spinner — and it sits behind a proxy that gives up on a slow upstream and
+ * returns 502 itself. A 502 from the proxy carries no CORS headers, so the
+ * browser reports a CORS failure and the real cause never reaches anyone.
+ *
+ * whatsapp/client retries a send three times at a fifteen-second timeout, so
+ * one unreachable number can occupy forty-five seconds on its own. Rather than
+ * change the bot's retry policy — that policy is right for a queued worker,
+ * which is what it was written for — this path stops WAITING at its own
+ * deadline and reports what had not finished. The underlying request may still
+ * complete; what it may not do is hold the response open past the proxy.
+ */
+const SEND_DEADLINE_MS = Number(process.env.WHATSAPP_REPORT_DEADLINE_MS) || 20000;
+
+/** Resolve with a marker rather than reject, so one slow number is not fatal. */
+const withDeadline = (promise, ms) => {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ __timedOut: true }), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+};
+
+/**
  * A Nigerian mobile number as WhatsApp wants it: digits, country code, no +.
  *
  * Accepts what people actually type — 0803…, +234803…, 234 803 … — because the
@@ -285,10 +311,19 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
     };
   }
 
+  const deadline = Date.now() + SEND_DEADLINE_MS;
   const results = await Promise.all(
     valid.map(async ({ to, raw }) => {
       try {
-        const res = await sendReply(to, reply);
+        const remaining = Math.max(1000, deadline - Date.now());
+        const res = await withDeadline(sendReply(to, reply), remaining);
+        if (res?.__timedOut) {
+          return {
+            to: raw,
+            ok: false,
+            error: "WhatsApp did not answer in time — it may still arrive. Check the delivery log.",
+          };
+        }
         if (res?.skipped) return { to: raw, ok: false, error: res.reason };
         return { to: raw, ok: true };
       } catch (err) {
