@@ -140,7 +140,11 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
       (result.failed.length ? `, ${result.failed.length} failed` : "")
     : result.disabled
       ? "WhatsApp sending is switched off — set WHATSAPP_ENABLED=true to send"
-      : "Could not send to any of those numbers";
+      : result.configHint
+        // The template mismatch names its own fix; repeating the generic
+        // "could not send" over it would bury the useful half.
+        ? `${result.failed[0]?.error || "Template mismatch"}. ${result.configHint}`
+        : "Could not send to any of those numbers";
 
   res.json({ success: ok, message, data: result });
 });

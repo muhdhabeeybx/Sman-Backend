@@ -1,3 +1,4 @@
+const axios = require("axios");
 const { sendReply } = require("../whatsapp/client");
 const { REPLY } = require("../whatsapp/constants");
 const { buildCombinedDailyReportData } = require("./dailyCombinedReport.service");
@@ -187,6 +188,67 @@ const templateParameters = (fields) => {
 };
 
 /**
+ * The approved template, read from Meta rather than assumed.
+ *
+ * Cloud API error 132000 — "Number of parameters does not match the expected
+ * number of params" — rejects the whole send and says nothing about what the
+ * expected number IS. That leaves an operator guessing at a number only Meta
+ * knows, which is not a debugging position anybody should be put in.
+ *
+ * So the body is fetched and its {{n}} placeholders counted. Cached for a few
+ * minutes: a template changes when somebody edits it in the console, which is
+ * rare, and this must not add a Graph round trip to every send.
+ *
+ * Failure to read it is not fatal. The send proceeds and Meta remains the
+ * authority — this only ever improves the error message.
+ */
+let templateCache = { at: 0, name: null, value: null };
+const TEMPLATE_TTL_MS = 5 * 60 * 1000;
+
+const fetchTemplate = async (name) => {
+  const token = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim().replace(/^["']|["']$/g, "");
+  const waba = String(process.env.WHATSAPP_WABA_ID || "").trim().replace(/^["']|["']$/g, "");
+  if (!token || !waba || !name) return null;
+
+  if (templateCache.name === name && Date.now() - templateCache.at < TEMPLATE_TTL_MS) {
+    return templateCache.value;
+  }
+
+  const version = String(process.env.WHATSAPP_GRAPH_VERSION || "v25.0").replace(/^v?/, "v");
+  try {
+    const res = await axios.get(`https://graph.facebook.com/${version}/${waba}/message_templates`, {
+      params: { name, limit: 5 },
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 8000,
+    });
+    const tpl = (res.data?.data || []).find((t) => t.name === name);
+    if (!tpl) return null;
+
+    const body = (tpl.components || []).find((c) => String(c.type).toUpperCase() === "BODY");
+    const text = body?.text || "";
+    // Distinct placeholders, because {{1}} may legitimately appear twice and
+    // Meta still expects one parameter for it.
+    const placeholders = new Set((text.match(/\{\{\s*\d+\s*\}\}/g) || []).map((m) => m.replace(/\D/g, "")));
+    const value = {
+      name: tpl.name,
+      language: tpl.language,
+      status: tpl.status,
+      body: text,
+      expects: placeholders.size,
+      // A header can carry its own variable, and a mismatch there produces the
+      // same 132000 — worth naming so it is not hunted for in the body.
+      hasVariableHeader: (tpl.components || []).some(
+        (c) => String(c.type).toUpperCase() === "HEADER" && /\{\{\s*\d+\s*\}\}/.test(c.text || ""),
+      ),
+    };
+    templateCache = { at: Date.now(), name, value };
+    return value;
+  } catch {
+    return null;
+  }
+};
+
+/**
  * How long the whole send may take before the endpoint answers anyway.
  *
  * This is an interactive request — somebody pressed a button and is watching a
@@ -295,6 +357,8 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
    * code per recipient. Being able to see the exact parameters first turns that
    * from a guessing game into a comparison.
    */
+  const template = templateName ? await fetchTemplate(templateName) : null;
+
   if (preview) {
     return {
       reportDate: data.reportDate,
@@ -302,12 +366,43 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
       channel: templateName ? "template" : "text",
       templateName: templateName || null,
       parameters,
+      // What Meta actually approved, so the two can be read side by side
+      // rather than one being inferred from an error code.
+      template,
       fields,
       body,
       recipients: valid.map((r) => r.raw),
       skipped: invalid,
       sent: [],
       failed: [],
+    };
+  }
+
+  /**
+   * A parameter count that cannot match is refused before any send.
+   *
+   * Meta rejects the whole message with 132000 and never says what it expected,
+   * so attempting it once per recipient produces a column of identical, useless
+   * errors. Having read the template, the mismatch is knowable in advance — and
+   * the fix is named in the message, because it is a setting rather than code.
+   */
+  if (template && template.expects !== parameters.length) {
+    const fieldNames = Object.keys(fields).join(", ");
+    return {
+      reportDate: data.reportDate,
+      channel: "template",
+      templateName,
+      template,
+      parameters,
+      body,
+      sent: [],
+      failed: valid.map(({ raw }) => ({
+        to: raw,
+        error: `Template "${templateName}" expects ${template.expects} parameter${template.expects === 1 ? "" : "s"}, this is sending ${parameters.length}`,
+      })),
+      configHint:
+        `Set WHATSAPP_REPORT_TEMPLATE_PARAMS to ${template.expects} of: ${fieldNames} — in the order the template uses them.`,
+      skipped: invalid,
     };
   }
 
