@@ -5,7 +5,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { db } = require("../config/db");
-const { staff, notifications } = require("../db/schema");
+const { staff, notifications, notificationDeliveries: deliveries } = require("../db/schema");
 const { eq, and, sql } = require("drizzle-orm");
 const chain = require("../lib/expenseChain");
 const { notifyExpenseStage } = require("../services/expenseNotifications.service");
@@ -178,5 +178,47 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     assert.ok(paidRecipients.includes(cfo.id));
     assert.ok(paidRecipients.includes(admin.id));
     assert.ok(!paidRecipients.includes(officer.id), "the officer who marked it paid is not notified of their own action");
+  });
+
+  /**
+   * A text is for the person whose request it is. Everyone else is a queue.
+   *
+   * The regression this guards: every stage used to carry SMS to every
+   * recipient, so `expense.verified` texted the whole CFO role — 501 messages,
+   * nearly all of them about somebody else's request. The queue must still be
+   * told, immediately and by email; it just must not buzz.
+   */
+  test("only the submitter's own phone rings", async () => {
+    const expenseId = 900000 + (RUN % 1000);
+    await notifyExpenseStage({
+      expense: { id: expenseId, added_by: submitter.id, amount: "125000", description: `Channels ${RUN}` },
+      stage: chain.STATUS.VERIFIED,
+      actorId: officer.id,
+      actorName: "Officer",
+    });
+
+    await waitForRecipients("expense.verified", expenseId, [submitter.id, cfo.id]);
+
+    const rows = await db
+      .select({ staffId: deliveries.staffId, channel: deliveries.channel })
+      .from(deliveries)
+      .where(sql`${deliveries.notificationId} IN (
+        SELECT id FROM notifications
+         WHERE type = 'expense.verified'
+           AND data->>'expenseId' = ${String(expenseId)}
+      )`);
+
+    const channelsFor = (id) => rows.filter((r) => Number(r.staffId) === Number(id)).map((r) => r.channel);
+
+    const submitterChannels = channelsFor(submitter.id);
+    const cfoChannels = channelsFor(cfo.id);
+
+    // Both hear about it — nothing stalls because a queue lost its text.
+    assert.ok(submitterChannels.length > 0, "the submitter was notified");
+    assert.ok(cfoChannels.length > 0, "the approver was notified");
+
+    assert.ok(submitterChannels.includes("sms"), "the submitter's own request texts them");
+    assert.ok(!cfoChannels.includes("sms"), "an approver is a queue, not a phone");
+    assert.ok(cfoChannels.includes("email"), "but the approver still gets an email");
   });
 });

@@ -72,6 +72,14 @@ const STAGE_RECIPIENTS = {
 const naira = (v) =>
   `₦${Number(v || 0).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+/**
+ * What a role-based recipient gets: the app and their inbox, not their phone.
+ *
+ * Deliberately not APP_ONLY — email is how an approver who never opens the
+ * dashboard still finds out, which was the original reason SMS was added.
+ */
+const QUEUE_CHANNELS = ["in_app", "push", "email"];
+
 /** Staff holding any of these roles, active only. */
 const staffWithRoles = async (roles) => {
   if (!roles?.length) return [];
@@ -144,6 +152,26 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   if (recipients.length === 0) return;
 
   /**
+   * Who gets a text, as against who gets told.
+   *
+   * These are different questions and the chain was answering only the first.
+   * Every stage carried in_app + email + SMS to every recipient, and most
+   * recipients of most stages are a ROLE — everyone who could perform the next
+   * transition. That is a work queue, and a work queue does not belong in
+   * somebody's pocket: `expense.verified` alone sent 501 texts, nearly all of
+   * them to approvers for whom it was simply the next item.
+   *
+   * So the split is by whose request it is, not by stage. The submitter is
+   * texted, because something happened to a thing that is theirs and they are
+   * probably not at a desk. Everyone else gets it in the app and by email,
+   * where a queue belongs — and still gets it immediately, so nothing stalls
+   * on one person being in the field, which is what the SMS was protecting.
+   */
+  const submitterId = expense.added_by ?? expense.recorded_by;
+  const personal = recipients.filter((id) => Number(id) === Number(submitterId));
+  const queue = recipients.filter((id) => Number(id) !== Number(submitterId));
+
+  /**
    * Routed through notify() rather than written straight to the inbox.
    *
    * This used to call notificationRepo.createMany, which meant an approver only
@@ -157,26 +185,39 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
    */
   const { categoryName, submitterName } = await labelsFor(expense);
 
-  await notify(`expense.${stage}`, {
-    to: recipients.map((staffId) => ({ staffId })),
-    data: {
-      expenseId: expense.id,
-      status: stage,
-      label: chain.STATUS_LABELS[stage] || stage,
-      amount: expense.amount,
-      // `description` is what the SMS quotes in brackets; fall back through the
-      // fields most likely to identify the request to someone reading a text.
-      description: expense.description || categoryName || expense.vendor || "",
-      category: categoryName,
-      vendor: expense.vendor || "",
-      payeeAccountName: expense.payee_account_name || "",
-      payeeBankName: expense.payee_bank_name || "",
-      payeeAccountNumber: expense.payee_account_number || "",
-      submitterName,
-      note: note ? String(note).trim() : "",
-      actorName: actorName || "",
-    },
-  });
+  const data = {
+    expenseId: expense.id,
+    status: stage,
+    label: chain.STATUS_LABELS[stage] || stage,
+    amount: expense.amount,
+    // `description` is what the SMS quotes in brackets; fall back through the
+    // fields most likely to identify the request to someone reading a text.
+    description: expense.description || categoryName || expense.vendor || "",
+    category: categoryName,
+    vendor: expense.vendor || "",
+    payeeAccountName: expense.payee_account_name || "",
+    payeeBankName: expense.payee_bank_name || "",
+    payeeAccountNumber: expense.payee_account_number || "",
+    submitterName,
+    note: note ? String(note).trim() : "",
+    actorName: actorName || "",
+  };
+
+  // Same message, same moment, two audiences — separated only by whether a
+  // phone should buzz. Channels are restricted rather than the catalog being
+  // changed, so a stage's copy stays defined in exactly one place.
+  await Promise.all([
+    queue.length
+      ? notify(`expense.${stage}`, {
+          to: queue.map((staffId) => ({ staffId })),
+          channels: QUEUE_CHANNELS,
+          data,
+        })
+      : null,
+    personal.length
+      ? notify(`expense.${stage}`, { to: personal.map((staffId) => ({ staffId })), data })
+      : null,
+  ]);
 }
 
 /**
