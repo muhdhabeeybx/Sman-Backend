@@ -43,24 +43,42 @@ const chain = require("../lib/expenseChain");
 const stageRoles = (action) =>
   chain.TRANSITIONS[action].roles.filter((role) => role !== chain.ROLE.SUPER);
 
+/**
+ * `actionNeeded` marks a stage that is somebody's turn.
+ *
+ * It is what decides who is worth a text. At these four the chain is stopped
+ * until a named role does something — the officer verifies, the CFO approves,
+ * the admin signs off, the officer pays — and a request sitting unnoticed is
+ * money not moving. The role holders are the point of the SMS, not a side
+ * effect of it.
+ *
+ * The stages without it are announcements. Paid and rejected have already
+ * happened and nobody is waiting on anybody, so they reach the people who
+ * touched the request in the app and by email, and buzz only the person whose
+ * request it was.
+ */
 const STAGE_RECIPIENTS = {
   [chain.STATUS.PENDING]: {
     roles: stageRoles("verify"),
+    actionNeeded: true,
     title: "New expense awaiting verification",
   },
   [chain.STATUS.VERIFIED]: {
     roles: stageRoles("audit_approve"),
     includeSubmitter: true,
+    actionNeeded: true,
     title: "Expense verified — your approval needed",
   },
   [chain.STATUS.AUDIT_APPROVED]: {
     roles: stageRoles("admin_approve"),
     includeSubmitter: true,
+    actionNeeded: true,
     title: "Expense approved — final sign-off needed",
   },
   [chain.STATUS.ADMIN_APPROVED]: {
     roles: stageRoles("mark_paid"),
     includeSubmitter: true,
+    actionNeeded: true,
     title: "Expense authorised — ready to pay",
   },
   // These two go to everyone who touched the request, not to a role.
@@ -73,12 +91,12 @@ const naira = (v) =>
   `₦${Number(v || 0).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /**
- * What a role-based recipient gets: the app and their inbox, not their phone.
+ * Told, not interrupted: the app, a push and an email, but no SMS.
  *
- * Deliberately not APP_ONLY — email is how an approver who never opens the
- * dashboard still finds out, which was the original reason SMS was added.
+ * Deliberately not app-only. Email is how somebody who does not open the
+ * dashboard still finds out, which was half of what the blanket SMS was doing.
  */
-const QUEUE_CHANNELS = ["in_app", "push", "email"];
+const QUIET_CHANNELS = ["in_app", "push", "email"];
 
 /** Staff holding any of these roles, active only. */
 const staffWithRoles = async (roles) => {
@@ -154,22 +172,21 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   /**
    * Who gets a text, as against who gets told.
    *
-   * These are different questions and the chain was answering only the first.
-   * Every stage carried in_app + email + SMS to every recipient, and most
-   * recipients of most stages are a ROLE — everyone who could perform the next
-   * transition. That is a work queue, and a work queue does not belong in
-   * somebody's pocket: `expense.verified` alone sent 501 texts, nearly all of
-   * them to approvers for whom it was simply the next item.
+   * A text is for the two people it can actually move: whoever has to act now,
+   * and whoever the request belongs to. Everything else is an announcement and
+   * belongs in the app and the inbox.
    *
-   * So the split is by whose request it is, not by stage. The submitter is
-   * texted, because something happened to a thing that is theirs and they are
-   * probably not at a desk. Everyone else gets it in the app and by email,
-   * where a queue belongs — and still gets it immediately, so nothing stalls
-   * on one person being in the field, which is what the SMS was protecting.
+   * So on a stage that is somebody's turn, the role holders ARE the audience —
+   * the officer waiting to verify, the CFO waiting to approve — because an
+   * unnoticed request is money that has stopped moving. On a stage that has
+   * already happened, only the submitter is buzzed; the others who touched it
+   * are told without being interrupted.
    */
   const submitterId = expense.added_by ?? expense.recorded_by;
-  const personal = recipients.filter((id) => Number(id) === Number(submitterId));
-  const queue = recipients.filter((id) => Number(id) !== Number(submitterId));
+  const isSubmitter = (id) => Number(id) === Number(submitterId);
+
+  const texted = spec.actionNeeded ? recipients : recipients.filter(isSubmitter);
+  const quiet = recipients.filter((id) => !texted.includes(id));
 
   /**
    * Routed through notify() rather than written straight to the inbox.
@@ -207,15 +224,15 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   // phone should buzz. Channels are restricted rather than the catalog being
   // changed, so a stage's copy stays defined in exactly one place.
   await Promise.all([
-    queue.length
+    quiet.length
       ? notify(`expense.${stage}`, {
-          to: queue.map((staffId) => ({ staffId })),
-          channels: QUEUE_CHANNELS,
+          to: quiet.map((staffId) => ({ staffId })),
+          channels: QUIET_CHANNELS,
           data,
         })
       : null,
-    personal.length
-      ? notify(`expense.${stage}`, { to: personal.map((staffId) => ({ staffId })), data })
+    texted.length
+      ? notify(`expense.${stage}`, { to: texted.map((staffId) => ({ staffId })), data })
       : null,
   ]);
 }

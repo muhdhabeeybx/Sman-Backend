@@ -181,14 +181,26 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
   });
 
   /**
-   * A text is for the person whose request it is. Everyone else is a queue.
+   * A text is for whoever has to act, and for whose request it is.
    *
-   * The regression this guards: every stage used to carry SMS to every
-   * recipient, so `expense.verified` texted the whole CFO role — 501 messages,
-   * nearly all of them about somebody else's request. The queue must still be
-   * told, immediately and by email; it just must not buzz.
+   * Two rules in one, and they pull in opposite directions — which is why both
+   * halves are asserted here. A stage that is somebody's turn must reach that
+   * person's phone, because an unnoticed request is money that has stopped
+   * moving. A stage that has merely happened must not.
    */
-  test("only the submitter's own phone rings", async () => {
+  const channelsByStaff = async (type, expenseId) => {
+    const rows = await db
+      .select({ staffId: deliveries.staffId, channel: deliveries.channel })
+      .from(deliveries)
+      .where(sql`${deliveries.notificationId} IN (
+        SELECT id FROM notifications
+         WHERE type = ${type}
+           AND data->>'expenseId' = ${String(expenseId)}
+      )`);
+    return (id) => rows.filter((r) => Number(r.staffId) === Number(id)).map((r) => r.channel);
+  };
+
+  test("the approver whose turn it is gets a text", async () => {
     const expenseId = 900000 + (RUN % 1000);
     await notifyExpenseStage({
       expense: { id: expenseId, added_by: submitter.id, amount: "125000", description: `Channels ${RUN}` },
@@ -196,29 +208,38 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
       actorId: officer.id,
       actorName: "Officer",
     });
-
     await waitForRecipients("expense.verified", expenseId, [submitter.id, cfo.id]);
+    const channelsFor = await channelsByStaff("expense.verified", expenseId);
 
-    const rows = await db
-      .select({ staffId: deliveries.staffId, channel: deliveries.channel })
-      .from(deliveries)
-      .where(sql`${deliveries.notificationId} IN (
-        SELECT id FROM notifications
-         WHERE type = 'expense.verified'
-           AND data->>'expenseId' = ${String(expenseId)}
-      )`);
+    // The CFO has to approve it — that is the whole point of the message.
+    assert.ok(channelsFor(cfo.id).includes("sms"), "the CFO is waited on, so the CFO is texted");
+    assert.ok(channelsFor(submitter.id).includes("sms"), "and it is the submitter's own request");
+  });
 
-    const channelsFor = (id) => rows.filter((r) => Number(r.staffId) === Number(id)).map((r) => r.channel);
+  test("an announcement does not buzz everyone who touched it", async () => {
+    const expenseId = 910000 + (RUN % 1000);
+    // Paid is terminal: nobody is waiting on anybody, so only the person whose
+    // request it was is worth interrupting.
+    await notifyExpenseStage({
+      expense: {
+        id: expenseId,
+        added_by: submitter.id,
+        verified_by: cfo.id,
+        amount: "125000",
+        description: `Paid ${RUN}`,
+      },
+      stage: chain.STATUS.PAID,
+      actorId: admin.id,
+      actorName: "Admin",
+    });
+    await waitForRecipients("expense.paid", expenseId, [submitter.id]);
+    const channelsFor = await channelsByStaff("expense.paid", expenseId);
 
-    const submitterChannels = channelsFor(submitter.id);
-    const cfoChannels = channelsFor(cfo.id);
-
-    // Both hear about it — nothing stalls because a queue lost its text.
-    assert.ok(submitterChannels.length > 0, "the submitter was notified");
-    assert.ok(cfoChannels.length > 0, "the approver was notified");
-
-    assert.ok(submitterChannels.includes("sms"), "the submitter's own request texts them");
-    assert.ok(!cfoChannels.includes("sms"), "an approver is a queue, not a phone");
-    assert.ok(cfoChannels.includes("email"), "but the approver still gets an email");
+    assert.ok(channelsFor(submitter.id).includes("sms"), "the submitter's money moved");
+    const others = channelsFor(cfo.id);
+    if (others.length) {
+      assert.ok(!others.includes("sms"), "a bystander on a finished request is not texted");
+      assert.ok(others.includes("email"), "but is still told");
+    }
   });
 });
