@@ -10,6 +10,9 @@ const {
 } = require("../db/schema");
 const bankAccountRepo = require("../repositories/bankAccount.repository");
 const auditLogRepo = require("../repositories/auditLog.repository");
+// Required lazily inside the transfer path rather than at the top: orderStatus
+// reaches the notification engine, which reads orders back through this module.
+const orderStatus = () => require("./orderStatus.service");
 
 /**
  * Money received against an ORDER, matched to a bank statement line.
@@ -349,7 +352,14 @@ const transferSurplus = async (
     // between the same pair of orders would otherwise be able to deadlock.
     const ids = [Number(fromOrderId), Number(toOrderId)].sort((a, b) => a - b);
     const locked = await trx
-      .select({ id: orders.id, orderNumber: orders.orderNumber, totalAmount: orders.totalAmount })
+      .select({
+        id: orders.id,
+        orderNumber: orders.orderNumber,
+        totalAmount: orders.totalAmount,
+        // Read under the same lock as the money, so the release decision below
+        // cannot act on a status another transaction has since moved.
+        status: orders.status,
+      })
       .from(orders)
       .where(inArray(orders.id, ids))
       .orderBy(asc(orders.id))
@@ -412,6 +422,36 @@ const transferSurplus = async (
 
     const fromAfter = await recomputeOrder(from.id, trx);
     const toAfter = await recomputeOrder(to.id, trx);
+
+    /**
+     * A transfer is money arriving, so it releases the receiving order exactly
+     * as a bank payment would.
+     *
+     * Payment is the only condition for release in this business, and this is
+     * one of the two ways an order gets funded — but it was the one that never
+     * touched the state machine. An order paid entirely by transfer therefore
+     * committed as Paid and sat at Pending forever, invisible to a ticketing
+     * desk that only sees Released/Loading, with no screen able to move it:
+     * Released is not reachable from Pending, so even the manual release button
+     * returned 409.
+     *
+     * `isLegal` is the whole guard, as it is on the statement-line path in
+     * order.service.js. It is only true from Pending, so a transfer onto an
+     * already-released or delivered order moves money and nothing else, and a
+     * second transfer cannot re-release.
+     *
+     * Part payments release too — capped at the quantity paid for, which
+     * generate-tickets enforces — so this asks whether any money is now on the
+     * order, not whether it is fully covered.
+     *
+     * The source order is deliberately NOT de-released. transferSurplus can
+     * only move genuine surplus, so `from` never drops below its own value.
+     */
+    if (toAfter.received > 0 && orderStatus().isLegal(to.status, "Paid")) {
+      const shared = { tx: trx, actor: actorFor(staffId), metadata: { via: "transfer", transferId: transfer.id } };
+      await orderStatus().transition(to.id, "Paid", { ...shared, action: "order.paid", set: {} });
+      await orderStatus().releaseOnPayment(to.id, shared);
+    }
 
     for (const [orderId, summary, direction] of [
       [from.id, fromAfter, "out"],

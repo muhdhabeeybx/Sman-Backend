@@ -1304,21 +1304,29 @@ async function confirmOrderPayment({
     /**
      * Whether there is a status transition to run.
      *
-     * Two conditions, not one. "First money on the order" is read before the
-     * payment is recorded, because recording it is precisely what changes the
-     * answer — but it is not sufficient on its own: an order that has already
-     * been released, loaded or delivered is past the Paid stage, and Paid is
-     * only ever legal FROM Pending (see TRANSITIONS in orderStatus.service.js).
+     * The status IS the condition. Paid is only ever legal FROM Pending (see
+     * TRANSITIONS in orderStatus.service.js), so an order that has already been
+     * released, loaded or delivered is passed over here and simply keeps the
+     * fulfilment status it has — which is what recording money against a
+     * delivered order should do, and why it no longer throws 409 "An order
+     * cannot move from Completed to Paid".
      *
-     * Without the status half, recording the first payment on a delivered
-     * order threw 409 "An order cannot move from Completed to Paid" — which is
-     * exactly the case this endpoint was just opened up for: an order whose
-     * lines were unmatched after delivery has amountPaid back at 0, so it looks
-     * like a first payment while its status is Completed. Money is recorded;
-     * the fulfilment status simply stays where it is.
+     * This used to also require `amountPaid <= 0` — "first money on the
+     * order". That extra condition assumed every route by which money can
+     * arrive also drives the state machine, and one does not: a transfer-in
+     * from another order (transferSurplus) writes a payment row and leaves the
+     * status alone. So a small transfer landing before the real payment spent
+     * the "first payment" flag, and the statement lines that followed were
+     * recorded with the release silently skipped — leaving an order fully Paid,
+     * stuck at Pending, and invisible to a ticketing desk that only sees
+     * Released/Loading. Order 11790 sat exactly there: ₦587k in by transfer at
+     * 15:57, ₦433.5m of statement lines at 16:03, and no release.
+     *
+     * isLegal alone is both necessary and sufficient. It cannot double-release
+     * a paid order, because the second call finds the status already past
+     * Pending.
      */
-    const isFirstPayment = Number(order.amountPaid ?? 0) <= 0;
-    const shouldTransition = isFirstPayment && orderStatus.isLegal(order.status, "Paid");
+    const shouldTransition = orderStatus.isLegal(order.status, "Paid");
 
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
       { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note },
