@@ -182,14 +182,26 @@ failed request. Use `notifyAndWait()` when you genuinely need the outcome (the
 A row in `notifications`, then a best-effort SSE publish. Read via
 `GET /api/notifications` (staff) or `GET /api/customer/notifications`.
 
-### Push — FCM HTTP v1
+### Push — two providers, routed by token shape
 
-Covers Android **and** iOS; iOS is relayed through FCM's APNs bridge, so there
-is no separate APNs certificate to renew. Auth is a service-account JWT
-exchanged for an OAuth2 token, cached for 55 minutes.
+`channels/push.js` reads each token and sends it where it can actually go.
+These are **not** interchangeable, and handing one to the wrong service is a
+silent non-delivery:
 
-Set `FCM_PROJECT_ID`, `FCM_CLIENT_EMAIL`, `FCM_PRIVATE_KEY` (see
-`.env.example` for the newline handling — this is the usual thing to get wrong).
+| token | provider | credentials |
+|---|---|---|
+| `ExponentPushToken[…]` | Expo (`expoPush.js`) | **none** — Expo authenticates the project, not the caller |
+| a raw FCM registration token | FCM HTTP v1 (`fcm.js`) | `FCM_PROJECT_ID`, `FCM_CLIENT_EMAIL`, `FCM_PRIVATE_KEY` |
+
+The Expo mobile app mints the first kind, so **the app needs no FCM
+credentials on this server** — the APNs key and FCM service account live in EAS,
+against the Expo project. Configure the FCM block only for a client that mints
+raw FCM tokens. `GET /health` reports which providers are actually configured.
+
+FCM covers Android **and** iOS; iOS is relayed through FCM's APNs bridge, so
+there is no separate APNs certificate to renew here. Auth is a service-account
+JWT exchanged for an OAuth2 token, cached for 55 minutes. See `.env.example` for
+the `FCM_PRIVATE_KEY` newline handling — the usual thing to get wrong.
 
 Two details the mobile app must match:
 

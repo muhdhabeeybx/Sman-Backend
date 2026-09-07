@@ -33,6 +33,27 @@ const resolveBadge = async (principal) => {
 };
 
 /**
+ * The Android notification channel a push should ring on, or `undefined`.
+ *
+ * Opt-in, and deliberately so. Android SILENTLY DROPS a notification naming a
+ * channel the app has not created, which makes a wrong value here invisible
+ * non-delivery rather than an error anyone would notice. Unset means no
+ * `channelId` travels at all and Expo falls back to its own default channel —
+ * the behaviour that has been shipping, so an unconfigured deployment keeps
+ * working exactly as before.
+ *
+ * Set these ONLY to ids the mobile app creates at startup (`ensureAndroidChannels`
+ * in the app's services/pushNotifications.ts — today `soroman_orders`,
+ * `soroman_payments`, `soroman_general`). Note fcm.js applies its own hardcoded
+ * fallbacks to the same two variables; leaving them unset is safe here but not
+ * there, so set them if a raw-FCM client ever registers.
+ */
+const androidChannel = (priority) =>
+  (priority === "high" || priority === "urgent"
+    ? process.env.PUSH_ANDROID_CHANNEL_HIGH
+    : process.env.PUSH_ANDROID_CHANNEL_DEFAULT) || undefined;
+
+/**
  * @returns {Promise<Array<{destination, status, providerMessageId, error}>>}
  */
 const send = async ({ principal, rendered }) => {
@@ -65,6 +86,9 @@ const send = async ({ principal, rendered }) => {
     priority: rendered.priority,
     imageUrl: push.imageUrl || rendered.imageUrl || undefined,
     badge,
+    // Android-only; iOS ignores it, and expoPush.js omits the key entirely when
+    // this is undefined.
+    channelId: androidChannel(rendered.priority),
   };
 
   /**
