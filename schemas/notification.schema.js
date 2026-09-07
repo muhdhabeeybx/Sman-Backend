@@ -98,7 +98,22 @@ const registerDevice = z.object({
   // bound is generous rather than exact.
   token: requiredString("Device token", 4096),
   platform: enumOf("Platform", PLATFORMS),
-  provider: z.enum(["fcm"], { error: () => "Provider must be fcm" }).optional().default("fcm"),
+  /**
+   * Which service delivers to this token. Both are live: the Expo mobile app
+   * mints `ExponentPushToken[…]`, a bare Android/web client mints a raw FCM
+   * registration token, and the two are not interchangeable (see
+   * notifications/channels/push.js, which routes on the token's shape).
+   *
+   * "expo" was rejected here until now, so an Expo build declaring its provider
+   * honestly got a 400 and never registered at all. Routing has always keyed
+   * off the token itself, so this is a label — but a label the delivery log and
+   * the devices screen both read, and a wrong one makes a silent
+   * non-delivery look like a configuration problem.
+   */
+  provider: z
+    .enum(["fcm", "expo"], { error: () => "Provider must be fcm or expo" })
+    .optional()
+    .default("fcm"),
   deviceId: optionalString("Device id", 128),
   deviceName: optionalString("Device name", 255),
   appVersion: optionalString("App version", 32),
@@ -132,6 +147,9 @@ const listDeliveries = pagination.extend({
    * simply matches nothing.
    */
   reason: z.string().trim().max(40, "Reason is too long").optional(),
+  /** Whitelisted in the repository — anything else falls back to newest first. */
+  sort: z.enum(["created", "sent", "delivered", "status", "channel", "recipient", "campaign"]).optional(),
+  dir: z.enum(["asc", "desc"]).optional(),
 });
 
 /**
@@ -214,6 +232,19 @@ const broadcast = z
      * reconstructed.
      */
     audienceLabel: optionalString("Audience label", 255),
+    /**
+     * Which announcement this is — the category recipients mute it under.
+     *
+     * "system" is operational news, "marketing" is a promotion. Defaulting to
+     * "system" keeps every existing caller (and the composer, until it grows
+     * the control) behaving exactly as before; a promo has to be labelled one
+     * deliberately, which is the right way round — mislabelling an advert as
+     * system news is the failure that makes the opt-out worthless.
+     */
+    category: z
+      .enum(["system", "marketing"], { error: () => "Category must be system or marketing" })
+      .optional()
+      .default("system"),
   })
   .refine(
     (v) => v.audience !== "roles" || (v.roles?.length ?? 0) > 0,

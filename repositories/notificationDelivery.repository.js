@@ -255,6 +255,37 @@ const logFilters = ({ channel, status, type, campaignId, reason, from, to, searc
   return where.length ? sql`WHERE ${sql.join(where, sql` AND `)}` : sql``;
 };
 
+/**
+ * The columns the log may be ordered by, and the SQL for each.
+ *
+ * A whitelist rather than an interpolated column name: `sort` arrives from a
+ * query string, and the one thing that must never reach ORDER BY is something
+ * a caller chose the text of.
+ *
+ * Every entry ends with a `created_at` tiebreak. Without it a page boundary
+ * inside a run of equal values — and status has six values across thousands of
+ * rows — reorders between requests, so paging forward can show a row twice and
+ * skip another entirely.
+ */
+const SORTABLE = {
+  created: sql`nd.created_at`,
+  sent: sql`nd.sent_at`,
+  delivered: sql`nd.delivered_at`,
+  status: sql`nd.status`,
+  channel: sql`nd.channel`,
+  recipient: sql`LOWER(COALESCE(nd.recipient_name, nd.destination))`,
+  campaign: sql`LOWER(COALESCE(mc.title, ''))`,
+};
+
+const orderClause = (sort, dir) => {
+  const column = SORTABLE[sort] || SORTABLE.created;
+  const direction = String(dir).toLowerCase() === "asc" ? sql`ASC` : sql`DESC`;
+  // NULLS LAST both ways: an undelivered row sorting above a delivered one on
+  // "delivered, newest first" would put the rows with no answer at the top of
+  // the column you sorted to see the answers in.
+  return sql`ORDER BY ${column} ${direction} NULLS LAST, nd.created_at DESC`;
+};
+
 const findAll = async ({
   channel,
   status,
@@ -264,6 +295,8 @@ const findAll = async ({
   from,
   to,
   search,
+  sort,
+  dir,
   page = 1,
   limit = 50,
 } = {}) => {
@@ -302,7 +335,7 @@ const findAll = async ({
       FROM notification_deliveries nd
       LEFT JOIN message_campaigns mc ON mc.id = nd.campaign_id
       ${whereSql}
-      ORDER BY nd.created_at DESC
+      ${orderClause(sort, dir)}
       LIMIT ${limitNum} OFFSET ${offset}
     `),
     db.execute(sql`

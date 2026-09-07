@@ -29,7 +29,19 @@ const broadcast = asyncHandler(async (req, res) => {
   const {
     title, audience, roles, customerIds, staffIds, contacts, channels, priority,
     actionUrl, imageUrl, depotIds, campaignId: existingCampaignId, audienceLabel,
+    category,
   } = req.body;
+
+  /**
+   * The category picks the catalog entry, and the entry is what a recipient's
+   * preferences are matched against. Both are the same message with the same
+   * copy — see the `announcement` builder in notifications/catalog.js — so this
+   * decides one thing only: whether muting promotions silences it.
+   *
+   * The schema defaults this to "system", so an existing caller that sends no
+   * category broadcasts exactly what it did before.
+   */
+  const type = category === "marketing" ? "marketing.announcement" : "system.announcement";
 
   // Shortcodes resolve HERE, at send time, not when the template was written.
   // That is the whole point of a saved price template: "{{prices}}" typed once
@@ -93,7 +105,7 @@ const broadcast = asyncHandler(async (req, res) => {
     });
   }
 
-  const result = await notifyAndWait("system.announcement", {
+  const result = await notifyAndWait(type, {
     to,
     data: {
       title,
@@ -130,6 +142,11 @@ const broadcast = asyncHandler(async (req, res) => {
     title,
     channels: channels || null,
     recipients: result.recipients,
+    // Which announcement went out. The campaign row has no column for it, so
+    // without this the audit trail cannot tell a promotion from an outage
+    // notice — and "who authorised sending that as system news?" is exactly
+    // the question an audit trail exists to answer.
+    category,
   });
 
   res.json({
@@ -188,7 +205,7 @@ const getCampaign = asyncHandler(async (req, res) => {
 
 /** GET /api/notifications/deliveries — the outbound log, filterable. */
 const listDeliveries = asyncHandler(async (req, res) => {
-  const { channel, status, type, campaignId, reason, from, to, search, page, limit } = req.query;
+  const { channel, status, type, campaignId, reason, from, to, search, sort, dir, page, limit } = req.query;
   const { rows, pagination } = await notificationDeliveryRepo.findAll({
     channel,
     status,
@@ -198,6 +215,8 @@ const listDeliveries = asyncHandler(async (req, res) => {
     from,
     to,
     search,
+    sort,
+    dir,
     page,
     limit,
   });
