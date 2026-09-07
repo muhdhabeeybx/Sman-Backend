@@ -45,23 +45,23 @@ const MESSAGE_CLASS = {
 };
 
 /**
- * Sender IDs are approved per route, not per account.
+ * One sender ID, on every route and every message.
  *
- * "Soroman" is approved for general sending but NOT whitelisted for DND, and a
- * DND send under a non-whitelisted sender is accepted by Termii ("Successfully
- * Sent") and then rejected by the carrier — a billed message that never
- * arrives, visible only as a `rejected` DLR hours later. This is precisely why
- * the old generic → dnd fallback delivered nothing: every retry went out under
- * the wrong sender.
+ * Termii approves a sender ID per route, and the account previously leaned on
+ * Termii's shared "N-Alert" for the DND leg because the branded ID was not
+ * whitelisted for it. That is a deliberate trade nobody should make by
+ * accident: a text from "N-Alert" is unbranded and unrecognisable, and a
+ * customer who cannot tell who sent their payment instructions is a customer
+ * who ignores it.
  *
- * So the DND leg uses a DND-approved sender. Termii's shared "N-Alert" is the
- * default; TERMII_OTP_SENDER_ID is honoured as the fallback so a deployment
- * that already set it for OTPs needs no second variable. Point
- * TERMII_DND_SENDER_ID at "Soroman" the day Termii whitelists it for DND.
+ * So everything now goes out as the brand. If Termii has not whitelisted it
+ * for DND, the DND leg is accepted ("Successfully Sent") and then rejected by
+ * the carrier — visible in the delivery log as a `rejected` DLR, and the
+ * generic leg still runs behind it. Watch the log after deploying this; a run
+ * of `sender_id` or `rejected` reasons on the dnd channel means the
+ * whitelisting has not landed yet.
  */
-const brandSender = () => process.env.TERMII_SENDER_ID || "Soroman";
-const dndSender = () =>
-  process.env.TERMII_DND_SENDER_ID || process.env.TERMII_OTP_SENDER_ID || "N-Alert";
+const sender = () => process.env.TERMII_SENDER_ID || "Soroman";
 
 /**
  * Promotional traffic on the DND route: off, and it should stay off.
@@ -137,10 +137,11 @@ const sendSMSTermii = async (
  * reached first and everyone else still gets the message if DND declines.
  * Promotional gets the one route it is allowed on.
  */
-const routePlan = (messageClass, from) => {
-  const generic = { channel: CHANNELS.GENERIC, from: from || brandSender() };
+const routePlan = (messageClass) => {
+  const from = sender();
+  const generic = { channel: CHANNELS.GENERIC, from };
   if (messageClass === MESSAGE_CLASS.PROMOTIONAL && !promoOnDnd()) return [generic];
-  return [{ channel: CHANNELS.DND, from: from || dndSender() }, generic];
+  return [{ channel: CHANNELS.DND, from }, generic];
 };
 
 /**
@@ -156,14 +157,13 @@ const routePlan = (messageClass, from) => {
  *
  * @param {object} [options]
  * @param {string} [options.messageClass] one of MESSAGE_CLASS; transactional by default
- * @param {string} [options.from] pin the sender ID for every leg, overriding the plan
  * @returns {Promise<{success: boolean, channel?: string, sender?: string,
  *                    messageId?: string, disabled?: boolean, message?: string}>}
  */
-const route = async (phone, sms, { messageClass = MESSAGE_CLASS.TRANSACTIONAL, from } = {}) => {
+const route = async (phone, sms, { messageClass = MESSAGE_CLASS.TRANSACTIONAL } = {}) => {
   const attempts = [];
 
-  for (const step of routePlan(messageClass, from)) {
+  for (const step of routePlan(messageClass)) {
     try {
       const result = await sendSMSTermii(phone, sms, step.channel, step.from);
       if (result.success) {
@@ -239,25 +239,21 @@ const getTermiiBalance = async () => {
 /**
  * OTP sender.
  *
- * Kept as its own name because the OTP path pins the sender ID explicitly
- * (services/otp.service.js passes TERMII_OTP_SENDER_ID) rather than taking the
- * route plan's default, and because "the code did not arrive" is the failure
- * everyone reaches for this function to explain.
- *
- * `from` pins the sender ID for every leg. Everything else — dnd first, then
- * generic, and the soft-failure handling — is the shared policy in `route`.
+ * A named alias for the transactional route rather than a policy of its own —
+ * kept because "the code did not arrive" is the failure everyone reaches for
+ * this function to explain, and a stack trace through `route` alone says less.
+ * It once pinned its own sender ID; there is only one sender ID now.
  */
-const sendSMSWithFallback = async (phone, sms, { from } = {}) =>
-  route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL, from });
+const sendSMSWithFallback = async (phone, sms) =>
+  route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL });
 
 /**
  * The route walk every bespoke sender below shares.
  *
  * All of them are transactional — an order the customer placed, a ticket they
- * are collecting, an expiry on their own order — so all of them go dnd first,
- * under a DND-approved sender. They previously went generic first under
- * "Soroman", which meant a DND-registered customer's payment instructions were
- * billed and dropped.
+ * are collecting, an expiry on their own order — so all of them go dnd first.
+ * They previously went generic first, which meant a DND-registered customer's
+ * payment instructions were billed and dropped.
  */
 const deliver = async (phone, sms, label) => {
   const result = await route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL });

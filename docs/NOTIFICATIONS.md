@@ -248,16 +248,19 @@ ID's DND approval revoked, and the OTPs share that approval. This is what the
 broadcast's `system` / `marketing` split buys beyond the mute: an outage notice
 reaches a DND-registered customer, an advert correctly does not.
 
-**Sender IDs are approved per route.** "Soroman" is approved for general
-sending but not whitelisted for DND, and a `dnd` send under it is accepted by
-Termii (`Successfully Sent`) and then rejected by the carrier — billed, never
-delivered, visible only in the DLR hours later. That is why the old
-`generic` → `dnd` fallback delivered nothing: every retry went out under the
-wrong sender. The `dnd` leg now uses `TERMII_DND_SENDER_ID` (falling back to
-`TERMII_OTP_SENDER_ID`, then Termii's shared `N-Alert`); set it to `Soroman`
-once Termii whitelists that for DND. `TERMII_PROMO_ON_DND=true` would put
-promos on `dnd` as well — it exists so the decision is an env var rather than a
-deploy, not because it is a good idea.
+**One sender ID, everywhere.** `TERMII_SENDER_ID` is the only one, on both
+routes and on OTPs. Termii approves a sender ID *per route*, and the account
+used to fall back to Termii's shared `N-Alert` for the `dnd` leg because the
+branded ID was not whitelisted for it — but an unbranded text is one the
+customer cannot place, and a verification code nobody recognises is a
+verification code nobody trusts. If the branded ID is not yet whitelisted for
+DND, that leg comes back `Successfully Sent` and is then rejected by the
+carrier, with the `generic` leg still running behind it; the delivery log shows
+it as `sender_id` or `rejected` on the `dnd` channel, which is the signal to
+chase the whitelisting at Termii.
+
+`TERMII_PROMO_ON_DND=true` would put promos on `dnd` as well — it exists so the
+decision is an env var rather than a deploy, not because it is a good idea.
 
 Capped at `NOTIFY_SMS_MAX_LENGTH` (612 = four billed parts) so a runaway
 template cannot become a runaway invoice.

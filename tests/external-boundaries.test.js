@@ -209,22 +209,17 @@ describe("external boundaries — Turnstile and Termii", () => {
   describe("route", () => {
     const ORIGINAL = {
       sender: process.env.TERMII_SENDER_ID,
-      dnd: process.env.TERMII_DND_SENDER_ID,
-      otp: process.env.TERMII_OTP_SENDER_ID,
       promo: process.env.TERMII_PROMO_ON_DND,
     };
 
     beforeEach(() => {
       process.env.TERMII_SENDER_ID = "Soroman";
-      process.env.TERMII_DND_SENDER_ID = "N-Alert";
       delete process.env.TERMII_PROMO_ON_DND;
     });
 
     afterEach(() => {
       for (const [key, value] of [
         ["TERMII_SENDER_ID", ORIGINAL.sender],
-        ["TERMII_DND_SENDER_ID", ORIGINAL.dnd],
-        ["TERMII_OTP_SENDER_ID", ORIGINAL.otp],
         ["TERMII_PROMO_ON_DND", ORIGINAL.promo],
       ]) {
         if (value === undefined) delete process.env[key];
@@ -246,13 +241,11 @@ describe("external boundaries — Turnstile and Termii", () => {
       return seen;
     };
 
-    test("a transactional message tries dnd FIRST, under a DND-approved sender", async () => {
+    test("a transactional message tries dnd FIRST", async () => {
       // The whole point. `generic` never reaches a DND-registered handset, and
       // roughly a third of Nigerian numbers are on the register — an order's
       // payment instructions sent generic-first are ones those customers never
-      // see. The sender matters just as much: a dnd send under a sender that
-      // is not DND-whitelisted is accepted by Termii and rejected by the
-      // carrier, which is how the old fallback billed for nothing.
+      // see.
       const seen = recordSends([{ message: "Successfully Sent", message_id: "m-1" }]);
 
       const result = await route("08012345678", "Please pay N500,000", {
@@ -262,14 +255,10 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.success, true);
       assert.equal(result.channel, "dnd");
       assert.equal(result.messageId, "m-1");
-      assert.deepEqual(seen, [{ channel: "dnd", from: "N-Alert" }]);
+      assert.deepEqual(seen, [{ channel: "dnd", from: "Soroman" }]);
     });
 
-    test("transactional falls back to generic — under the BRANDED sender", async () => {
-      // The fallback is not the same message sent twice: the second leg is a
-      // different route with a different approved sender. Carrying "N-Alert"
-      // onto generic would strip the brand off every message that ever needed
-      // a retry.
+    test("transactional falls back to generic", async () => {
       const seen = recordSends([
         { message: "DND Active on phone number" },
         { message: "Successfully Sent", message_id: "m-2" },
@@ -282,7 +271,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.success, true);
       assert.equal(result.channel, "generic");
       assert.deepEqual(seen, [
-        { channel: "dnd", from: "N-Alert" },
+        { channel: "dnd", from: "Soroman" },
         { channel: "generic", from: "Soroman" },
       ]);
     });
@@ -309,7 +298,7 @@ describe("external boundaries — Turnstile and Termii", () => {
         messageClass: MESSAGE_CLASS.PROMOTIONAL,
       });
 
-      assert.deepEqual(seen, [{ channel: "dnd", from: "N-Alert" }]);
+      assert.deepEqual(seen, [{ channel: "dnd", from: "Soroman" }]);
     });
 
     test("defaults to transactional when no class is given", async () => {
@@ -321,17 +310,22 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(seen[0].channel, "dnd");
     });
 
-    test("an explicit `from` pins the sender on every leg", async () => {
-      // The OTP path pins its own sender; the route plan's defaults must not
-      // quietly override it on the fallback.
+    test("every leg goes out under the one branded sender", async () => {
+      // There is no per-route or per-message sender any more. The dnd leg used
+      // to ride Termii's shared "N-Alert" because the brand was not
+      // DND-whitelisted; an unbranded text is one the customer cannot place,
+      // so the brand goes on both legs and the whitelisting is Termii's side
+      // to fix.
+      process.env.TERMII_SENDER_ID = "Soroman";
       const seen = recordSends([{ message: "Insufficient balance" }, { message: "Successfully Sent" }]);
 
-      await route("08012345678", "Your code is 123456", { from: "Verify" });
+      await route("08012345678", "Your code is 123456");
 
       assert.deepEqual(seen, [
-        { channel: "dnd", from: "Verify" },
-        { channel: "generic", from: "Verify" },
+        { channel: "dnd", from: "Soroman" },
+        { channel: "generic", from: "Soroman" },
       ]);
+      assert.ok(!seen.some((a) => /alert/i.test(a.from)), "no shared Termii sender ID survives");
     });
 
     test("both routes' complaints survive into one error", async () => {
@@ -405,7 +399,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.sent, true);
       assert.equal(result.reason, null);
       assert.equal(body.channel, "dnd", "OTP prefers Termii dnd over generic");
-      assert.equal(body.from, "N-Alert", "OTP goes out under the DND-approved sender ID");
+      assert.equal(body.from, "Soroman", "an OTP is branded like every other text");
 
       const sentCode = body.sms.match(/\b(\d{6})\b/)?.[1];
       assert.ok(sentCode, `no 6-digit code found in: ${body.sms}`);

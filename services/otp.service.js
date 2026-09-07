@@ -258,14 +258,13 @@ async function issueAndSend(customer, { action, requestIp, sendTo } = {}) {
   // generic) silently dropped codes for exactly those customers. It also
   // soft-fails as { success: false } without throwing, so the return value
   // must be checked rather than relying on a try/catch alone.
-  // OTPs go out under a DND-whitelisted sender ID. The branded "Soroman" is
-  // approved for general sending but not for the DND route, so a DND OTP under
-  // it is rejected by the carrier (delivered "Successfully Sent" but a rejected
-  // DLR). Termii's shared "N-Alert" is DND-approved; override per env once
-  // "Soroman" itself is whitelisted for DND.
-  const result = await sendSMSWithFallback(destination, smsBody(action, code), {
-    from: process.env.TERMII_OTP_SENDER_ID || "N-Alert",
-  });
+  // Under the brand, like every other text the platform sends. This used to go
+  // out as Termii's shared "N-Alert" because that ID was DND-whitelisted and
+  // "Soroman" was not — but an unbranded code is one the customer cannot place,
+  // and a verification code nobody recognises is a verification code nobody
+  // trusts. If a DND-registered handset stops receiving codes, the whitelisting
+  // is what to chase at Termii; the delivery log will say so.
+  const result = await sendSMSWithFallback(destination, smsBody(action, code));
 
   if (!result.success) {
     // The row is already written, so the code stays valid and the customer can
