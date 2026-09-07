@@ -214,11 +214,41 @@ receives and nobody notices.
 
 ### SMS — Termii
 
-Goes through `services/sms.service.js`, preserving the `generic` → `dnd`
-fallback: `generic` is the cheaper transactional route, and `dnd` is the only
-one that reaches numbers on Nigeria's Do-Not-Disturb list. Capped at
-`NOTIFY_SMS_MAX_LENGTH` (612 = four billed parts) so a runaway template cannot
-become a runaway invoice.
+Goes through `services/sms.service.js`, which owns the route decision for every
+SMS the platform sends — the engine's channel, the bespoke order senders, and
+the OTP path all walk the same `route()`.
+
+Termii's two routes are not a cheap one and an expensive one to try in turn.
+They carry different traffic under different rules:
+
+| route | traffic | reaches a DND-registered number? |
+|---|---|---|
+| `generic` | promotional | **no** — and blocked 8PM–8AM WAT on MTN |
+| `dnd` | transactional | yes, and it is the only one that does |
+
+Roughly a third of Nigerian mobile numbers sit on the DND register, so a
+payment instruction sent `generic` is one a third of customers never see.
+`channels/sms.js` therefore reads the notification's **catalog category**:
+everything is transactional — and goes `dnd` first, then `generic` — except the
+`marketing` category, which stays on `generic`. A DND registration *is* the
+opt-out from promotional SMS; routing promos around it is what gets a sender
+ID's DND approval revoked, and the OTPs share that approval. This is what the
+broadcast's `system` / `marketing` split buys beyond the mute: an outage notice
+reaches a DND-registered customer, an advert correctly does not.
+
+**Sender IDs are approved per route.** "Soroman" is approved for general
+sending but not whitelisted for DND, and a `dnd` send under it is accepted by
+Termii (`Successfully Sent`) and then rejected by the carrier — billed, never
+delivered, visible only in the DLR hours later. That is why the old
+`generic` → `dnd` fallback delivered nothing: every retry went out under the
+wrong sender. The `dnd` leg now uses `TERMII_DND_SENDER_ID` (falling back to
+`TERMII_OTP_SENDER_ID`, then Termii's shared `N-Alert`); set it to `Soroman`
+once Termii whitelists that for DND. `TERMII_PROMO_ON_DND=true` would put
+promos on `dnd` as well — it exists so the decision is an env var rather than a
+deploy, not because it is a good idea.
+
+Capped at `NOTIFY_SMS_MAX_LENGTH` (612 = four billed parts) so a runaway
+template cannot become a runaway invoice.
 
 ---
 

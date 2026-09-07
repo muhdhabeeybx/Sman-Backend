@@ -20,6 +20,60 @@ const CHANNELS = {
   DND: "dnd",
 };
 
+/**
+ * What KIND of message this is — the one input the route decision needs.
+ *
+ * Termii's two routes are not a cheap one and an expensive one to be tried in
+ * turn; they carry different traffic under different rules:
+ *
+ *   generic        promotional. Skips numbers on Nigeria's Do-Not-Disturb
+ *                  register entirely, and on MTN is blocked 8PM–8AM WAT.
+ *   dnd            transactional. The only route that reaches a DND-registered
+ *                  handset — and reserved, by Termii and the NCC, for messages
+ *                  the customer's own action asked for.
+ *
+ * Roughly a third of Nigerian mobile numbers are on the DND register, so a
+ * transactional message sent `generic` is one a third of customers never see.
+ * That is what this classification exists to stop.
+ */
+const MESSAGE_CLASS = {
+  /** The customer's own action produced it: OTPs, orders, payments, tickets,
+   *  expiries, security notices, and operational news they cannot opt out of. */
+  TRANSACTIONAL: "transactional",
+  /** We chose to send it: promotions, campaigns, anything marketing. */
+  PROMOTIONAL: "promotional",
+};
+
+/**
+ * Sender IDs are approved per route, not per account.
+ *
+ * "Soroman" is approved for general sending but NOT whitelisted for DND, and a
+ * DND send under a non-whitelisted sender is accepted by Termii ("Successfully
+ * Sent") and then rejected by the carrier — a billed message that never
+ * arrives, visible only as a `rejected` DLR hours later. This is precisely why
+ * the old generic → dnd fallback delivered nothing: every retry went out under
+ * the wrong sender.
+ *
+ * So the DND leg uses a DND-approved sender. Termii's shared "N-Alert" is the
+ * default; TERMII_OTP_SENDER_ID is honoured as the fallback so a deployment
+ * that already set it for OTPs needs no second variable. Point
+ * TERMII_DND_SENDER_ID at "Soroman" the day Termii whitelists it for DND.
+ */
+const brandSender = () => process.env.TERMII_SENDER_ID || "Soroman";
+const dndSender = () =>
+  process.env.TERMII_DND_SENDER_ID || process.env.TERMII_OTP_SENDER_ID || "N-Alert";
+
+/**
+ * Promotional traffic on the DND route: off, and it should stay off.
+ *
+ * A number on the DND register has told the regulator it does not want
+ * marketing. Routing promos through `dnd` would technically reach it, and is
+ * exactly the abuse that gets a sender ID's DND approval revoked — taking the
+ * OTPs down with it. The switch exists so the decision is one env var rather
+ * than a deploy, not because it is a good idea.
+ */
+const promoOnDnd = () => process.env.TERMII_PROMO_ON_DND === "true";
+
 const sendSMSTermii = async (
   phone,
   sms,
@@ -78,6 +132,67 @@ const sendSMSTermii = async (
 };
 
 /**
+ * The ordered attempts for a message of this class: which route, under which
+ * sender ID. Transactional walks dnd → generic so a DND-registered customer is
+ * reached first and everyone else still gets the message if DND declines.
+ * Promotional gets the one route it is allowed on.
+ */
+const routePlan = (messageClass, from) => {
+  const generic = { channel: CHANNELS.GENERIC, from: from || brandSender() };
+  if (messageClass === MESSAGE_CLASS.PROMOTIONAL && !promoOnDnd()) return [generic];
+  return [{ channel: CHANNELS.DND, from: from || dndSender() }, generic];
+};
+
+/**
+ * Send one message down its route plan, stopping at the first acceptance.
+ *
+ * The single walk every caller in the codebase now shares — the notification
+ * engine's SMS channel, the bespoke order/ticket senders, and the OTP path —
+ * so the route/sender pairing can never again be right in one place and wrong
+ * in the other three.
+ *
+ * Never throws. Termii soft-fails as `{ success: false }` without raising, so
+ * a caller relying on try/catch alone would read a refusal as a delivery.
+ *
+ * @param {object} [options]
+ * @param {string} [options.messageClass] one of MESSAGE_CLASS; transactional by default
+ * @param {string} [options.from] pin the sender ID for every leg, overriding the plan
+ * @returns {Promise<{success: boolean, channel?: string, sender?: string,
+ *                    messageId?: string, disabled?: boolean, message?: string}>}
+ */
+const route = async (phone, sms, { messageClass = MESSAGE_CLASS.TRANSACTIONAL, from } = {}) => {
+  const attempts = [];
+
+  for (const step of routePlan(messageClass, from)) {
+    try {
+      const result = await sendSMSTermii(phone, sms, step.channel, step.from);
+      if (result.success) {
+        return {
+          success: true,
+          channel: step.channel,
+          sender: step.from,
+          messageId: result.messageId || "",
+        };
+      }
+      // The kill switch is not a route failure — trying the second leg would
+      // only produce the same refusal twice, and "dnd: … | generic: …" in the
+      // delivery log reads as a DND problem when it is an ops one.
+      if (result.disabled) return result;
+      attempts.push(`${step.channel}: ${result.message || "failed"}`);
+    } catch (error) {
+      // Termii reports the real reason in the response body, not the status —
+      // a 402 is "Insufficient balance" only if you unwrap response.data.
+      const detail = error.response?.data
+        ? JSON.stringify(error.response.data)
+        : error.message || "Termii error";
+      attempts.push(`${step.channel}: ${detail}`);
+    }
+  }
+
+  return { success: false, message: attempts.join(" | ") || "All Termii channels failed" };
+};
+
+/**
  * The Termii wallet, read straight from the provider.
  *
  * The `balance` echoed inside a send response is unreliable — some routes
@@ -122,63 +237,34 @@ const getTermiiBalance = async () => {
 };
 
 /**
- * OTP-only sender: try Termii's DND (transactional) route first, then generic.
+ * OTP sender.
  *
- * Per Termii docs, OTP/transactional traffic belongs on `dnd` — `generic` is
- * promotional, skips DND-registered numbers, and on MTN Nigeria is blocked
- * 8PM–8AM WAT. Preferring `dnd` avoids "Successfully Sent" on generic with no
- * actual delivery. Order/notification senders below keep generic → dnd so this
- * can be tested in isolation.
+ * Kept as its own name because the OTP path pins the sender ID explicitly
+ * (services/otp.service.js passes TERMII_OTP_SENDER_ID) rather than taking the
+ * route plan's default, and because "the code did not arrive" is the failure
+ * everyone reaches for this function to explain.
  *
- * `from` overrides the sender ID. The DND route additionally requires the
- * sender ID to be DND-whitelisted: our branded "Soroman" is approved for
- * general sending but NOT for DND, so a DND send under it gets a "rejected"
- * DLR despite "Successfully Sent". OTPs therefore go out under a DND-approved
- * sender (Termii's shared "N-Alert" by default), which the OTP caller passes.
- *
- * Never throws: returns { success, message } so a caller can branch on the
- * outcome instead of relying on an exception that a soft failure won't raise.
+ * `from` pins the sender ID for every leg. Everything else — dnd first, then
+ * generic, and the soft-failure handling — is the shared policy in `route`.
  */
-const sendSMSWithFallback = async (phone, sms, { from } = {}) => {
-  const attempts = [];
-  for (const channel of [CHANNELS.DND, CHANNELS.GENERIC]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel, from);
-      if (result.success) return { success: true, channel };
-      attempts.push(`${channel}: ${result.message || "failed"}`);
-    } catch (error) {
-      // Termii reports the real reason in the response body, not the status —
-      // a 402 is "Insufficient balance" only if you unwrap response.data.
-      const detail =
-        error.response?.data
-          ? JSON.stringify(error.response.data)
-          : error.message || "Termii error";
-      attempts.push(`${channel}: ${detail}`);
-    }
-  }
-  return { success: false, message: attempts.join(" | ") || "All Termii channels failed" };
-};
+const sendSMSWithFallback = async (phone, sms, { from } = {}) =>
+  route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL, from });
 
 /**
- * The generic → dnd walk every bespoke sender was carrying its own copy of.
+ * The route walk every bespoke sender below shares.
  *
- * Termii's `generic` route is the cheaper transactional one; `dnd` is the only
- * route that reaches a number on Nigeria's Do-Not-Disturb register. Trying
- * generic first keeps the cheap route as the default and still gets the
- * message to a DND-registered customer.
+ * All of them are transactional — an order the customer placed, a ticket they
+ * are collecting, an expiry on their own order — so all of them go dnd first,
+ * under a DND-approved sender. They previously went generic first under
+ * "Soroman", which meant a DND-registered customer's payment instructions were
+ * billed and dropped.
  */
 const deliver = async (phone, sms, label) => {
-  for (const channel of [CHANNELS.GENERIC, CHANNELS.DND]) {
-    try {
-      const result = await sendSMSTermii(phone, sms, channel);
-      if (result.success) return { success: true, message: `${label} sent successfully` };
-      console.warn(`Termii ${channel} channel failed:`, result.message);
-    } catch (error) {
-      const errMsg = error.response?.data?.message || error.message || "Termii SMS error";
-      console.warn(`Termii ${channel} channel error during ${label}:`, errMsg);
-    }
-  }
-  return { success: false, message: "All Termii channels failed" };
+  const result = await route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL });
+  if (result.success) return { success: true, message: `${label} sent successfully` };
+
+  console.warn(`Termii failed during ${label}:`, result.message);
+  return { success: false, message: result.message || "All Termii channels failed" };
 };
 
 const sendOrderSummarySMS = async (phone, orderData) => {
@@ -265,4 +351,4 @@ const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) =>
   return deliver(phone, sms, "LPG expiry SMS");
 };
 
-module.exports = { sendSMSTermii, getTermiiBalance, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS };
+module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };

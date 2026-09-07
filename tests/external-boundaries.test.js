@@ -7,7 +7,7 @@ const nock = require("nock");
 
 const { eq } = require("drizzle-orm");
 const botCheck = require("../services/botCheck.service");
-const { sendSMSTermii } = require("../services/sms.service");
+const { sendSMSTermii, route, MESSAGE_CLASS } = require("../services/sms.service");
 const otpService = require("../services/otp.service");
 const { customerOtpRepo, customerRepo } = require("../repositories");
 const { db } = require("../config/db");
@@ -29,9 +29,15 @@ const TERMII_PATH = "/api/sms/send";
  */
 describe("external boundaries — Turnstile and Termii", () => {
   const ORIGINAL_SMS_ENABLED = process.env.SMS_ENABLED;
+  const ORIGINAL_BASE_URL = process.env.TERMII_BASE_URL;
 
   before(() => {
     process.env.SMS_ENABLED = "true";
+    // Pinned to the host the mocks below are registered against. A developer
+    // whose .env points TERMII_BASE_URL at another Termii region would
+    // otherwise fail every test in this file with "Disallowed net connect",
+    // which reads as a broken sender rather than a mismatched fixture.
+    process.env.TERMII_BASE_URL = TERMII_HOST;
     nock.disableNetConnect();
     nock.enableNetConnect(/127\.0\.0\.1|localhost/);
   });
@@ -44,6 +50,8 @@ describe("external boundaries — Turnstile and Termii", () => {
     nock.enableNetConnect();
     if (ORIGINAL_SMS_ENABLED === undefined) delete process.env.SMS_ENABLED;
     else process.env.SMS_ENABLED = ORIGINAL_SMS_ENABLED;
+    if (ORIGINAL_BASE_URL === undefined) delete process.env.TERMII_BASE_URL;
+    else process.env.TERMII_BASE_URL = ORIGINAL_BASE_URL;
     await closeDb();
   });
 
@@ -193,6 +201,159 @@ describe("external boundaries — Turnstile and Termii", () => {
       const result = await sendSMSTermii("08012345678", "hi");
       assert.equal(result.success, false);
       assert.equal(result.message, "Insufficient balance");
+    });
+  });
+
+  // --- route: which Termii route, under which sender ----------------------
+
+  describe("route", () => {
+    const ORIGINAL = {
+      sender: process.env.TERMII_SENDER_ID,
+      dnd: process.env.TERMII_DND_SENDER_ID,
+      otp: process.env.TERMII_OTP_SENDER_ID,
+      promo: process.env.TERMII_PROMO_ON_DND,
+    };
+
+    beforeEach(() => {
+      process.env.TERMII_SENDER_ID = "Soroman";
+      process.env.TERMII_DND_SENDER_ID = "N-Alert";
+      delete process.env.TERMII_PROMO_ON_DND;
+    });
+
+    afterEach(() => {
+      for (const [key, value] of [
+        ["TERMII_SENDER_ID", ORIGINAL.sender],
+        ["TERMII_DND_SENDER_ID", ORIGINAL.dnd],
+        ["TERMII_OTP_SENDER_ID", ORIGINAL.otp],
+        ["TERMII_PROMO_ON_DND", ORIGINAL.promo],
+      ]) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+
+    /** Every send Termii was asked to make, in order. */
+    const recordSends = (replies) => {
+      const seen = [];
+      let i = 0;
+      nock(TERMII_HOST)
+        .post(TERMII_PATH, (b) => {
+          seen.push({ channel: b.channel, from: b.from });
+          return true;
+        })
+        .times(replies.length)
+        .reply(200, () => replies[i++]);
+      return seen;
+    };
+
+    test("a transactional message tries dnd FIRST, under a DND-approved sender", async () => {
+      // The whole point. `generic` never reaches a DND-registered handset, and
+      // roughly a third of Nigerian numbers are on the register — an order's
+      // payment instructions sent generic-first are ones those customers never
+      // see. The sender matters just as much: a dnd send under a sender that
+      // is not DND-whitelisted is accepted by Termii and rejected by the
+      // carrier, which is how the old fallback billed for nothing.
+      const seen = recordSends([{ message: "Successfully Sent", message_id: "m-1" }]);
+
+      const result = await route("08012345678", "Please pay N500,000", {
+        messageClass: MESSAGE_CLASS.TRANSACTIONAL,
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.channel, "dnd");
+      assert.equal(result.messageId, "m-1");
+      assert.deepEqual(seen, [{ channel: "dnd", from: "N-Alert" }]);
+    });
+
+    test("transactional falls back to generic — under the BRANDED sender", async () => {
+      // The fallback is not the same message sent twice: the second leg is a
+      // different route with a different approved sender. Carrying "N-Alert"
+      // onto generic would strip the brand off every message that ever needed
+      // a retry.
+      const seen = recordSends([
+        { message: "DND Active on phone number" },
+        { message: "Successfully Sent", message_id: "m-2" },
+      ]);
+
+      const result = await route("08012345678", "Your ticket is ready", {
+        messageClass: MESSAGE_CLASS.TRANSACTIONAL,
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.channel, "generic");
+      assert.deepEqual(seen, [
+        { channel: "dnd", from: "N-Alert" },
+        { channel: "generic", from: "Soroman" },
+      ]);
+    });
+
+    test("a promotional message never touches the dnd route", async () => {
+      // A DND registration IS the opt-out from marketing. Routing promos
+      // around it is what gets a sender ID's DND approval revoked — and the
+      // OTPs ride on that same approval.
+      const seen = recordSends([{ message: "Successfully Sent", message_id: "m-3" }]);
+
+      const result = await route("08012345678", "Half price this weekend", {
+        messageClass: MESSAGE_CLASS.PROMOTIONAL,
+      });
+
+      assert.equal(result.success, true);
+      assert.deepEqual(seen, [{ channel: "generic", from: "Soroman" }]);
+    });
+
+    test("TERMII_PROMO_ON_DND opens the dnd route to promos", async () => {
+      process.env.TERMII_PROMO_ON_DND = "true";
+      const seen = recordSends([{ message: "Successfully Sent", message_id: "m-4" }]);
+
+      await route("08012345678", "Half price this weekend", {
+        messageClass: MESSAGE_CLASS.PROMOTIONAL,
+      });
+
+      assert.deepEqual(seen, [{ channel: "dnd", from: "N-Alert" }]);
+    });
+
+    test("defaults to transactional when no class is given", async () => {
+      // A caller that forgets is far likelier to be sending a receipt than an
+      // advert, and the cost of guessing wrong is a customer who never learns
+      // where to pay.
+      const seen = recordSends([{ message: "Successfully Sent" }]);
+      await route("08012345678", "hello");
+      assert.equal(seen[0].channel, "dnd");
+    });
+
+    test("an explicit `from` pins the sender on every leg", async () => {
+      // The OTP path pins its own sender; the route plan's defaults must not
+      // quietly override it on the fallback.
+      const seen = recordSends([{ message: "Insufficient balance" }, { message: "Successfully Sent" }]);
+
+      await route("08012345678", "Your code is 123456", { from: "Verify" });
+
+      assert.deepEqual(seen, [
+        { channel: "dnd", from: "Verify" },
+        { channel: "generic", from: "Verify" },
+      ]);
+    });
+
+    test("both routes' complaints survive into one error", async () => {
+      recordSends([{ message: "DND rejected" }, { message: "Insufficient balance" }]);
+      const result = await route("08012345678", "hi");
+      assert.equal(result.success, false);
+      assert.match(result.message, /dnd: DND rejected/);
+      assert.match(result.message, /generic: Insufficient balance/);
+    });
+
+    test("SMS_ENABLED=false stops after one leg and stays honest", async () => {
+      // Reported as disabled, not as a two-route failure: "dnd: … | generic: …"
+      // in the delivery log reads as a DND problem when it is an ops one, and
+      // the second attempt could only produce the same refusal twice.
+      process.env.SMS_ENABLED = "false";
+      try {
+        const result = await route("08012345678", "hi");
+        assert.equal(result.success, false);
+        assert.equal(result.disabled, true);
+      } finally {
+        process.env.SMS_ENABLED = "true";
+      }
     });
   });
 

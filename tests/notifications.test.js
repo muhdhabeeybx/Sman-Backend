@@ -13,6 +13,8 @@ const { notifyAndWait } = require("../notifications");
 const sse = require("../notifications/sse");
 const streamTicket = require("../notifications/streamTicket");
 const fcm = require("../notifications/fcm");
+const smsChannel = require("../notifications/channels/sms");
+const { MESSAGE_CLASS } = require("../services/sms.service");
 
 /**
  * The notification engine.
@@ -203,6 +205,76 @@ describe("channel gating", () => {
     assert.ok(!allowed.includes("sms"));
     assert.ok(allowed.includes("push"));
     assert.ok(suppressed.some((s) => s.channel === "sms" && /Muted/.test(s.reason)));
+  });
+
+  /**
+   * The reason the two announcement types exist. Muting the adverts must not
+   * cost the recipient an outage notice — if both still shared one category,
+   * this test would fail on the second assertion.
+   */
+  test("muting marketing silences promos but not system announcements", () => {
+    const prefs = { marketing: { inApp: false, push: false, email: false, sms: false } };
+    const args = {
+      rendered: { priority: "normal" },
+      principal: { type: "customer", id: customer.id },
+      contact: { email: "a@b.com", phone: PHONE },
+      prefs,
+      settings: null,
+    };
+
+    const promo = engine.gateChannels({ ...args, entry: catalog.getType("marketing.announcement") });
+    assert.ok(!promo.allowed.includes("push"), "a muted promo must not buzz the handset");
+    assert.ok(promo.suppressed.some((s) => s.channel === "push" && /Muted/.test(s.reason)));
+
+    const notice = engine.gateChannels({ ...args, entry: catalog.getType("system.announcement") });
+    assert.ok(notice.allowed.includes("push"), "system news must survive a marketing mute");
+  });
+
+  /**
+   * The second thing the announcement split buys, beyond the mute.
+   *
+   * The catalog category decides which Termii route the text takes, and the
+   * two routes reach different people: `dnd` is the only one that reaches a
+   * DND-registered handset (roughly a third of Nigerian numbers), and
+   * `generic` is the only one a promotion is allowed on. Getting this backwards
+   * is silent both ways — a depot closure billed and never delivered, or an
+   * advert pushed at someone who registered specifically to stop receiving
+   * them.
+   */
+  test("the catalog category decides the Termii route", () => {
+    // Walked over the whole catalog rather than a handful of samples, so a new
+    // entry has to be a deliberate decision: anything added under a new
+    // category inherits the transactional route and this test says so out loud.
+    const promotional = [];
+    for (const type of catalog.listTypes()) {
+      const entry = catalog.getType(type);
+      assert.ok(entry, `${type} has no catalog entry`);
+      if (smsChannel.messageClassFor(entry) === MESSAGE_CLASS.PROMOTIONAL) promotional.push(type);
+    }
+
+    assert.deepEqual(
+      promotional,
+      ["marketing.announcement"],
+      "only marketing may be kept off the route that reaches a DND-registered number"
+    );
+
+    // The pair that matters most: the same announcement, sent two ways.
+    assert.equal(
+      smsChannel.messageClassFor(catalog.getType("system.announcement")),
+      MESSAGE_CLASS.TRANSACTIONAL,
+      "a depot closure must reach a DND-registered customer"
+    );
+    assert.equal(
+      smsChannel.messageClassFor(catalog.getType("order.paid")),
+      MESSAGE_CLASS.TRANSACTIONAL
+    );
+  });
+
+  test("a notification with no category is treated as transactional", () => {
+    // A wasted send is the cheaper mistake; a payment instruction nobody
+    // receives is not.
+    assert.equal(smsChannel.messageClassFor(undefined), MESSAGE_CLASS.TRANSACTIONAL);
+    assert.equal(smsChannel.messageClassFor({}), MESSAGE_CLASS.TRANSACTIONAL);
   });
 
   test("a mandatory type ignores a muted category", () => {
