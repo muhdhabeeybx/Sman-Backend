@@ -128,6 +128,8 @@ const emailReportsHubSchema = z.object({
 const whatsappReportSchema = z.object({
   recipients: z.array(z.string().min(7).max(25)).min(1).max(25),
   reportDate: z.string().date(),
+  /** Resolve everything and send nothing — see sendDailyReportToWhatsApp. */
+  preview: z.boolean().optional(),
 });
 
 module.exports = {

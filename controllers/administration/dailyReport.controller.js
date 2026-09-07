@@ -103,9 +103,22 @@ const deleteDailyReport = asyncHandler(async (req, res) => {
  * who gets interrupted is a decision rather than a cron expression.
  */
 const whatsappDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate } = req.body;
+  const { recipients, reportDate, preview } = req.body;
 
-  const result = await sendDailyReportToWhatsApp({ date: reportDate, recipients });
+  const result = await sendDailyReportToWhatsApp({ date: reportDate, recipients, preview });
+
+  // A preview resolved everything and sent nothing, so it is a success with an
+  // empty `sent` — which the partial-success rule below would otherwise read
+  // as a total failure.
+  if (result.preview) {
+    return res.json({
+      success: true,
+      message: result.templateName
+        ? `Would send template "${result.templateName}" with ${result.parameters.length} parameter${result.parameters.length === 1 ? "" : "s"}`
+        : "Would send as plain text",
+      data: result,
+    });
+  }
 
   // Partial success is reported as partial. A send that reached two of five
   // managers and said "sent" is how the desk ends up believing somebody was

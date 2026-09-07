@@ -106,6 +106,87 @@ const buildReportMessage = (data) => {
 };
 
 /**
+ * The report as named pieces, for binding into a template's {{1}}, {{2}}, …
+ *
+ * Separate from buildReportMessage because a template is not free text: Meta
+ * REJECTS any parameter containing a newline, a tab, or five or more
+ * consecutive spaces, so the multi-line summary cannot be passed as one
+ * variable. Every value here is a single line by construction.
+ */
+const buildReportFields = (data) => {
+  const { reportDate, totals, locations, history } = data;
+
+  const pretty = new Date(`${reportDate}T00:00:00`).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+
+  const traded = [...locations]
+    .filter((l) => l.orderCount > 0 || l.orderValue > 0)
+    .sort((a, b) => b.orderValue - a.orderValue);
+
+  const prior = lastTradingDay(history || [], reportDate);
+  const change = movement(totals.amountNaira, prior);
+
+  return {
+    date: pretty,
+    litres: litres(totals.qtyLitres),
+    value: money(totals.amountNaira),
+    orders: String(totals.orderCount),
+    locationCount: String(traded.length),
+    /** Every trading location on one line, since a template cannot take many. */
+    locations: traded.length
+      ? traded.map((l) => `${l.name}: ${litres(l.orderLitres)} / ${money(l.orderValue)}`).join(" · ")
+      : "No trading recorded",
+    /** The comparison, or a dash when there is no earlier day to compare to. */
+    trend: change && prior ? `${change} ${prior.date} (${money(prior.amountNaira)})` : "no prior day to compare",
+    /** The whole summary, flattened to one line as a catch-all binding. */
+    summary: buildReportMessage(data),
+  };
+};
+
+/**
+ * Meta's rule for template parameters, applied rather than hoped for.
+ *
+ * A newline, a tab or a run of spaces in any parameter fails the whole send
+ * with a 132000-series error and no partial delivery. Collapsing them here is
+ * the difference between a report that arrives and one that silently does not.
+ */
+const oneLine = (value) =>
+  String(value === null || value === undefined ? "" : value)
+    .replace(/[\r\n\t]+/g, " · ")
+    .replace(/\s{4,}/g, " ")
+    .trim();
+
+/**
+ * Which field fills which numbered placeholder.
+ *
+ * A template's shape is decided in Meta's console, not here, so the binding is
+ * configuration: set WHATSAPP_REPORT_TEMPLATE_PARAMS to a comma-separated list
+ * of the field names above, in placeholder order. The default suits a body
+ * reading roughly:
+ *
+ *   Soroman daily report for {{1}}.
+ *   {{2}} sold, worth {{3}}, across {{4}} orders.
+ *   {{5}}
+ *
+ * Getting the count wrong is the one failure Meta will not forgive — it
+ * rejects the send outright — so the resolved parameters are returned to the
+ * caller, and the endpoint's preview mode shows them before anything is sent.
+ */
+const DEFAULT_TEMPLATE_PARAMS = ["date", "litres", "value", "orders", "locations"];
+
+const templateParameters = (fields) => {
+  const configured = String(process.env.WHATSAPP_REPORT_TEMPLATE_PARAMS || "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+  const keys = configured.length ? configured : DEFAULT_TEMPLATE_PARAMS;
+  return keys.map((key) => oneLine(fields[key] ?? ""));
+};
+
+/**
  * A Nigerian mobile number as WhatsApp wants it: digits, country code, no +.
  *
  * Accepts what people actually type — 0803…, +234803…, 234 803 … — because the
@@ -133,7 +214,7 @@ const normaliseNumber = (raw) => {
  *
  * @param {{ date?: Date | string, recipients: string[] }} opts
  */
-const sendDailyReportToWhatsApp = async ({ date, recipients }) => {
+const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) => {
   const list = (Array.isArray(recipients) ? recipients : [])
     .map((r) => ({ raw: r, to: normaliseNumber(r) }))
     .filter((r, i, all) => all.findIndex((x) => x.to && x.to === r.to) === i);
@@ -155,25 +236,54 @@ const sendDailyReportToWhatsApp = async ({ date, recipients }) => {
   const body = buildReportMessage(data);
 
   /**
-   * A template when one is configured, plain text otherwise.
+   * A template by default, plain text only if the template is switched off.
    *
-   * Meta only permits free-form text inside 24 hours of the recipient's last
-   * message to the business. A report pushed at the end of a day is business-
-   * initiated, so outside that window it needs an approved template — set
-   * WHATSAPP_REPORT_TEMPLATE to its name once Meta approves it and this
-   * switches over. Left unset it sends plain text, which reaches anybody who
-   * has messaged the bot recently and fails cleanly for anybody who has not,
-   * with the reason recorded per recipient below.
+   * Meta permits free-form text only inside 24 hours of the recipient's last
+   * message to the business. A report sent at the end of a day is business-
+   * initiated, so outside that window it MUST be an approved template — which
+   * is now `daily_sales_report`. Setting WHATSAPP_REPORT_TEMPLATE to an empty
+   * string falls back to plain text, useful for testing against a number that
+   * has just messaged the bot.
    */
-  const templateName = String(process.env.WHATSAPP_REPORT_TEMPLATE || "").trim();
+  const templateName = process.env.WHATSAPP_REPORT_TEMPLATE === undefined
+    ? "daily_sales_report"
+    : String(process.env.WHATSAPP_REPORT_TEMPLATE).trim();
+
+  const fields = buildReportFields(data);
+  const parameters = templateName ? templateParameters(fields) : [];
+
   const reply = templateName
     ? {
         kind: REPLY.TEMPLATE,
         name: templateName,
         language: process.env.WHATSAPP_REPORT_TEMPLATE_LANG || "en",
-        variables: [body],
+        variables: parameters,
       }
     : { kind: REPLY.TEXT, body };
+
+  /**
+   * Preview sends nothing.
+   *
+   * A template rejects the whole send when the parameter count does not match
+   * the body approved in Meta's console, and the error comes back as an opaque
+   * code per recipient. Being able to see the exact parameters first turns that
+   * from a guessing game into a comparison.
+   */
+  if (preview) {
+    return {
+      reportDate: data.reportDate,
+      preview: true,
+      channel: templateName ? "template" : "text",
+      templateName: templateName || null,
+      parameters,
+      fields,
+      body,
+      recipients: valid.map((r) => r.raw),
+      skipped: invalid,
+      sent: [],
+      failed: [],
+    };
+  }
 
   const results = await Promise.all(
     valid.map(async ({ to, raw }) => {
@@ -196,6 +306,9 @@ const sendDailyReportToWhatsApp = async ({ date, recipients }) => {
 
   return {
     reportDate: data.reportDate,
+    channel: templateName ? "template" : "text",
+    templateName: templateName || null,
+    parameters,
     body,
     sent: sent.map((r) => r.to),
     failed,
@@ -203,4 +316,10 @@ const sendDailyReportToWhatsApp = async ({ date, recipients }) => {
   };
 };
 
-module.exports = { sendDailyReportToWhatsApp, buildReportMessage, normaliseNumber };
+module.exports = {
+  sendDailyReportToWhatsApp,
+  buildReportMessage,
+  buildReportFields,
+  templateParameters,
+  normaliseNumber,
+};
