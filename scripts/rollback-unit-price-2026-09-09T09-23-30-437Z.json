@@ -1,0 +1,50 @@
+{
+  "takenAt": "2026-09-09T09:23:30.441Z",
+  "orders": [
+    {
+      "id": 11843,
+      "order_number": "ORD-B5F53D1AC29B",
+      "price": "1266.00",
+      "total_amount": "75960000.00",
+      "amount_paid": "0.00",
+      "payment_status": "Unpaid",
+      "payment_confirmed_at": null,
+      "commission": null
+    },
+    {
+      "id": 11844,
+      "order_number": "ORD-5AC6AC070FAD",
+      "price": "1266.00",
+      "total_amount": "151920000.00",
+      "amount_paid": "0.00",
+      "payment_status": "Unpaid",
+      "payment_confirmed_at": null,
+      "commission": null
+    },
+    {
+      "id": 11853,
+      "order_number": "ORD-28727FAF1058",
+      "price": "1266.00",
+      "total_amount": "75960000.00",
+      "amount_paid": "0.00",
+      "payment_status": "Unpaid",
+      "payment_confirmed_at": null,
+      "commission": null
+    },
+    {
+      "id": 11872,
+      "order_number": "ORD-A7F73B47658C",
+      "price": "1266.00",
+      "total_amount": "101280000.00",
+      "amount_paid": "100240000.00",
+      "payment_status": "Part Paid",
+      "payment_confirmed_at": "2026-09-09T06:26:39.250Z",
+      "commission": {
+        "id": 763,
+        "quantity": 79178,
+        "commission_rate": "0.00",
+        "commission_amount": "0.00"
+      }
+    }
+  ]
+}
