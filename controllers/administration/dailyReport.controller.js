@@ -134,6 +134,22 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
    * five managers and said "sent" is how the desk ends up believing somebody
    * was told something they never saw.
    */
+  /**
+   * When nothing sent, the headline IS the reason.
+   *
+   * "Could not send to any of those numbers" reads as a fact about the numbers,
+   * and it never was: every real cause so far has been one fact about the
+   * system — a template whose parameter count Meta rejects, an expired token,
+   * a sender not registered. The numbers were fine. So an operator retyped
+   * them, got the same sentence, and had nowhere else to go, while
+   * `failed[].error` carried Meta's own words in the body the whole time.
+   *
+   * Every recipient fails for the same reason in practice, so the distinct
+   * reasons are almost always one. Say it. Only fall back to the generic line
+   * when there is genuinely no error text to show.
+   */
+  const reasons = [...new Set(result.failed.map((f) => f.error).filter(Boolean))];
+
   const ok = result.sent.length > 0;
   const message = ok
     ? `Sent to ${result.sent.length} number${result.sent.length === 1 ? "" : "s"}` +
@@ -143,8 +159,12 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
       : result.configHint
         // The template mismatch names its own fix; repeating the generic
         // "could not send" over it would bury the useful half.
-        ? `${result.failed[0]?.error || "Template mismatch"}. ${result.configHint}`
-        : "Could not send to any of those numbers";
+        ? `${reasons[0] || "Template mismatch"}. ${result.configHint}`
+        : reasons.length === 1
+          ? `Could not send: ${reasons[0]}`
+          : reasons.length > 1
+            ? `Could not send. ${reasons.join(" / ")}`
+            : "Could not send to any of those numbers";
 
   res.json({ success: ok, message, data: result });
 });

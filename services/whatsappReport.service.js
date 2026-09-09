@@ -456,6 +456,23 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
   const sent = results.filter((r) => r.ok);
   const failed = results.filter((r) => !r.ok);
 
+  /**
+   * A template we could not read is the likeliest reason we are here.
+   *
+   * fetchTemplate returns null rather than throwing, on purpose — Meta stays
+   * the authority and an unreadable template must not block a send that would
+   * otherwise work. But null also skips the parameter pre-check above, so the
+   * one error that check exists to pre-empt (132000, "number of parameters
+   * does not match") comes back per recipient as an opaque code instead.
+   *
+   * That is a missing WHATSAPP_WABA_ID or an access token without
+   * whatsapp_business_management scope far more often than it is a real
+   * template problem, and neither is guessable from Meta's reply. Say which
+   * it is, but only when the send actually failed — a working send does not
+   * need to explain itself.
+   */
+  const couldNotReadTemplate = Boolean(templateName) && !template;
+
   return {
     reportDate: data.reportDate,
     channel: templateName ? "template" : "text",
@@ -465,6 +482,15 @@ const sendDailyReportToWhatsApp = async ({ date, recipients, preview = false }) 
     sent: sent.map((r) => r.to),
     failed,
     skipped: invalid,
+    ...(couldNotReadTemplate && failed.length && !sent.length
+      ? {
+          configHint:
+            `Could not read template "${templateName}" from Meta, so its parameter count was not checked ` +
+            `before sending — set WHATSAPP_WABA_ID and give WHATSAPP_ACCESS_TOKEN the ` +
+            `whatsapp_business_management scope, then use Preview to compare the approved body ` +
+            `against the ${parameters.length} parameter${parameters.length === 1 ? "" : "s"} being sent.`,
+        }
+      : {}),
   };
 };
 
