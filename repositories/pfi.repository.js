@@ -135,15 +135,40 @@ const findAll = async ({ search, status, location, type, scopeUser, page = 1, li
   };
 };
 
+/**
+ * The batches a depot may sell from, for one product.
+ *
+ * Two ways to match, not one:
+ *
+ *   the batch lives here      `location_id` — a coastal cargo is sold out of
+ *                             the depot it landed at, which is how this has
+ *                             always worked
+ *   the batch is lent here    a delivery allocation is loaded at one depot
+ *                             and drawn on by others, so a depot on its
+ *                             allowlist may sell from it too
+ *
+ * Deliberately a widening rather than a restriction. Every batch that matched
+ * before still matches — the allowlist can only ADD, never subtract — so no
+ * order that places today can start failing because of this. A delivery batch
+ * whose locations nobody has set yet simply behaves like any other batch,
+ * sellable at the depot it was loaded at and nowhere else, which is the safe
+ * reading of an empty list rather than an unsellable one.
+ */
 const findActiveByDepotAndProduct = async (depotId, productId) => {
   return db
     .select()
     .from(pfis)
     .where(
       and(
-        eq(pfis.locationId, depotId),
         eq(pfis.productId, productId),
-        eq(pfis.status, "active")
+        eq(pfis.status, "active"),
+        or(
+          eq(pfis.locationId, depotId),
+          sql`EXISTS (
+            SELECT 1 FROM pfi_allowed_locations al
+             WHERE al.pfi_id = ${pfis.id} AND al.depot_id = ${depotId}
+          )`
+        )
       )
     )
     .orderBy(asc(pfis.createdAt));

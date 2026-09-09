@@ -101,8 +101,16 @@ const getPfiById = asyncHandler(async (req, res) => {
  * defaults to coastal, every existing row is coastal, and a client that has not
  * been taught about types yet must keep creating the kind it always did.
  */
-const normalisePfiType = (raw) =>
-  String(raw || "").trim().toLowerCase() === "gantry" ? "gantry" : "coastal";
+/**
+ * Anything unrecognised becomes 'coastal', which is what it did before and
+ * remains the safe default: it is the plainest kind of batch and enables no
+ * behaviour the others do not have.
+ */
+const PFI_TYPES = new Set(["coastal", "gantry", "delivery"]);
+const normalisePfiType = (raw) => {
+  const t = String(raw || "").trim().toLowerCase();
+  return PFI_TYPES.has(t) ? t : "coastal";
+};
 
 const createPfi = asyncHandler(async (req, res) => {
   const pfi_number = req.body.pfi_number || req.body.pfiNumber;
@@ -679,7 +687,78 @@ const assignOrdersToPfi = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * The depots that may sell from a batch.
+ *
+ * Empty is a real and common answer — a coastal cargo is sold out of the
+ * depot it landed at and has no list at all — so this returns [] rather than
+ * 404ing on a batch that simply is not a delivery allocation.
+ */
+const getPfiLocations = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+  res.json({ success: true, data: { locations: await pfiRepo.allowedDepots(pfi.id) } });
+});
+
+const setPfiLocations = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+
+  const ids = req.body.depotIds ?? req.body.depot_ids ?? req.body.allowedDepotIds ?? [];
+  await pfiRepo.setAllowedDepots(pfi.id, ids, req.user?.id ?? null);
+  const locations = await pfiRepo.allowedDepots(pfi.id);
+
+  res.json({
+    success: true,
+    message: locations.length
+      ? `${locations.length} location${locations.length === 1 ? "" : "s"} may sell from ${pfi.pfi_number}`
+      : `${pfi.pfi_number} is no longer restricted to particular locations`,
+    data: { locations },
+  });
+});
+
+const getPfiTrucks = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+
+  const trucks = await pfiRepo.trucksFor(pfi.id);
+  res.json({
+    success: true,
+    data: {
+      trucks,
+      // Returned rather than left to the client to add up, so the figure on
+      // screen and the figure the batch carries cannot drift apart.
+      loadedTotal: trucks.reduce((sum, t) => sum + Number(t.loadedQty || 0), 0),
+      capacityTotal: trucks.reduce((sum, t) => sum + Number(t.capacity || 0), 0),
+    },
+  });
+});
+
+/**
+ * Replace the manifest. The batch's quantity follows from it.
+ *
+ * See pfiRepo.setTrucks: the recompute happens in the same transaction, so a
+ * saved manifest and the batch quantity can never disagree.
+ */
+const setPfiTrucks = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+
+  const result = await pfiRepo.setTrucks(pfi.id, req.body.trucks || [], req.user?.id ?? null);
+  const trucks = await pfiRepo.trucksFor(pfi.id);
+
+  res.json({
+    success: true,
+    message: `${result.trucks} truck${result.trucks === 1 ? "" : "s"} on ${pfi.pfi_number} — ${result.quantity.toLocaleString()} loaded`,
+    data: { trucks, quantity: result.quantity },
+  });
+});
+
 module.exports = {
+  getPfiLocations,
+  setPfiLocations,
+  getPfiTrucks,
+  setPfiTrucks,
   getPfis,
   getPfiById,
   createPfi,

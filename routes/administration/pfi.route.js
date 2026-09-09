@@ -4,6 +4,10 @@ const verifyStaff = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const misc = require("../../schemas/misc.schema");
 const {
+  getPfiLocations,
+  setPfiLocations,
+  getPfiTrucks,
+  setPfiTrucks,
   getPfis,
   getPfiById,
   createPfi,
@@ -34,6 +38,18 @@ router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deletePfi
 router.post("/:id/start", verifyStaff, validate({ params: misc.idParam }), startPfi);
 router.post("/:id/finish", verifyStaff, validate({ params: misc.idParam }), finishPfi);
 router.get("/:id/summary", verifyStaff, validate({ params: misc.idParam }), getPfiSummary);
+// A delivery batch's two extra facts: where it may be sold, and what carried
+// it. Both no-ops on a coastal cargo, which has neither.
+router.get("/:id/locations", verifyStaff, validate({ params: misc.idParam }), getPfiLocations);
+router.put("/:id/locations", verifyStaff, validate({ params: misc.idParam }), setPfiLocations);
+router.get("/:id/trucks", verifyStaff, validate({ params: misc.idParam }), getPfiTrucks);
+router.put(
+  "/:id/trucks",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.setPfiTrucks }),
+  setPfiTrucks
+);
+
 router.get("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), getPfiExpenses);
 router.post("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), addPfiExpense);
 
