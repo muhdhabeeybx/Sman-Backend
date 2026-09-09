@@ -620,8 +620,20 @@ const pfiBase = {
   // Coastal batches arrive by sea and are billed on a BL; gantry batches are
   // an allocation bought at the loading gantry and split into tickets. Absent
   // means coastal — the only kind that existed before the distinction did.
-  pfiType: enumOf("PFI type", ["coastal", "gantry"]).optional(),
-  pfi_type: enumOf("PFI type", ["coastal", "gantry"]).optional(),
+  // 'delivery' is an allocation loaded at one depot and sold at several —
+  // see db/migrations/0027. It is a PFI in the same table, not a second thing.
+  pfiType: enumOf("PFI type", ["coastal", "gantry", "delivery"]).optional(),
+  pfi_type: enumOf("PFI type", ["coastal", "gantry", "delivery"]).optional(),
+
+  /**
+   * The depots that may sell from this batch. Delivery batches only.
+   *
+   * `locationId` above is where it is LOADED; this is everywhere it may be
+   * drawn on. A coastal batch is sold out of the depot it landed at, so the
+   * two are the same thing there and this is left empty.
+   */
+  allowedDepotIds: z.array(id("Depot")).max(50, "Too many locations").optional(),
+  allowed_depot_ids: z.array(id("Depot")).max(50, "Too many locations").optional(),
   ticketCount: optPfiBlQty("Number of tickets"),
   ticket_count: optPfiBlQty("Number of tickets"),
   description: optPfiStr("Description", 1000),
@@ -702,6 +714,28 @@ const pfiBase = {
   total_amount: optPfiMoney("Total amount"),
 };
 
+/**
+ * One truck on a delivery batch's manifest.
+ *
+ * `loadedQty` is what actually went on, not what the truck holds. That
+ * distinction is the whole point of the manifest: a batch built from
+ * capacities overstates itself on every truck that loaded short.
+ */
+const pfiTruck = z.object({
+  truckId: id("Truck").optional().nullable(),
+  truck_id: id("Truck").optional().nullable(),
+  plateNumber: optionalString("Plate number", 50),
+  plate_number: optionalString("Plate number", 50),
+  capacity: numberLike("Capacity").pipe(z.number().positive("Capacity must be greater than zero")).optional().nullable(),
+  loadedQty: numberLike("Loaded quantity").pipe(z.number().positive("A truck that loaded nothing is not on the manifest")),
+  loadedAt: optionalString("Loaded at", 40),
+  notes: optionalString("Notes", 500),
+});
+
+const setPfiTrucks = z.object({
+  trucks: z.array(pfiTruck).max(500, "Too many trucks in one manifest"),
+});
+
 const createPfi = z.object(pfiBase).refine(
   (d) => (d.pfiNumber && d.pfiNumber.length > 0) || (d.pfi_number && d.pfi_number.length > 0),
   { message: "PFI number is required", path: ["pfiNumber"] }
@@ -709,6 +743,7 @@ const createPfi = z.object(pfiBase).refine(
 const updatePfi = z.object(pfiBase);
 
 module.exports = {
+  setPfiTrucks,
   idParam,
   createProduct, updateProduct, listProducts,
   listTrucks,

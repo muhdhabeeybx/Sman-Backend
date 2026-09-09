@@ -224,7 +224,130 @@ const markFinishedIfComplete = async (pfiId, tx = db) => {
   return row || null;
 };
 
+/**
+ * Which depots may sell from a batch, and the trucks that carried it.
+ *
+ * Both are delivery-batch concerns. A coastal cargo is sold out of the depot
+ * it landed at and measured into a tank, so neither table has rows for one —
+ * an empty list here means "not a delivery batch", not "misconfigured".
+ */
+// postgres.js returns the rows array directly; the pg driver wraps them in
+// `.rows`. Both shapes appear across this codebase, so neither is assumed.
+const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
+
+const allowedDepots = async (pfiId) => {
+  const rows = rowsOf(await db.execute(sql`
+    SELECT d.id, d.name, d.city, d.state
+      FROM pfi_allowed_locations al
+      JOIN depots d ON d.id = al.depot_id
+     WHERE al.pfi_id = ${Number(pfiId)}
+     ORDER BY d.name ASC
+  `));
+  return rows;
+};
+
+/**
+ * Replace the allowlist wholesale.
+ *
+ * Wholesale rather than a diff: the page edits it as a set of checkboxes, and
+ * a diff would have to reconstruct what was ticked from what changed. Done in
+ * one transaction so a half-applied list cannot leave a batch sellable
+ * somewhere nobody chose.
+ */
+const setAllowedDepots = async (pfiId, depotIds, staffId = null) => {
+  const unique = [...new Set((depotIds || []).map(Number).filter(Boolean))];
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM pfi_allowed_locations WHERE pfi_id = ${Number(pfiId)}`);
+    for (const depotId of unique) {
+      await tx.execute(sql`
+        INSERT INTO pfi_allowed_locations (pfi_id, depot_id, created_by)
+        VALUES (${Number(pfiId)}, ${depotId}, ${staffId})
+        ON CONFLICT (pfi_id, depot_id) DO NOTHING
+      `);
+    }
+    return unique;
+  });
+};
+
+/** May this depot sell from this batch? */
+const depotMaySell = async (pfiId, depotId) => {
+  const rows = rowsOf(await db.execute(sql`
+    SELECT 1 FROM pfi_allowed_locations
+     WHERE pfi_id = ${Number(pfiId)} AND depot_id = ${Number(depotId)}
+     LIMIT 1
+  `));
+  return rows.length > 0;
+};
+
+const trucksFor = async (pfiId) => {
+  const rows = rowsOf(await db.execute(sql`
+    SELECT pt.id, pt.truck_id AS "truckId", pt.plate_number AS "plateNumber",
+           pt.capacity_litres AS "capacity", pt.loaded_qty_litres AS "loadedQty",
+           pt.loaded_at AS "loadedAt", pt.notes,
+           (pt.capacity_litres - pt.loaded_qty_litres) AS "shortBy"
+      FROM pfi_trucks pt
+     WHERE pt.pfi_id = ${Number(pfiId)}
+     ORDER BY pt.loaded_at ASC NULLS LAST, pt.id ASC
+  `));
+  return rows;
+};
+
+/**
+ * Replace the manifest, and rebuild the batch quantity from it.
+ *
+ * The recompute is the reason this is one function rather than two. A batch's
+ * quantity IS the sum of what its trucks actually loaded — that is what the
+ * desk means by "the quantities will come" — so a manifest saved without
+ * updating `starting_qty_litres` leaves the batch claiming a figure no truck
+ * supports, and every landing cost, sell-through and remaining-stock number
+ * derived from it is then wrong.
+ *
+ * Capacities are never summed. A 50,000 truck that took 47,300 carried
+ * 47,300; a batch built from capacity overstates itself on every truck that
+ * loaded short.
+ */
+const setTrucks = async (pfiId, trucks, staffId = null) => {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`DELETE FROM pfi_trucks WHERE pfi_id = ${Number(pfiId)}`);
+
+    let total = 0;
+    for (const t of trucks || []) {
+      const loaded = Number(t.loadedQty ?? t.loaded_qty ?? 0);
+      if (!Number.isFinite(loaded) || loaded <= 0) continue;
+      total += loaded;
+      await tx.execute(sql`
+        INSERT INTO pfi_trucks
+          (pfi_id, truck_id, plate_number, capacity_litres, loaded_qty_litres, loaded_at, notes, recorded_by)
+        VALUES (
+          ${Number(pfiId)},
+          ${t.truckId ?? t.truck_id ?? null},
+          ${String(t.plateNumber ?? t.plate_number ?? "").trim()},
+          ${t.capacity ?? null},
+          ${loaded},
+          ${t.loadedAt ?? t.loaded_at ?? null},
+          ${String(t.notes ?? "").trim()},
+          ${staffId}
+        )
+      `);
+    }
+
+    // Rounded to whole units: starting_qty_litres is an integer column, and a
+    // manifest of fractional loads must not silently truncate downward.
+    await tx.execute(sql`
+      UPDATE pfis SET starting_qty_litres = ${Math.round(total)}, updated_at = now()
+       WHERE id = ${Number(pfiId)}
+    `);
+
+    return { trucks: (trucks || []).length, quantity: Math.round(total) };
+  });
+};
+
 module.exports = {
+  allowedDepots,
+  setAllowedDepots,
+  depotMaySell,
+  trucksFor,
+  setTrucks,
   findById,
   findByNumber,
   findAll,
