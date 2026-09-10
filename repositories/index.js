@@ -19,6 +19,7 @@ module.exports = {
   orderRepo: require("./order.repository"),
   ticketRepo: require("./ticket.repository"),
   depositRepo: require("./deposit.repository"),
+  deliveryBatchRepo: require("./deliveryBatch.repository"),
   deliveryCustomerRepo: require("./deliveryCustomer.repository"),
   deliveryNoteRepo: require("./deliveryNote.repository"),
   deliveryInventoryRepo: require("./deliveryInventory.repository"),

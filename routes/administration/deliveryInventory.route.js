@@ -15,6 +15,21 @@ const {
   releaseAllocation,
   rejectAllocation,
 } = require("../../controllers/administration/deliveryRelease.controller");
+const {
+  getDeliveryBatchStatuses,
+  setDeliveryBatchStatus,
+} = require("../../controllers/administration/deliveryBatch.controller");
+
+/**
+ * Closing a batch, and reopening it.
+ *
+ * Above the /:id routes deliberately: "batches" would otherwise be read as an
+ * id by GET /:id and answer 404 for a request that is not about a row at all.
+ * A batch is a code and the loads under it, so the code is the identifier —
+ * see db/migrations/0028_delivery_batch_status.sql.
+ */
+router.get("/batches", verifyStaff, getDeliveryBatchStatuses);
+router.patch("/batches/:code", verifyStaff, setDeliveryBatchStatus);
 
 router.get("/", verifyStaff, validate({ query: misc.listInventory }), getDeliveryInventory);
 router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getDeliveryInventoryById);
