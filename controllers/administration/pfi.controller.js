@@ -137,10 +137,17 @@ const createPfi = asyncHandler(async (req, res) => {
   const pfi_type = normalisePfiType(req.body.pfi_type ?? req.body.pfiType);
   const ticket_count = req.body.ticket_count ?? req.body.ticketCount;
 
-  // A gantry batch has no shipping papers and no vessel. Dropping these here
-  // rather than trusting the client means a form that once sent them cannot
-  // leave a gantry row carrying a BL figure it will then be costed against.
-  const isGantry = pfi_type === "gantry";
+  // Neither a gantry batch nor a delivery batch has shipping papers or a
+  // vessel — one is bought at the loading gantry, the other loaded onto trucks
+  // at a depot. Dropping these here rather than trusting the client means a
+  // form that once sent them cannot leave such a row carrying a BL figure it
+  // will then be costed against.
+  //
+  // updatePfi and lib/pfiFinance both already treat the two the same way. This
+  // path did not, so a delivery batch could be CREATED with a BL that every
+  // later read then ignored — the row saying one thing and its own valuation
+  // another.
+  const isGantry = pfi_type === "gantry" || pfi_type === "delivery";
 
   if (!pfi_number) {
     return res.status(400).json({ success: false, message: "PFI number is required" });

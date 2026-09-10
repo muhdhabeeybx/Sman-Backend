@@ -80,13 +80,20 @@ const listPfis = pagination.extend({
     .optional()
     .or(z.literal("")),
   location: z.union([z.string(), z.number()]).transform((v) => String(v).trim()).optional().or(z.literal("")),
-  // Coastal and gantry batches now share one list and read nothing alike — a
-  // gantry row has no BL, no surplus and no vessel — so they need separating.
+  // Coastal, gantry and delivery batches share one list and read nothing alike
+  // — a gantry or delivery row has no BL, no surplus and no vessel — so they
+  // need separating.
+  //
+  // This list MUST accept every value pfiBase does. It did not when 'delivery'
+  // was added there: creating a delivery batch worked, and the tab that then
+  // listed them answered 400 before the query ran, because a filter the write
+  // side accepts and the read side rejects is not a validation rule, it is a
+  // batch nobody can look at.
   type: z
     .string()
     .trim()
     .toLowerCase()
-    .pipe(enumOf("Type", ["coastal", "gantry", "all"]))
+    .pipe(enumOf("Type", ["coastal", "gantry", "delivery", "all"]))
     .optional()
     .or(z.literal("")),
 });
