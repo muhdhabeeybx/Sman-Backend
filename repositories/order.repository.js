@@ -419,12 +419,17 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
       MIN(${customers.companyName})        AS "customerCompanyName",
       COUNT(*)::int                        AS "orderCount",
       COUNT(*) FILTER (
-        WHERE ROUND(${orders.totalAmount}::numeric - paid.received, 2) <> 0
+        WHERE ROUND(${orders.totalAmount}::numeric - (paid.received - fix.adj), 2) <> 0
       )::int                               AS "openOrderCount",
       COALESCE(SUM(${orders.totalAmount}::numeric), 0) AS "totalValue",
-      COALESCE(SUM(paid.received), 0)      AS "totalReceived",
-      COALESCE(SUM(GREATEST(0, paid.received - ${orders.totalAmount}::numeric)), 0) AS "overpaid",
-      COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - paid.received)), 0) AS "underpaid",
+      COALESCE(SUM(paid.received - fix.adj), 0) AS "totalReceived",
+      COALESCE(SUM(GREATEST(0, (paid.received - fix.adj) - ${orders.totalAmount}::numeric)), 0) AS "overpaid",
+      COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - (paid.received - fix.adj))), 0) AS "underpaid",
+      -- Stated, never silent. The report above is audited and still counts
+      -- these rows; this is exactly the gap between the two, so the block can
+      -- be reconciled to it line by line instead of merely disagreeing.
+      COALESCE(SUM(fix.adj), 0)            AS "duplicatesExcluded",
+      COUNT(*) FILTER (WHERE fix.adj > 0)::int AS "duplicateOrderCount",
       MAX(${orders.createdAt})             AS "lastOrderAt"
     FROM ${orders}
     LEFT JOIN ${customers} ON ${customers.id} = ${orders.customerId}
@@ -432,10 +437,55 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
     -- would multiply into three rows here and treble its own value in the
     -- SUMs. The same reason the payments above are fetched separately.
     CROSS JOIN LATERAL (
-      SELECT COALESCE(SUM(op.amount), 0)::numeric AS received
+      SELECT
+        COALESCE(SUM(op.amount), 0)::numeric AS received,
+        /**
+         * The same money written down twice by migration 0021.
+         *
+         * Where surplus was moved between orders in the wallet era, the
+         * migration gave the RECEIVING order both the transfer_in and a
+         * 'legacy' placeholder for the identical amount. Order 9531 is the
+         * shape of it: value 68,400,000, a transfer_in of 68,400,000 that
+         * settles it exactly, and a legacy 68,400,000 sitting beside it — so
+         * a fully settled order reads as 68.4m overpaid. Its source order
+         * 9518 is correct: legacy 125,400,000 less a transfer_out of
+         * 68,400,000 leaves exactly its own value.
+         *
+         * Matched on the amount, because that is the duplicate's signature.
+         */
+        COALESCE(SUM(op.amount) FILTER (
+          WHERE op.source = 'legacy' AND EXISTS (
+            SELECT 1 FROM order_payments k
+            WHERE k.order_id = op.order_id
+              AND k.source <> 'legacy'
+              AND k.amount::numeric = op.amount::numeric
+          )
+        ), 0)::numeric AS duplicate
       FROM order_payments op
       WHERE op.order_id = ${orders.id}
     ) paid
+    /**
+     * The guard, and the reason this is safe to apply without touching a row.
+     *
+     * An equal amount alone is not proof of duplication: order 11200 holds
+     * ₦177,000,000 against a ₦177,000,000 order and happens to carry a legacy
+     * 45,000 beside a statement 45,000. Both are real, the order is square,
+     * and dropping one would invent a shortfall.
+     *
+     * So a duplicate is only discounted when the order is overpaid AND
+     * removing it lands the order on EXACTLY its own value. That is
+     * self-proving — the remaining rows account for the order in full — and
+     * it can neither create a shortfall nor half-correct anything. Across the
+     * book it discounts 24 orders and leaves 11200 alone.
+     */
+    CROSS JOIN LATERAL (
+      SELECT CASE
+        WHEN paid.duplicate > 0
+         AND paid.received > ${orders.totalAmount}::numeric
+         AND ROUND(paid.received - paid.duplicate - ${orders.totalAmount}::numeric, 2) = 0
+        THEN paid.duplicate ELSE 0
+      END AS adj
+    ) fix
     WHERE ${inArray(orders.customerId, customerIds)}
       AND ${orders.paymentStatus} IN ('Paid', 'Part Paid')${scopeClause}
     GROUP BY ${orders.customerId}
@@ -459,6 +509,12 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
         overpaid,
         /** Money still owed across their orders. */
         underpaid,
+        /**
+         * Money the audited report still counts that this block does not,
+         * and on how many orders. Printed, so the two documents reconcile.
+         */
+        duplicatesExcluded: Number(r.duplicatesExcluded) || 0,
+        duplicateOrderCount: Number(r.duplicateOrderCount) || 0,
         /** Positive is owed to Soroman, negative is held for the customer. */
         net: underpaid - overpaid,
         lastOrderAt: r.lastOrderAt,
