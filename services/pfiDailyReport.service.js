@@ -147,11 +147,36 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            COALESCE(SUM(o.amount_paid::numeric), 0)            AS paid_all,
            COUNT(*)                    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}) AS orders_today,
            COALESCE(SUM(o.quantity)    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS litres_today,
-           COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today,
-           COALESCE(SUM(o.amount_paid::numeric)  FILTER (WHERE o.payment_confirmed_at >= ${startIso} AND o.payment_confirmed_at < ${endIso}), 0) AS paid_today
+           COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today
       FROM orders o
      WHERE o.pfi_id IS NOT NULL
        AND o.status NOT IN ('Cancelled', 'Expired')
+     GROUP BY o.pfi_id`;
+
+  /**
+   * What was collected today, from the payment rows themselves.
+   *
+   * NOT from orders.amount_paid. That column is the cumulative total on the
+   * order, and payment_confirmed_at marks only the FIRST payment and never
+   * moves after it — so filtering the cached total by that timestamp counts an
+   * order's entire payment history on the day its first instalment landed, and
+   * counts nothing at all on the days the rest arrived.
+   *
+   * It read as N9.7bn collected against N3.3bn sold, which is the kind of
+   * figure that makes a reader stop believing the page rather than query it.
+   *
+   * Dated on txn_date — when the money moved at the bank — falling back to the
+   * row's own creation for a payment recorded without one.
+   */
+  const collectionRows = await client`
+    SELECT o.pfi_id,
+           COALESCE(SUM(op.amount::numeric), 0) AS paid_today
+      FROM order_payments op
+      JOIN orders o ON o.id = op.order_id
+     WHERE o.pfi_id IS NOT NULL
+       AND o.status NOT IN ('Cancelled', 'Expired')
+       AND COALESCE(op.txn_date, op.created_at) >= ${startIso}
+       AND COALESCE(op.txn_date, op.created_at) <  ${endIso}
      GROUP BY o.pfi_id`;
 
   // ── Gate and gantry movements, from the truck's own timestamps ──────────
@@ -190,11 +215,13 @@ const buildPfiDailyReportData = async (date = new Date()) => {
 
   const byPfi = (rows) => new Map(rows.map((r) => [Number(r.pfi_id), r]));
   const orders = byPfi(orderRows);
+  const collections = byPfi(collectionRows);
   const trucks = byPfi(truckRows);
   const expenses = byPfi(expenseRows);
 
   const pfis = pfiRows.map((p) => {
     const o = orders.get(Number(p.id)) || {};
+    const collected = num((collections.get(Number(p.id)) || {}).paid_today);
     const t = trucks.get(Number(p.id)) || {};
     const e = expenses.get(Number(p.id)) || {};
 
@@ -219,7 +246,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       },
 
       orders: {
-        today: { count: Number(o.orders_today || 0), litres: num(o.litres_today), value: num(o.value_today), paid: num(o.paid_today) },
+        today: { count: Number(o.orders_today || 0), litres: num(o.litres_today), value: num(o.value_today), paid: collected },
         toDate: { count: Number(o.orders_all || 0), litres: num(o.litres_all), value: valueAll, paid: paidAll },
         outstanding: Math.max(0, valueAll - paidAll),
       },

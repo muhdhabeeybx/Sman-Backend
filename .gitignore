@@ -26,3 +26,6 @@ PR2_PLAN.md
 
 # Pre-repair table snapshots: production customer data, never committed.
 scripts/backups/
+
+# Local previews from scripts/send-pfi-report.js
+pfi-report-*.html

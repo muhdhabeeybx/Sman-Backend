@@ -9,6 +9,7 @@ const {
   layout,
 } = require("./templates/email");
 const { renderDailyReportEmail } = require("./templates/dailyReportEmail");
+const { renderPfiDailyReportEmail } = require("./templates/pfiDailyReportEmail");
 // SMS is written differently from email: plain sentences, nothing in brackets,
 // and N rather than ₦ so the body stays in GSM-7 and bills as one part rather
 // than two. Shared with services/sms.service.js — see templates/sms.js.
@@ -1749,6 +1750,29 @@ const CATALOG = {
     // numbers, and that is what "Download report" is for; the email is for
     // reading.
     email: (d) => renderDailyReportEmail(d),
+  },
+
+  /**
+   * The day's trading assembled per PFI rather than per depot.
+   *
+   * A separate type, not a replacement for `reports.daily`: the combined
+   * report is what the desk reads today, and swapping the format underneath
+   * it on the strength of an untested template is how a daily report gets
+   * distrusted. Both can run until this one has been read a few times.
+   *
+   * data comes from services/pfiDailyReport.service.js's
+   * buildPfiDailyReportData(): { reportDate, summary, pfis, truckSales }.
+   */
+  "reports.pfi_daily": {
+    audience: "staff",
+    category: "reports",
+    priority: "normal",
+    channels: EMAIL_ONLY,
+    title: (d) => `PFI Daily Report - ${formatDate(d.reportDate)}`,
+    body: (d) =>
+      `${d.summary?.activePfis ?? 0} active PFI(s), ${d.summary?.activeBatches ?? 0} truck-sales batch(es).`,
+    entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
+    email: (d) => renderPfiDailyReportEmail(d),
   },
 
   // ═══ Delivery / truck flow (SMS) ══════════════════════════════════════════
