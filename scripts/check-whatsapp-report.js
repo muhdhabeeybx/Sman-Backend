@@ -97,61 +97,102 @@ const graph = async (version, path, token, params = "") => {
 async function findTheRightWaba({ token, version, waba, phoneId, wantName }) {
   console.log("  looking for where that template and that phone number actually live…\n");
 
-  const dbg = await graph(version, "debug_token", token, `input_token=${encodeURIComponent(token)}`);
-  const scopes = dbg?.data?.granular_scopes || [];
-  const ids = [...new Set(scopes.flatMap((s) => s.target_ids || []))].filter(Boolean);
+  /**
+   * First, the question that needs no discovery: does the configured WABA own
+   * the number the bot sends from?
+   *
+   * If it does, the account is right and the template simply is not on it —
+   * which means it was built somewhere else, or never finished being created.
+   * That is a completely different instruction from "point at another WABA",
+   * and it is answerable with one call instead of an enumeration that a System
+   * User token may refuse to provide.
+   */
+  const nums = await graph(version, `${waba}/phone_numbers`, token, "limit=50");
+  if (nums) {
+    const rows = nums.data || [];
+    const owns = rows.some((n) => String(n.id) === String(phoneId));
+    console.log(`         numbers on WABA ${waba}: ${
+      rows.length ? rows.map((n) => `${n.display_phone_number || n.id}${String(n.id) === String(phoneId) ? " ←" : ""}`).join(", ") : "none"
+    }`);
 
-  if (!ids.length) {
-    console.log("         The token grants no WABA ids that can be listed, so the search stops here.");
-    console.log("         Open WhatsApp Manager, click the template, and read the WABA id from the URL.\n");
+    if (owns) {
+      console.log("");
+      console.log(`  →  this IS the right account — it owns the number the bot sends from.`);
+      console.log(`         So "${wantName}" was never created here. Whatever you built is on another`);
+      console.log(`         account, or was not submitted. Create it on THIS WABA (${waba}):`);
+      console.log("");
+      console.log(`           name      ${wantName}`);
+      console.log(`           category  Utility`);
+      console.log(`           body      3 variables — date, the one-line summary, the breakdown`);
+      console.log("");
+      console.log("         A template belongs to one WABA and cannot be shared, moved, or sent");
+      console.log("         by a number on a different account, so recreating it here is the fix.\n");
+      return;
+    }
+    console.log(`         …but not ${phoneId}, the number configured to send.\n`);
+  }
+
+  /**
+   * The configured WABA is not the sender's, so find the one that is.
+   *
+   * debug_token exposes granular scopes for user tokens; a System User token
+   * often returns none, so /me/businesses is tried after it rather than
+   * instead — between them they cover both token types.
+   */
+  const candidates = new Set();
+
+  const dbg = await graph(version, "debug_token", token, `input_token=${encodeURIComponent(token)}`);
+  for (const s of dbg?.data?.granular_scopes || []) for (const id of s.target_ids || []) candidates.add(id);
+
+  const businesses = await graph(version, "me/businesses", token, "limit=50");
+  for (const b of businesses?.data || []) {
+    for (const edge of ["owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"]) {
+      const owned = await graph(version, `${b.id}/${edge}`, token, "limit=50");
+      for (const w of owned?.data || []) candidates.add(w.id);
+    }
+  }
+  candidates.delete(waba);
+
+  if (!candidates.size) {
+    console.log("         The token will not list any other WABA, so the search stops here.");
+    console.log("         Read the id straight from Meta instead: WhatsApp Manager → Account tools →");
+    console.log("         Message templates, click the template, and the WABA id is in the URL.\n");
     return;
   }
 
   let ownsNumber = null;
   let ownsTemplate = null;
 
-  for (const id of ids) {
+  for (const id of candidates) {
     const info = await graph(version, id, token, "fields=id,name");
     const tpl = await graph(version, `${id}/message_templates`, token, "limit=100");
-    const nums = await graph(version, `${id}/phone_numbers`, token, "limit=50");
+    const n = await graph(version, `${id}/phone_numbers`, token, "limit=50");
 
     const names = (tpl?.data || []).map((t) => t.name);
-    const numbers = (nums?.data || []).map((n) => `${n.display_phone_number || n.id}`);
-    const hasNumber = (nums?.data || []).some((n) => String(n.id) === String(phoneId));
-    const hasTemplate = names.includes(wantName);
-
+    const hasNumber = (n?.data || []).some((x) => String(x.id) === String(phoneId));
     if (hasNumber) ownsNumber = id;
-    if (hasTemplate) ownsTemplate = id;
+    if (names.includes(wantName)) ownsTemplate = id;
 
-    console.log(`         WABA ${id}${info?.name ? `  (${info.name})` : ""}${id === waba ? "   ← currently configured" : ""}`);
+    console.log(`         WABA ${id}${info?.name ? `  (${info.name})` : ""}`);
     console.log(`           templates : ${names.length ? names.join(", ") : "none"}`);
-    console.log(`           numbers   : ${numbers.length ? numbers.join(", ") : "none"}${hasNumber ? "   ← the bot sends from here" : ""}`);
+    console.log(`           numbers   : ${(n?.data || []).map((x) => x.display_phone_number || x.id).join(", ") || "none"}${hasNumber ? "   ← the bot sends from here" : ""}`);
     console.log("");
   }
 
   if (ownsTemplate && ownsNumber && ownsTemplate === ownsNumber) {
     console.log(`  ✅ fix:  WHATSAPP_WABA_ID = ${ownsTemplate}`);
     console.log(`          That account owns both "${wantName}" and the sending number.\n`);
-    return;
-  }
-
-  if (ownsTemplate && ownsNumber) {
+  } else if (ownsTemplate && ownsNumber) {
     console.log(`  ⚠  "${wantName}" is on WABA ${ownsTemplate}, but the bot sends from WABA ${ownsNumber}.`);
-    console.log("         Meta will not let a number send a template owned by another account, so");
-    console.log("         changing WHATSAPP_WABA_ID cannot fix this on its own — the template has to");
-    console.log(`         be created on ${ownsNumber}, the account the number belongs to.\n`);
-    return;
-  }
-
-  if (ownsNumber) {
+    console.log("         Meta will not let a number send a template owned by another account, so no");
+    console.log(`         env var fixes this — the template has to be created on ${ownsNumber}.\n`);
+  } else if (ownsNumber) {
     console.log(`  →  the bot sends from WABA ${ownsNumber}, and "${wantName}" is not on it.`);
     console.log(`         Set WHATSAPP_WABA_ID = ${ownsNumber} and create the template there.\n`);
-    return;
+  } else {
+    console.log(`  →  no WABA the token can see owns phone number id ${phoneId}.`);
+    console.log("         Read the id from WhatsApp Manager: click the template, it is in the URL.\n");
   }
-
-  console.log(`  →  none of the token's WABAs owns phone number id ${phoneId}.`);
-  console.log("         The token and the sending number belong to different businesses; that is the");
-  console.log("         thing to reconcile before any template will help.\n");
 }
 
 async function main() {
