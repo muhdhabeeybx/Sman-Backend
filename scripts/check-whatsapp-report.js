@@ -71,6 +71,89 @@ const SHAPES = {
 const countPlaceholders = (text) =>
   new Set((String(text || "").match(/\{\{\s*\d+\s*\}\}/g) || []).map((m) => m.replace(/\D/g, ""))).size;
 
+/**
+ * The template is missing here — so where is it, and where does the bot send from?
+ *
+ * "No template by that name" is true and useless on its own: the next question
+ * is always which WhatsApp Business Account to point at instead, and that is
+ * not something anybody can read off the Meta UI without knowing where to look.
+ * The token knows. debug_token lists the WABAs it was granted, so the candidates
+ * are enumerable rather than guessable.
+ *
+ * Two facts settle it. The WABA that owns WHATSAPP_PHONE_NUMBER_ID is the one
+ * the bot actually sends from; the WABA that owns the template is where the
+ * template was built. They must be the SAME account — Meta will not let a
+ * number send a template belonging to another WABA — so if they differ, the
+ * template was built in the wrong place and no env var can fix it.
+ */
+const graph = async (version, path, token, params = "") => {
+  const res = await fetch(`https://graph.facebook.com/${version}/${path}?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  return json.error ? null : json;
+};
+
+async function findTheRightWaba({ token, version, waba, phoneId, wantName }) {
+  console.log("  looking for where that template and that phone number actually live…\n");
+
+  const dbg = await graph(version, "debug_token", token, `input_token=${encodeURIComponent(token)}`);
+  const scopes = dbg?.data?.granular_scopes || [];
+  const ids = [...new Set(scopes.flatMap((s) => s.target_ids || []))].filter(Boolean);
+
+  if (!ids.length) {
+    console.log("         The token grants no WABA ids that can be listed, so the search stops here.");
+    console.log("         Open WhatsApp Manager, click the template, and read the WABA id from the URL.\n");
+    return;
+  }
+
+  let ownsNumber = null;
+  let ownsTemplate = null;
+
+  for (const id of ids) {
+    const info = await graph(version, id, token, "fields=id,name");
+    const tpl = await graph(version, `${id}/message_templates`, token, "limit=100");
+    const nums = await graph(version, `${id}/phone_numbers`, token, "limit=50");
+
+    const names = (tpl?.data || []).map((t) => t.name);
+    const numbers = (nums?.data || []).map((n) => `${n.display_phone_number || n.id}`);
+    const hasNumber = (nums?.data || []).some((n) => String(n.id) === String(phoneId));
+    const hasTemplate = names.includes(wantName);
+
+    if (hasNumber) ownsNumber = id;
+    if (hasTemplate) ownsTemplate = id;
+
+    console.log(`         WABA ${id}${info?.name ? `  (${info.name})` : ""}${id === waba ? "   ← currently configured" : ""}`);
+    console.log(`           templates : ${names.length ? names.join(", ") : "none"}`);
+    console.log(`           numbers   : ${numbers.length ? numbers.join(", ") : "none"}${hasNumber ? "   ← the bot sends from here" : ""}`);
+    console.log("");
+  }
+
+  if (ownsTemplate && ownsNumber && ownsTemplate === ownsNumber) {
+    console.log(`  ✅ fix:  WHATSAPP_WABA_ID = ${ownsTemplate}`);
+    console.log(`          That account owns both "${wantName}" and the sending number.\n`);
+    return;
+  }
+
+  if (ownsTemplate && ownsNumber) {
+    console.log(`  ⚠  "${wantName}" is on WABA ${ownsTemplate}, but the bot sends from WABA ${ownsNumber}.`);
+    console.log("         Meta will not let a number send a template owned by another account, so");
+    console.log("         changing WHATSAPP_WABA_ID cannot fix this on its own — the template has to");
+    console.log(`         be created on ${ownsNumber}, the account the number belongs to.\n`);
+    return;
+  }
+
+  if (ownsNumber) {
+    console.log(`  →  the bot sends from WABA ${ownsNumber}, and "${wantName}" is not on it.`);
+    console.log(`         Set WHATSAPP_WABA_ID = ${ownsNumber} and create the template there.\n`);
+    return;
+  }
+
+  console.log(`  →  none of the token's WABAs owns phone number id ${phoneId}.`);
+  console.log("         The token and the sending number belong to different businesses; that is the");
+  console.log("         thing to reconcile before any template will help.\n");
+}
+
 async function main() {
   const token = clean(process.env.WHATSAPP_ACCESS_TOKEN);
   const waba = clean(process.env.WHATSAPP_WABA_ID);
@@ -155,6 +238,7 @@ async function main() {
     console.log("  [FAIL] this WABA has no message templates at all.");
     console.log("         If you created one, it was created on a DIFFERENT WhatsApp Business");
     console.log(`         Account than ${waba}. That is the commonest version of this problem.\n`);
+    await findTheRightWaba({ token, version, waba, phoneId, wantName });
     process.exitCode = 1;
     return;
   }
@@ -174,6 +258,7 @@ async function main() {
     console.log(`  [FAIL] no template named "${wantName}" on this account.`);
     console.log(`         Either rename it in Meta to "${wantName}", or set`);
     console.log(`         WHATSAPP_REPORT_TEMPLATE to one of the names listed above.\n`);
+    await findTheRightWaba({ token, version, waba, phoneId, wantName });
     process.exitCode = 1;
     return;
   }
