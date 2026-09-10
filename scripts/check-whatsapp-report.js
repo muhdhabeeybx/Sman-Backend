@@ -40,7 +40,33 @@ const fingerprint = (v) => {
 
 /** Mirrors services/whatsappReport.service.js — keep the two in step. */
 const DEFAULT_PARAMS = ["date", "litres", "value", "orders", "locations"];
-const ALL_FIELDS = ["date", "litres", "value", "orders", "locationCount", "locations", "trend", "summary"];
+
+/** What each field puts in a parameter, so a body can be mapped by reading. */
+const FIELDS = {
+  date: "8 September 2026",
+  litres: "6,287,366L",
+  value: "₦7,983,674,013",
+  orders: "33",
+  locationCount: "5",
+  headline: "6,287,366L sold · ₦7,983,674,013 · 33 orders across 5 locations",
+  locations: "CALABAR: 2,131,000L / ₦2,708,440,000 · WARRI: 769,000L / ₦980,475,000 · …",
+  trend: "12% up on 2026-09-07 (₦7,120,000,000)",
+  summary: "the whole message on one line — do not pair it with `locations`, it already contains them",
+};
+const ALL_FIELDS = Object.keys(FIELDS);
+
+/**
+ * Bindings for the template shapes actually in use.
+ *
+ * Suggesting the first N of the five-field default instead would hand back
+ * `date,litres,value` for a three-variable body — the right count and the
+ * wrong meanings, which is worse than no suggestion because it looks correct.
+ */
+const SHAPES = {
+  3: ["date", "headline", "locations"],
+  4: ["date", "headline", "locations", "trend"],
+  5: ["date", "litres", "value", "orders", "locations"],
+};
 
 const countPlaceholders = (text) =>
   new Set((String(text || "").match(/\{\{\s*\d+\s*\}\}/g) || []).map((m) => m.replace(/\D/g, ""))).size;
@@ -199,8 +225,14 @@ async function main() {
   if (expects !== params.length) {
     console.log(`  [FAIL] the approved body takes ${expects} parameter${expects === 1 ? "" : "s"}, this sends ${params.length}.`);
     console.log(`         Meta rejects the whole message with error 132000 and does not say what it wanted.`);
-    console.log(`\n         fix:  WHATSAPP_REPORT_TEMPLATE_PARAMS = ${DEFAULT_PARAMS.slice(0, expects).join(",")}`);
-    console.log(`         (${expects} of: ${ALL_FIELDS.join(", ")} — in the order the body uses them)`);
+    if (SHAPES[expects]) {
+      console.log(`\n         fix:  WHATSAPP_REPORT_TEMPLATE_PARAMS = ${SHAPES[expects].join(",")}`);
+    }
+    console.log(`\n         Read the body above and pick ${expects} field${expects === 1 ? "" : "s"}, in the order its`);
+    console.log(`         {{n}} appear. Each produces one line:\n`);
+    for (const [name, sample] of Object.entries(FIELDS)) {
+      console.log(`           ${name.padEnd(14)} ${sample}`);
+    }
     failed = true;
   }
 

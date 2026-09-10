@@ -136,6 +136,18 @@ const buildReportFields = (data) => {
     value: money(totals.amountNaira),
     orders: String(totals.orderCount),
     locationCount: String(traded.length),
+    /**
+     * The day in one line: volume, value, orders, spread.
+     *
+     * A three-variable template — date, this, then the breakdown — is the
+     * shape that actually got approved, and it cannot be built from the
+     * pieces above because a template parameter is one value, not four.
+     * `summary` is no substitute: it is the whole message, so pairing it
+     * with `locations` prints every depot twice.
+     */
+    headline: `${litres(totals.qtyLitres)} sold · ${money(totals.amountNaira)} · ${totals.orderCount} order${
+      totals.orderCount === 1 ? "" : "s"
+    } across ${traded.length} location${traded.length === 1 ? "" : "s"}`,
     /** Every trading location on one line, since a template cannot take many. */
     locations: traded.length
       ? traded.map((l) => `${l.name}: ${litres(l.orderLitres)} / ${money(l.orderValue)}`).join(" · ")
