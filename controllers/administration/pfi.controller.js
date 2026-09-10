@@ -288,7 +288,9 @@ const updatePfi = asyncHandler(async (req, res) => {
   const pfiType = rawType !== undefined ? normalisePfiType(rawType) : pfi.pfiType;
   if (rawType !== undefined) updateData.pfiType = pfiType;
 
-  if (pfiType === "gantry") {
+  // A delivery batch is loaded onto trucks at a depot, so it has no vessel and
+  // no BL either — the same facts stop applying as for gantry.
+  if (pfiType === "gantry" || pfiType === "delivery") {
     Object.assign(updateData, {
       blQtyLitres: null,
       blQtyMt: null,
@@ -298,8 +300,14 @@ const updatePfi = asyncHandler(async (req, res) => {
       surveyorName: "",
       surveyorPhone: "",
     });
-  } else if (rawType !== undefined) {
-    // Coming back the other way, the ticket count is the gantry-only fact.
+  }
+
+  // Only coastal has no count of its own. `ticket_count` holds the gantry
+  // ticket count and the delivery truck count — the same fact in both cases,
+  // how many units the allocation was split into — so clearing it for
+  // everything that is not gantry wiped the truck count off a delivery batch
+  // on every edit.
+  if (rawType !== undefined && pfiType === "coastal") {
     updateData.ticketCount = null;
   }
 
