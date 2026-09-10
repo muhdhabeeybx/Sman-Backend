@@ -369,6 +369,109 @@ const findAll = async ({
 };
 
 /**
+ * Where each of these customers stands overall — the whole book, not the
+ * window the report is filtered to.
+ *
+ * The report answers "what happened in this period". It cannot answer the
+ * question the desk asks straight afterwards: this customer overpaid on that
+ * PFI in August, is that money still sitting there or has it been used? A
+ * period-scoped figure cannot say, because the order that consumed the
+ * surplus is usually outside the period.
+ *
+ * So this is deliberately date-free and filter-free: every order the customer
+ * has ever had money on, whatever PFI, depot or product it was for. One
+ * number per customer that means the same thing on every report.
+ *
+ * ── Why it moves on its own ────────────────────────────────────────────────
+ *
+ * `received` here is every payment row on the order, transfer legs included
+ * and signed — the same sum `balance` uses on the rows above. So when the
+ * desk moves surplus off order A onto order B, A's overpayment and B's
+ * shortfall both fall out of these totals in the same instant, with nothing
+ * to recompute or re-run. The figure tracks the transfers by construction.
+ *
+ * ── Why over and under are not netted ──────────────────────────────────────
+ *
+ * A customer ₦5m over on one order and ₦5m under on another is two problems,
+ * not zero problems — the same reasoning as `totalSurplus`/`totalShortfall`
+ * in the totals query. Both are returned, plus the net, and the report prints
+ * all three so netting is the reader's choice rather than the query's.
+ *
+ * Only orders money has actually landed on count (Paid and Part Paid), which
+ * is this report's own meaning of a payment throughout. An untouched Unpaid
+ * order is not an underpayment, it is an order awaiting payment, and counting
+ * its full value here would bury the real differentials under the order book.
+ *
+ * Scoped the same way as the rest of the report: a depot- or PFI-scoped user
+ * sees these customers' position across what they are allowed to see, and a
+ * full-access finance user — who this block is for — sees the whole book.
+ */
+const findCustomerDifferentials = async (customerIds, scopeUser) => {
+  if (!customerIds.length) return [];
+
+  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scopeClause = scope ? sql` AND ${scope}` : sql``;
+
+  const result = await db.execute(sql`
+    SELECT
+      ${orders.customerId}                 AS "customerId",
+      MIN(${customers.name})               AS "customerName",
+      MIN(${customers.companyName})        AS "customerCompanyName",
+      COUNT(*)::int                        AS "orderCount",
+      COUNT(*) FILTER (
+        WHERE ROUND(${orders.totalAmount}::numeric - paid.received, 2) <> 0
+      )::int                               AS "openOrderCount",
+      COALESCE(SUM(${orders.totalAmount}::numeric), 0) AS "totalValue",
+      COALESCE(SUM(paid.received), 0)      AS "totalReceived",
+      COALESCE(SUM(GREATEST(0, paid.received - ${orders.totalAmount}::numeric)), 0) AS "overpaid",
+      COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - paid.received)), 0) AS "underpaid",
+      MAX(${orders.createdAt})             AS "lastOrderAt"
+    FROM ${orders}
+    LEFT JOIN ${customers} ON ${customers.id} = ${orders.customerId}
+    -- One subquery per order rather than a join: an order with three payments
+    -- would multiply into three rows here and treble its own value in the
+    -- SUMs. The same reason the payments above are fetched separately.
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(SUM(op.amount), 0)::numeric AS received
+      FROM order_payments op
+      WHERE op.order_id = ${orders.id}
+    ) paid
+    WHERE ${inArray(orders.customerId, customerIds)}
+      AND ${orders.paymentStatus} IN ('Paid', 'Part Paid')${scopeClause}
+    GROUP BY ${orders.customerId}
+  `);
+
+  return (result.rows ?? result)
+    .map((r) => {
+      const overpaid = Number(r.overpaid) || 0;
+      const underpaid = Number(r.underpaid) || 0;
+      return {
+        customerId: Number(r.customerId),
+        customerName: r.customerName || "",
+        customerCompanyName: r.customerCompanyName || "",
+        /** Every order of theirs money has landed on, all time. */
+        orderCount: Number(r.orderCount) || 0,
+        /** Of those, how many are still out of balance either way. */
+        openOrderCount: Number(r.openOrderCount) || 0,
+        totalValue: Number(r.totalValue) || 0,
+        totalReceived: Number(r.totalReceived) || 0,
+        /** Money of theirs sitting on orders beyond what those orders cost. */
+        overpaid,
+        /** Money still owed across their orders. */
+        underpaid,
+        /** Positive is owed to Soroman, negative is held for the customer. */
+        net: underpaid - overpaid,
+        lastOrderAt: r.lastOrderAt,
+      };
+    })
+    // A customer square on every order has nothing to report. Tested on the
+    // two sides rather than the net, so somebody ₦5m over and ₦5m under still
+    // appears — netting them to zero is what would hide both.
+    .filter((c) => c.overpaid + c.underpaid >= 0.005)
+    .sort((a, b) => Math.abs(b.net) - Math.abs(a.net) || b.overpaid + b.underpaid - (a.overpaid + a.underpaid));
+};
+
+/**
  * Every confirmed payment, order by order, exactly as the bank statement has
  * it.
  *
@@ -869,11 +972,23 @@ const findFinanceReport = async ({
     };
   });
 
+  /**
+   * The all-time position of the customers on this report — see
+   * findCustomerDifferentials. Only the customers actually listed above, so
+   * the block stays about the report it sits under and a day's report names a
+   * handful of people rather than the whole customer book.
+   */
+  const customerDifferentials = await findCustomerDifferentials(
+    [...new Set(rows.map((r) => r.customerId).filter((id) => id != null))],
+    scopeUser,
+  );
+
   const total = Number(totalsRow.total) || 0;
   const reconciledCount = Number(totalsRow.reconciledCount) || 0;
 
   return {
     orders: decorated.map(formatOrderRow),
+    customerDifferentials,
     totals: {
       count: total,
       totalAmount: Number(totalsRow.totalAmount),
