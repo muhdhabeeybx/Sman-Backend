@@ -1,7 +1,6 @@
 const asyncHandler = require("express-async-handler");
-const { inArray } = require("drizzle-orm");
+const { sql } = require("drizzle-orm");
 const { db } = require("../../config/db");
-const { pfis } = require("../../db/schema");
 const { bankAccountRepo } = require("../../repositories");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
@@ -29,21 +28,45 @@ const getBankAccountById = asyncHandler(async (req, res) => {
 
 
 /**
- * The locations the chosen PFIs sit in.
+ * Every location the chosen PFIs can be sold from.
  *
  * depot_ids is no longer picked by hand — a location is what the assigned
  * PFIs imply. Deriving it on every save keeps everything still reading it (the
  * subaccount lookup, staff scope, the accounts list) working, and makes it
  * impossible for the two to disagree.
+ *
+ * ── Where a batch is sold, not where it sits ──────────────────────────────
+ *
+ * This read `location_id` alone, which is the whole answer for a coastal or
+ * gantry batch: it is sold out of the depot it sits in. A delivery batch is
+ * loaded at one depot precisely so it can be sold at others, and the account
+ * the customer pays into is resolved by depot (order.service's
+ * findAll({ depotId })) — so an account assigned to a delivery batch covered
+ * only the depot it loaded at, and an order placed at any location on that
+ * batch's allowlist found no payment account and was refused.
+ *
+ * UNION, not two lists appended: a batch may be lent to the depot it was
+ * loaded at, and depot_ids is a set.
  */
 async function depotsForPfis(pfiIds) {
   const ids = (Array.isArray(pfiIds) ? pfiIds : []).map(Number).filter((n) => !Number.isNaN(n));
   if (!ids.length) return { pfiIds: [], depotIds: [] };
-  const rows = await db
-    .select({ locationId: pfis.locationId })
-    .from(pfis)
-    .where(inArray(pfis.id, ids));
-  const depotIds = [...new Set(rows.map((r) => r.locationId).filter((v) => v != null))];
+  // An IN list built with sql.join, not ANY($1): drizzle binds a JS array as
+  // one parameter per element, so `ANY(${ids})` compiles to ANY(($1)) with a
+  // scalar and the query fails outright.
+  const idList = sql`(${sql.join(ids.map((n) => sql`${n}`), sql`, `)})`;
+  const result = await db.execute(sql`
+    SELECT DISTINCT reach.depot_id AS "depotId"
+      FROM (
+             SELECT location_id AS depot_id FROM pfis
+              WHERE id IN ${idList} AND location_id IS NOT NULL
+             UNION
+             SELECT depot_id FROM pfi_allowed_locations
+              WHERE pfi_id IN ${idList}
+           ) reach
+  `);
+  const rows = result.rows ?? result;
+  const depotIds = [...new Set(rows.map((r) => Number(r.depotId)).filter((v) => !Number.isNaN(v)))];
   return { pfiIds: ids, depotIds };
 }
 

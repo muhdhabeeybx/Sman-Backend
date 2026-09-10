@@ -192,7 +192,53 @@ const bankAccountRepo = {
 
     if (depotId) {
       const targetId = Number(depotId);
-      results = results.filter((acc) => acc.depotIds.includes(targetId));
+      /**
+       * Two ways an account covers a depot, and the second is resolved live.
+       *
+       * `depot_ids` is derived from the assigned PFIs, but only at the moment
+       * an account is saved (see depotsForPfis). Editing a delivery batch's
+       * allowlist afterwards does not touch any account, so the derived column
+       * goes stale the moment a batch is lent somewhere new — and the thing it
+       * silently breaks is an order at that location finding no payment
+       * account. Asking the allowlist directly here cannot go stale.
+       *
+       * The derived column is still what the accounts list and staff scope
+       * read, so both halves are kept: this is a widening of the match, not a
+       * replacement for the derivation.
+       */
+      let lentIds = new Set();
+      try {
+        const lent = await client`
+          SELECT ba.id
+            FROM bank_accounts ba
+           WHERE EXISTS (
+                   SELECT 1
+                     FROM pfi_allowed_locations al
+                    WHERE al.depot_id = ${targetId}
+                      AND EXISTS (
+                            -- Compared as text, and guarded against a pfi_ids
+                            -- that is not an array: 15 accounts held depot_ids
+                            -- as a stringified array once (migration 0012),
+                            -- and nothing stops the same happening here.
+                            SELECT 1 FROM jsonb_array_elements_text(
+                              CASE WHEN jsonb_typeof(ba.pfi_ids) = 'array'
+                                   THEN ba.pfi_ids ELSE '[]'::jsonb END
+                            ) AS e(v)
+                             WHERE e.v = al.pfi_id::text
+                          )
+                 )
+        `;
+        lentIds = new Set(lent.map((r) => Number(r.id)));
+      } catch (e) {
+        // A missing pfi_allowed_locations (migration 0027 not yet applied)
+        // must not take the payment-account lookup down with it. Falling back
+        // to the derived column is exactly the old behaviour.
+        console.error("Failed to resolve lent batches for depot lookup:", e.message);
+      }
+
+      results = results.filter(
+        (acc) => acc.depotIds.includes(targetId) || lentIds.has(Number(acc.id)),
+      );
     }
 
     // An area asking for its own accounts gets only the ones tagged for it.
