@@ -3,6 +3,7 @@ const {
   serial,
   integer,
   decimal,
+  text,
   timestamp,
   index,
   check,
@@ -37,6 +38,18 @@ const commissions = pgTable(
     status: commissionStatusEnum("status").default("pending").notNull(),
     paidAt: timestamp("paid_at", { withTimezone: true }),
     paidBy: integer("paid_by").references(() => staff.id, { onDelete: "set null" }),
+    /**
+     * The second exit: settled without paying anybody.
+     *
+     * Some orders carry no commission — a flat-rate deal, a correction, a
+     * facilitator paid another way — and before this those rows sat pending
+     * forever, so "pending" meant both "still to pay" and "never going to be"
+     * with no way to tell them apart. Its own timestamp and actor rather than
+     * borrowing paid_at/paid_by, because a skipped commission was never paid.
+     */
+    skippedAt: timestamp("skipped_at", { withTimezone: true }),
+    skippedBy: integer("skipped_by").references(() => staff.id, { onDelete: "set null" }),
+    skipReason: text("skip_reason").default("").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

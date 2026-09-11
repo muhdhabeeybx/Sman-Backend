@@ -173,6 +173,10 @@ const findAll = async ({
         paidAt: commissions.paidAt,
         paidBy: commissions.paidBy,
         paidByName: sql`CONCAT(${staff.firstName}, ' ', ${staff.surname})`,
+        // A skipped row has to be able to say who decided and why, or the
+        // status is just an unexplained dead end on the page.
+        skippedAt: commissions.skippedAt,
+        skipReason: commissions.skipReason,
         createdAt: commissions.createdAt,
       })
       .from(commissions)
@@ -252,6 +256,8 @@ const findById = async (id) => {
       status: commissions.status,
       paidAt: commissions.paidAt,
       paidBy: commissions.paidBy,
+      skippedAt: commissions.skippedAt,
+      skipReason: commissions.skipReason,
       createdAt: commissions.createdAt,
     })
     .from(commissions)
@@ -315,6 +321,29 @@ const markAsPaid = async (id, paidBy) => {
   return row || null;
 };
 
+/**
+ * Settle a commission without paying it.
+ *
+ * The counterpart to markAsPaid, and deliberately as small: no wallet credit,
+ * no deposit, nothing leaves. What it records is who decided and why, because
+ * "we do not pay commission on this one" is a decision somebody has to be able
+ * to stand behind months later.
+ */
+const markAsSkipped = async (id, skippedBy, reason = "") => {
+  const [row] = await db
+    .update(commissions)
+    .set({
+      status: "skipped",
+      skippedAt: new Date(),
+      skippedBy,
+      skipReason: reason,
+      updatedAt: new Date(),
+    })
+    .where(eq(commissions.id, id))
+    .returning();
+  return row || null;
+};
+
 const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   const conditions = [];
   if (depotId) conditions.push(eq(commissions.depotId, parseInt(depotId)));
@@ -355,5 +384,6 @@ module.exports = {
   create,
   update,
   markAsPaid,
+  markAsSkipped,
   getSummary,
 };

@@ -163,4 +163,63 @@ async function confirmPayment(commissionId, staffId) {
   return { commission: paid, deposit: creditResult.deposit };
 }
 
-module.exports = { createForOrder, confirmPayment };
+/**
+ * Settle a commission without paying it.
+ *
+ * No wallet credit and no deposit — that is the whole difference from
+ * confirmPayment, and it is why this one does not care whether the amount is
+ * zero. An order with no rate set is one of the cases somebody skips.
+ *
+ * A reason is required. The row outlives everyone's memory of the order, and
+ * "why was this not paid" is the only question it will ever be asked.
+ */
+async function skipCommission(commissionId, staffId, reason = "") {
+  const commission = await commissionRepo.findById(commissionId);
+  if (!commission) {
+    throw Object.assign(new Error("Commission not found"), { status: 404 });
+  }
+  if (commission.status === "paid") {
+    throw Object.assign(
+      new Error("Commission already paid — it cannot be skipped after the customer has been credited"),
+      { status: 400 },
+    );
+  }
+  if (commission.status === "skipped") {
+    throw Object.assign(new Error("Commission already skipped"), { status: 400 });
+  }
+
+  const trimmed = String(reason || "").trim();
+  if (trimmed.length < 3) {
+    throw Object.assign(new Error("Say why this order is being skipped"), { status: 400 });
+  }
+
+  const skipped = await commissionRepo.markAsSkipped(commissionId, staffId, trimmed.slice(0, 2000));
+  return { commission: skipped };
+}
+
+/**
+ * The same two acts over a selection.
+ *
+ * One at a time inside the loop rather than in one statement: confirming
+ * credits a wallet, and a batch that half-succeeded needs to say how far it
+ * got rather than roll back money that has already moved. Each failure is
+ * collected with its reason so the desk can see which rows did not go and
+ * why, instead of a single "3 failed".
+ */
+async function resolveMany({ ids, action, reason = "", staffId }) {
+  const results = { done: [], failed: [] };
+
+  for (const id of ids) {
+    try {
+      if (action === "skip") await skipCommission(id, staffId, reason);
+      else await confirmPayment(id, staffId);
+      results.done.push(id);
+    } catch (err) {
+      results.failed.push({ id, message: err.message || "Failed" });
+    }
+  }
+
+  return results;
+}
+
+module.exports = { createForOrder, confirmPayment, skipCommission, resolveMany };

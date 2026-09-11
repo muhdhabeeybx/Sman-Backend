@@ -28,6 +28,45 @@ const confirmPayment = asyncHandler(async (req, res) => {
   });
 });
 
+const skipCommission = asyncHandler(async (req, res) => {
+  const result = await commissionService.skipCommission(
+    parseInt(req.params.id),
+    req.user.id,
+    req.body?.reason,
+  );
+  res.json({
+    success: true,
+    message: "Commission skipped — nobody was credited",
+    data: result,
+  });
+});
+
+/**
+ * Confirm or skip a selection in one request.
+ *
+ * Partial success is a real outcome and is reported as one: the rows that went
+ * through are named, and so is every row that did not, with the reason it gave.
+ * Answering 200 for "some of it worked" beats 500 for the same thing, which
+ * would leave the desk unable to tell which half landed.
+ */
+const bulkResolve = asyncHandler(async (req, res) => {
+  const { ids, action, reason } = req.body;
+
+  const results = await commissionService.resolveMany({
+    ids: ids.map((id) => parseInt(id)),
+    action,
+    reason,
+    staffId: req.user.id,
+  });
+
+  const verb = action === "skip" ? "skipped" : "confirmed";
+  const message = results.failed.length
+    ? `${results.done.length} ${verb}, ${results.failed.length} could not be`
+    : `${results.done.length} commission${results.done.length === 1 ? "" : "s"} ${verb}`;
+
+  res.json({ success: results.failed.length === 0, message, data: results });
+});
+
 const getSummary = asyncHandler(async (req, res) => {
   const { depotId, customerId, dateFrom, dateTo } = req.query;
   const summary = await commissionRepo.getSummary({ depotId, customerId, dateFrom, dateTo });
@@ -142,6 +181,8 @@ module.exports = {
   getCommissions,
   getCommissionById,
   confirmPayment,
+  skipCommission,
+  bulkResolve,
   getSummary,
   getRates,
   upsertRate,
