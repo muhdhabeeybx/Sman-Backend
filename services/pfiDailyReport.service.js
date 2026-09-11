@@ -232,6 +232,28 @@ const buildPfiDailyReportData = async (date = new Date()) => {
        AND o.status NOT IN ('Cancelled', 'Expired')
      GROUP BY o.pfi_id`;
 
+  /**
+   * Expenses that belong to no batch.
+   *
+   * 68 rows and N187m of them: administrative and general costs that are real
+   * money out and were invisible while this report only asked about pfi_id.
+   * Grouped by category, because "General Expenses" as one number answers
+   * nothing.
+   */
+  const generalExpenseRows = await client`
+    SELECT COALESCE(NULLIF(TRIM(c.name), ''), 'Uncategorised') AS category,
+           COUNT(*)                               AS entries_all,
+           COALESCE(SUM(e.amount::numeric), 0)    AS amount_all,
+           COALESCE(SUM(e.amount_paid::numeric), 0) AS paid_all,
+           COUNT(*)                            FILTER (WHERE e.expense_date >= ${startIso} AND e.expense_date < ${endIso}) AS entries_today,
+           COALESCE(SUM(e.amount::numeric)     FILTER (WHERE e.expense_date >= ${startIso} AND e.expense_date < ${endIso}), 0) AS amount_today
+      FROM pfi_expenses e
+      LEFT JOIN expense_categories c ON c.id = e.category_id
+     WHERE e.pfi_id IS NULL
+       AND e.deleted_at IS NULL
+     GROUP BY 1
+     ORDER BY 1`;
+
   const byPfi = (rows) => new Map(rows.map((r) => [Number(r.pfi_id), r]));
   const orders = byPfi(orderRows);
   const collections = byPfi(collectionRows);
@@ -463,12 +485,18 @@ const buildPfiDailyReportData = async (date = new Date()) => {
   }
 
   const truckSales = [...batches.values()]
+    // '(unassigned)' is sales whose allocation_code was never filled in. It is
+    // a data gap wearing the costume of a batch, and listing it invites the
+    // reader to treat it as one.
+    .filter((b) => b.code !== "(unassigned)")
     .map((b) => ({ ...b, balance: b.salesValue - b.fundsReceived }))
     .sort(byValue);
 
   const stations = liveRows
     .filter((r) => r.customerType === "filling_station")
-    .sort(byValue);
+    // Batch first, then station alphabetically: the batch is what a reader
+    // scans for, and within it the name is the only stable order there is.
+    .sort((a, b) => a.code.localeCompare(b.code) || a.party.localeCompare(b.party));
 
   const settled = dormant.reduce(
     (acc, r) => {
@@ -497,7 +525,12 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            trucks_entered, truck_count, status::text AS status, remarks
       FROM daily_reports
      WHERE report_date = ${dayStr}
-     ORDER BY report_type, location`;
+     -- report_type::text, not report_type: it is an enum, and a bare enum sorts
+     -- by declaration order, which put SECURITY GATE above IT COMPLIANCE and
+     -- looked like no order at all.
+     ORDER BY COALESCE(NULLIF(TRIM(pfi_number), ''), 'ZZZZ') ASC,
+              report_type::text ASC,
+              location ASC`;
 
   // ── One line for the top of the email ───────────────────────────────────
   const depotTotals = pfis.reduce(
@@ -514,17 +547,40 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     { ordersToday: 0, litresToday: 0, valueToday: 0, paidToday: 0, outstanding: 0, exitedToday: 0, expensesToday: 0 }
   );
 
-  const saleTotals = liveRows.reduce(
-    (acc, r) => {
-      acc.litresToday += r.litresToday;
-      acc.valueToday += r.salesValueToday;
-      acc.receivedToday += r.fundsReceivedToday;
-      acc.balance += r.balance;
-      acc.trucksToday += r.loadsToday;
-      return acc;
-    },
-    { litresToday: 0, valueToday: 0, receivedToday: 0, balance: 0, trucksToday: 0 }
-  );
+  /**
+   * The delivery half, split the way the report shows it.
+   *
+   * Kept apart so the summary's FUNDS RECEIVED can be checked against the
+   * tables underneath it rather than taken on trust: it is exactly depot
+   * collections + truck-sales payments + filling-station payments, all for
+   * this day only. A headline figure that cannot be reconciled with the rows
+   * below it is the fastest way to lose a reader.
+   *
+   * '(unassigned)' is excluded here as it is in the table — money against a
+   * batch nobody recorded is carried in `unassignedReceivedToday` instead of
+   * being quietly folded into a total it cannot be traced to.
+   */
+  const tally = (rows) =>
+    rows.reduce(
+      (acc, r) => {
+        acc.litresToday += r.litresToday;
+        acc.valueToday += r.salesValueToday;
+        acc.receivedToday += r.fundsReceivedToday;
+        acc.balance += r.balance;
+        acc.trucksToday += r.loadsToday;
+        return acc;
+      },
+      { litresToday: 0, valueToday: 0, receivedToday: 0, balance: 0, trucksToday: 0 }
+    );
+
+  const truckSaleRows = liveRows.filter((r) => r.customerType !== "filling_station" && r.code !== "(unassigned)");
+  const stationSaleRows = liveRows.filter((r) => r.customerType === "filling_station");
+  const unassignedRows = liveRows.filter((r) => r.code === "(unassigned)" && r.customerType !== "filling_station");
+
+  const truckTotals = tally(truckSaleRows);
+  const stationTotals = tally(stationSaleRows);
+  const saleTotals = tally([...truckSaleRows, ...stationSaleRows]);
+  const unassignedReceivedToday = tally(unassignedRows).receivedToday;
 
   return {
     reportDate: dayStr,
@@ -539,9 +595,21 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       balance: depotTotals.outstanding + saleTotals.balance,
       depot: depotTotals,
       delivery: saleTotals,
+      /** The three parts of FUNDS RECEIVED, so the headline can be checked. */
+      received: {
+        depot: depotTotals.paidToday,
+        truckSales: truckTotals.receivedToday,
+        stations: stationTotals.receivedToday,
+        unassigned: unassignedReceivedToday,
+      },
       settled,
     },
     pfis,
+    generalExpenses: generalExpenseRows.map((g) => ({
+      category: g.category,
+      today: { count: Number(g.entries_today || 0), amount: num(g.amount_today) },
+      toDate: { count: Number(g.entries_all || 0), amount: num(g.amount_all), paid: num(g.paid_all) },
+    })),
     truckSales,
     stations,
     staffEntries,

@@ -157,10 +157,36 @@ const renderPfiDailyReportEmail = (d) => {
         cell(m(Math.max(0, p.expenses.toDate.amount - p.expenses.toDate.paid)), { r: true, s: BALANCE_S }) +
         `</tr>`
       ));
-    if (expRows.length) {
-      out.push(section("Expenses", "by PFI"));
+    /**
+     * General expenses sit in the same table, under the batch rows.
+     *
+     * They are money out like any other, and a separate table would invite the
+     * reader to add the two up themselves. Labelled by category, because
+     * "General" as one number answers nothing.
+     */
+    const genRows = (d.generalExpenses || [])
+      .filter((g) => g.toDate.count > 0)
+      .map((g) => (
+        `<tr>` +
+        idCell(`GENERAL — ${g.category}`) +
+        cell(c0(g.today.count), { r: true }) +
+        cell(m(g.today.amount), { r: true }) +
+        cell(n0(g.toDate.count), { r: true }) +
+        cell(m(g.toDate.amount), { r: true }) +
+        cell(m(g.toDate.paid), { r: true, s: CREDIT_S }) +
+        cell(m(Math.max(0, g.toDate.amount - g.toDate.paid)), { r: true, s: BALANCE_S }) +
+        `</tr>`
+      ));
+
+    if (expRows.length || genRows.length) {
+      out.push(section("Expenses", "by PFI, then general"));
       out.push(
-        block(table(["PFI", "Entries today", "Amount today", "Entries to date", "Amount to date", "Amount paid", "Not yet paid"], expRows))
+        block(
+          table(
+            ["PFI / category", "Entries today", "Amount today", "Entries to date", "Amount to date", "Amount paid", "Not yet paid"],
+            [...expRows, ...genRows]
+          )
+        )
       );
     }
 
@@ -249,30 +275,6 @@ const renderPfiDailyReportEmail = (d) => {
             `</tr>`
           ))
         )
-      )
-    );
-  }
-
-  // Notes qualify figures already read rather than greeting the reader with
-  // doubt. A report that opens with its own caveats does not get read.
-  const notes = [];
-  for (const st of stations) {
-    if (!st.stockKnown && st.litres > 0) {
-      notes.push(
-        `${up(st.party)} (${up(st.code)}): ${st.allocatedLitres ? "more sold than allocated" : "sales with no allocation recorded"} — stock remaining cannot be stated.`
-      );
-    }
-  }
-  if (s.settled?.lines) {
-    notes.push(`${s.settled.lines} completed line(s) omitted: sold out with nothing owed.`);
-  }
-  if (notes.length) {
-    out.push(section("Data notes"));
-    out.push(
-      block(
-        `<div style="font-size:12px;color:${MUTED};line-height:1.7;">` +
-          notes.map((n) => `• ${escapeHtml(n)}`).join("<br>") +
-          `</div>`
       )
     );
   }
