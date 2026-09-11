@@ -56,7 +56,7 @@ const idCell = (text) => cell(`<strong>${escapeHtml(up(text))}</strong>`, { s: K
 
 const renderPfiDailyReportEmail = (d) => {
   const date = ordinalDate(d.reportDate);
-  const subject = `Soroman Daily Report — ${date}`;
+  const subject = `Soroman Daily Report for ${date}`;
   const s = d.summary || {};
   const out = [];
 
@@ -71,18 +71,12 @@ const renderPfiDailyReportEmail = (d) => {
   out.push(
     block(
       `${TABLE}` +
-        headRow(["Litres sold", "Sales value", "Funds received", "Balance"]) +
+        headRow(["Total Litres Sold Today", "Total Sales Value", "Total Revenue"]) +
         `<tr>` +
         cell(L(s.litresSold), { s: KEY_S }) +
         cell(m(s.salesValue), { r: true, s: CREDIT_S }) +
         cell(m(s.fundsReceived), { r: true, s: CREDIT_S }) +
-        cell(m(s.balance), { r: true, s: BALANCE_S }) +
-        `</tr></table>` +
-        `<div style="font-size:12px;color:${MUTED};padding-top:6px;">` +
-        `${s.activePfis || 0} ACTIVE PFI(S) · ${s.activeBatches || 0} TRUCK-SALES BATCH(ES) · ` +
-        `${s.activeStations || 0} FILLING STATION(S) · ${s.depot?.exitedToday || 0} TRUCK(S) EXITED` +
-        `<br>Funds received covers payments taken today against orders of any date.` +
-        `</div>`
+        `</tr></table>`
     )
   );
 
@@ -92,7 +86,7 @@ const renderPfiDailyReportEmail = (d) => {
     out.push(
       block(
         table(
-          ["PFI", "Type", "Location", "Opening stock", "Drawn", "Closing stock", "Orders", "Litres sold", "Sales value", "Funds received", "Balance"],
+          ["PFI", "Type", "Location", "Opening Stock", "Total Sold", "Closing Stock", "Orders", "Litres sold Today", "Sales value", "Revenue received", "Outstanding"],
           pfis.map((p) => {
             const t = p.orders.today;
             return (
@@ -133,11 +127,11 @@ const renderPfiDailyReportEmail = (d) => {
         );
       });
     if (moveRows.length) {
-      out.push(section("Gate and loading", "today unless stated"));
+      out.push(section("Exit Gate Report", "across locations"));
       out.push(
         block(
           table(
-            ["PFI", "Trucks entered", "Trucks loaded", "Trucks exited", "Litres out", "On site now", "Trucks to date", "Litres to date"],
+            ["PFI", "Trucks entered", "Trucks loaded", "Trucks exited", "Total Litres", "On site now", "Total Trucks Exited", "Total Litres Exited"],
             moveRows
           )
         )
@@ -179,11 +173,11 @@ const renderPfiDailyReportEmail = (d) => {
       ));
 
     if (expRows.length || genRows.length) {
-      out.push(section("Expenses", "by PFI, then general"));
+      out.push(section("Expenses", "Across all categories"));
       out.push(
         block(
           table(
-            ["PFI / category", "Entries today", "Amount today", "Entries to date", "Amount to date", "Amount paid", "Not yet paid"],
+            ["PFI/Category", "Requests today", "Amount Today", "Total Entries", "TotalAmount", "Amount Paid", "Not yet paid"],
             [...expRows, ...genRows]
           )
         )
@@ -261,7 +255,7 @@ const renderPfiDailyReportEmail = (d) => {
     out.push(
       block(
         table(
-          ["Role", "Location", "PFI", "Filed by", "Litres sold", "Sales value", "Amount paid", "Status"],
+          ["Role", "Location", "PFI", "Submitted by", "Litres sold", "Sales value", "Amount paid", "Status"],
           entries.map((e) => (
             `<tr>` +
             idCell(roleLabel(e.role)) +
@@ -286,8 +280,7 @@ const renderPfiDailyReportEmail = (d) => {
     "",
     `Litres sold      ${L(s.litresSold)}`,
     `Sales value      ${m(s.salesValue)}`,
-    `Funds received   ${m(s.fundsReceived)}`,
-    `Balance          ${m(s.balance)}`,
+    `Revenue          ${m(s.fundsReceived)}`,
     "",
     `${s.activePfis || 0} active PFI(s), ${s.activeBatches || 0} batch(es), ${s.activeStations || 0} station(s).`,
   ].join("\n");
