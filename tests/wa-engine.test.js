@@ -326,11 +326,20 @@ describe("MENU", () => {
     assert.equal(r.session.cart.deliveryType, "pickup");
   });
 
-  it("'reorder' with insufficient stock falls back to DEPOT with an apology", () => {
+  it("'reorder' no longer checks stock — it carries the cart forward", () => {
+    // Was: fell back to DEPOT "unavailable" whenever the last order exceeded
+    // stock, which on a depot with no active PFI (stock 0) meant always, and
+    // said the depot was unavailable when the depot was fine.
     const last = { ...LAST_ORDER, quantity: 999999 };
     const r = reduce(mkSession(STATES.MENU), lst("reorder"), baseCtx({ lastOrder: last }));
+    assert.notEqual(r.session.state, STATES.DEPOT);
+    assert.equal(r.session.cart.quantity, 999999);
+  });
+
+  it("'reorder' still falls back to DEPOT when the depot itself is gone", () => {
+    const last = { ...LAST_ORDER, depotId: 4242 };
+    const r = reduce(mkSession(STATES.MENU), lst("reorder"), baseCtx({ lastOrder: last }));
     assert.equal(r.session.state, STATES.DEPOT);
-    assert.deepEqual(kinds(r), [REPLY.TEXT, REPLY.LIST]);
   });
 
   it("garbage re-shows the menu and counts a failure", () => {
@@ -673,11 +682,14 @@ describe("QUANTITY", () => {
     assert.equal(r.session.state, STATES.QUANTITY);
   });
 
-  it("over stock: refused WITHOUT revealing how much we hold", () => {
+  it("a quantity above stock is accepted — the cap is gone", () => {
+    // Stock is no longer a bound here. It refused every quantity at a depot
+    // with no active PFI, where stock reads 0, and dead-ended the customer
+    // with copy that deliberately did not say why. MIN/MAX still apply, and
+    // release is still gated downstream where stock is actually reserved.
     const r = reduce(mkSession(STATES.QUANTITY, cart), txt("150000"), baseCtx());
-    assert.equal(r.session.state, STATES.QUANTITY);
-    assert.ok(!r.replies[0].body.includes("120,000"), "stock figure never leaves the building");
-    assert.deepEqual(buttonIds(r.replies[0]), ["changeDepot", "menu"]);
+    assert.equal(r.session.state, STATES.COMPANY);
+    assert.equal(r.session.cart.quantity, 150000);
   });
 
   it("declining via Change depot restarts at DEPOT", () => {
@@ -685,9 +697,8 @@ describe("QUANTITY", () => {
     assert.equal(r.session.state, STATES.DEPOT);
   });
 
-  it("typing a smaller number after the refusal just works", () => {
-    const refused = reduce(mkSession(STATES.QUANTITY, cart), txt("150000"), baseCtx());
-    const r = reduce(refused.session, txt("40000"), baseCtx());
+  it("a quantity under stock still works, unchanged", () => {
+    const r = reduce(mkSession(STATES.QUANTITY, cart), txt("40000"), baseCtx());
     assert.equal(r.session.state, STATES.COMPANY);
     assert.equal(r.session.cart.quantity, 40000);
   });
@@ -916,11 +927,26 @@ describe("CONFIRM", () => {
     assert.deepEqual(buttonIds(r.replies[0]), ["declare_trucks", "defer_trucks"]);
   });
 
-  it("confirming a cart whose stock shrank re-asks quantity, not a dead error", () => {
-    const cart = { ...fullPickupCart(), quantity: 999999999 };
-    const r = reduce(mkSession(STATES.CONFIRM, { ...cart, quantity: 200000 }), btn("confirm"), baseCtx());
-    assert.equal(r.session.state, STATES.QUANTITY);
-    assert.deepEqual(r.effects, []);
+  it("confirming a cart above stock places the order — no re-ask", () => {
+    // Was: bounced back to QUANTITY whenever the cart exceeded stock, which
+    // silently discarded a figure the customer had already given. Typed
+    // 'confirm' is used rather than a bare button so this tests the stock
+    // path and not the summary-fingerprint one, which still applies.
+    // Trucks are sized to the quantity (60,000 L each) so this exercises the
+    // stock path rather than tripping the truck-declaration check on the way.
+    const overStock = {
+      ...fullPickupCart(),
+      quantity: 150000,
+      truckCount: 3,
+      trucks: [
+        { quantity: 60000, plate: "ABC-123-XY" },
+        { quantity: 60000, plate: "ABC-124-XY" },
+        { quantity: 30000, plate: "ABC-125-XY" },
+      ],
+    };
+    const r = reduce(mkSession(STATES.CONFIRM, overStock), txt("confirm"), baseCtx());
+    assert.notEqual(r.session.state, STATES.QUANTITY);
+    assert.deepEqual(effectTypes(r), [EFFECTS.CREATE_ORDER]);
   });
 
   it("garbage re-shows the summary", () => {
@@ -1335,10 +1361,11 @@ describe("expired sessions", () => {
     assert.equal(r.session.cart.resumeState, undefined);
   });
 
-  it("'resume' revalidates: stock that shrank re-asks quantity", () => {
+  it("'resume' keeps a quantity above stock instead of clearing it", () => {
     const s = mkSession(STATES.MENU, { ...cart, quantity: 130000, resumeState: STATES.COLLECT });
     const r = reduce(s, btn("resume"), baseCtx());
-    assert.equal(r.session.state, STATES.QUANTITY);
+    assert.notEqual(r.session.state, STATES.QUANTITY);
+    assert.equal(r.session.cart.quantity, 130000);
   });
 
   it("'startover' clears the cart back to MENU", () => {

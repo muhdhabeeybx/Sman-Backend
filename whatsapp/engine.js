@@ -287,13 +287,9 @@ const revalidateCart = (cart, ctx) => {
   if (cart.productId && depot && !findProduct(depot, cart.productId)) {
     return { cart: clearProduct(cart), lead: [text(copy.productUnavailable(depot.name))] };
   }
-  const product = findProduct(depot, cart.productId);
-  if (cart.quantity && product && Number(cart.quantity) > Number(product.stock)) {
-    return {
-      cart: clearQuantity(cart),
-      lead: [text(copy.quantityOverStock(depot.name))],
-    };
-  }
+  // A quantity is no longer revalidated against stock: it silently cleared a
+  // figure the customer had already given, on a depot whose stock reads 0
+  // because it has no active PFI. Depot and product still have to exist.
   return { cart, lead: [] };
 };
 
@@ -1128,7 +1124,10 @@ const handleMenu = (session, ctx, value) => {
     const last = ctx.lastOrder;
     const depot = findDepot(ctx, last.depotId);
     const product = findProduct(depot, last.productId);
-    if (!depot || !product || Number(product.stock) < Number(last.quantity)) {
+    // Depot and product must still exist; their stock level must not — see the
+    // quantity handler. A reorder failing on stock sent the customer back to
+    // depot selection with "unavailable", which was never true of the depot.
+    if (!depot || !product) {
       return goTo({ ...session, cart: emptyCart() }, STATES.DEPOT, ctx, [
         text(copy.depotUnavailable()),
       ]);
@@ -1236,14 +1235,21 @@ const handleQuantity = (session, inbound, ctx, value) => {
   if (qty > MAX_ORDER_LITRES) {
     return fumble(session, ctx, [text(copy.quantityAboveCap(MAX_ORDER_LITRES))]);
   }
-  const stock = Number(product.stock) || 0;
-  if (qty > stock) {
-    // Refused without revealing how much we hold — stock levels are
-    // commercial information. They can type a smaller figure or move depot.
-    return done({ ...session, failureCount: 0 }, [
-      buttons(copy.quantityOverStock(depot.name), copy.overStockButtons()),
-    ]);
-  }
+  /**
+   * No stock cap here, deliberately.
+   *
+   * A depot with no active PFI reports stock 0, so this refused EVERY quantity
+   * — the customer browsed to the depot, picked the product, typed a number
+   * and was bounced, with copy that deliberately does not say why. Being
+   * dead-ended without explanation is worse than the depot not being listed.
+   *
+   * The website and the mobile app already sell without this check; leaving it
+   * on WhatsApp alone meant the same order succeeded or failed depending on
+   * which client placed it. This is the overselling guard, and removing it is
+   * a deliberate trade made with that understood: MIN/MAX_ORDER_LITRES above
+   * still bound the order, and release is still gated downstream, where stock
+   * is actually reserved against a PFI.
+   */
   const cart = { ...clearQuantity(session.cart), quantity: qty };
   return goTo({ ...session, cart }, nextStep(cart), ctx);
 };
