@@ -885,7 +885,69 @@ const findFinanceReport = async ({
             FROM order_payments sp
             WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
             HAVING COUNT(*) = 1
-          ) AS "originBankRefs"
+          ) AS "originBankRefs",
+          /**
+           * How much of this payment the OLD ledger actually applied to this
+           * order — and therefore how much of it never was.
+           *
+           * The wallet-era ledger allocated a deposit to an order in two
+           * figures: 'amount', the whole bank line, and 'applied_amount', the
+           * part that settled this particular order. Migration 0021 wrote
+           * order_payments at the first and dropped the second, so an order
+           * that used 18,315,000 of a 36,000,000 line now records the whole
+           * 36,000,000 and reads as 17,685,000 overpaid. VG10807 is exactly
+           * that; 119 orders are, for N1,243,302,153 between them.
+           *
+           * The remainder was NOT moved to another order — the deposits were
+           * allocated to one order each and nothing else drew on them. It
+           * stayed as unapplied customer credit, which is what the wallet
+           * balance was. So the report must not call it a transfer; it can
+           * only say that this much of the line was never applied here.
+           *
+           * Joined on the reference, which the two tables genuinely share:
+           * deposits.reference IS the bank ref carried on the payment. Amount
+           * is matched too, so a reused reference cannot drag in the wrong
+           * allocation. Null where no old-ledger row answers to this payment,
+           * which is every payment recorded since.
+           */
+          (
+            SELECT a.applied_amount
+            FROM order_deposit_allocations a
+            JOIN deposits dp ON dp.id = a.deposit_id
+            WHERE a.order_id = p.order_id
+              AND dp.reference = p.bank_ref
+              AND dp.amount::numeric = p.amount::numeric
+            LIMIT 1
+          ) AS "appliedAmount",
+          /**
+           * The order this money actually came out of, on a row that shows as
+           * having no bank record at all.
+           *
+           * Surplus moved between orders in the wallet era was written as a
+           * credit deposit whose DESCRIPTION named the source: "From TRF FROM
+           * ORDER ZI10916 - Overpayment received from order #10916". Migration
+           * 0021 took the amount and left the sentence, so the receiving order
+           * carries a legacy row reading "No bank record" while the record of
+           * where the money came from sits in a text column nothing reads.
+           *
+           * 28 movements are recorded this way, N124,627,399 between them. The
+           * sentence is the only record there is, so it is read rather than
+           * ignored — the same regexp the pre-0021 code used, which was
+           * removed for being a guess. It is not a guess here: it is used only
+           * to NAME the counterpart, never to move a figure. Every amount on
+           * this report still comes from order_payments.
+           */
+          (
+            SELECT o_src.order_number
+            FROM order_deposit_allocations a
+            JOIN deposits dp ON dp.id = a.deposit_id
+            JOIN orders o_src
+              ON o_src.id = (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int
+            WHERE a.order_id = p.order_id
+              AND a.source = 'wallet'
+              AND dp.amount::numeric = p.amount::numeric
+            LIMIT 1
+          ) AS "walletFromOrderRef"
         FROM order_payments p
         LEFT JOIN staff st ON st.id = p.recorded_by
         LEFT JOIN staff rv ON rv.id = p.reviewed_by
@@ -899,9 +961,53 @@ const findFinanceReport = async ({
       `)
     : [];
 
+  /**
+   * Surplus this order gave away, where the only record of it is a sentence.
+   *
+   * The receiving end at least has a row — see walletFromOrderRef. The giving
+   * end has nothing at all: no transfer_out, no payment, no trace on the
+   * order, which is why VG10807 sits on the report reading 17,685,000 overpaid
+   * with no indication that the 17,685,000 left for WP10852 weeks ago.
+   *
+   * Read from the same descriptions, keyed by the order that gave. Deliberately
+   * NOT added to any figure: this report's arithmetic stays exactly as it is
+   * and as it was audited. It is a line saying where the money went.
+   */
+  const movedOutByOrder = new Map();
+  if (orderIds.length) {
+    const moved = await db.execute(sql`
+      SELECT
+        (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS "fromOrderId",
+        a.order_id AS "toOrderId",
+        o_dst.order_number AS "toOrderRef",
+        dp.amount::numeric AS amount,
+        dp.created_at AS "movedAt"
+      FROM deposits dp
+      JOIN order_deposit_allocations a ON a.deposit_id = dp.id
+      LEFT JOIN orders o_dst ON o_dst.id = a.order_id
+      WHERE dp.description ~ 'from order #[0-9]+'
+        AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int
+            IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+    `);
+    for (const m of moved.rows ?? moved) {
+      const list = movedOutByOrder.get(m.fromOrderId) || [];
+      list.push({
+        toOrderId: m.toOrderId,
+        toOrderRef: m.toOrderRef,
+        amount: Number(m.amount),
+        movedAt: m.movedAt,
+      });
+      movedOutByOrder.set(m.fromOrderId, list);
+    }
+  }
+
   const paymentsByOrder = new Map();
   for (const p of payments.rows ?? payments) {
     p.amount = Number(p.amount);
+    // Null stays null: "the old ledger has nothing to say about this payment"
+    // is a different fact from "it applied nothing", and only the first is
+    // true of every payment recorded since the wallet path was retired.
+    p.appliedAmount = p.appliedAmount == null ? null : Number(p.appliedAmount);
     p.counterpartOrderRef =
       p.counterpartOrderId != null
         ? generateOrderReference(p.counterpartCompany, p.counterpartOrderId)
@@ -1016,6 +1122,12 @@ const findFinanceReport = async ({
       verifiableAmount: rowPayments
         .filter((p) => VERIFIABLE_BASES.has(p.confirmationBasis))
         .reduce((sum, p) => sum + p.amount, 0),
+
+      /**
+       * Surplus that left this order in the wallet era, named rather than
+       * netted — see movedOutByOrder. Empty for every order raised since.
+       */
+      surplusMovedOut: movedOutByOrder.get(row.id) || [],
 
       /** The account(s) the money was actually paid into. */
       paidInto: [
