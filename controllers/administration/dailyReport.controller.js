@@ -5,7 +5,7 @@ const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
 const { notifyAndWait } = require("../../notifications");
 const { sendDailyReportToWhatsApp } = require("../../services/whatsappReport.service");
-const { buildCombinedDailyReportData } = require("../../services/dailyCombinedReport.service");
+const { buildPfiDailyReportData } = require("../../services/pfiDailyReport.service");
 
 // Roles that manage reports rather than file them — the Reports Hub's own
 // allowed-roles list (see rbac.ts '/admin-reports'). Everyone else only ever
@@ -172,8 +172,24 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
 const emailDailyReports = asyncHandler(async (req, res) => {
   const { recipients, reportDate } = req.body;
 
-  const data = await buildCombinedDailyReportData(reportDate ? new Date(reportDate) : new Date());
-  const result = await notifyAndWait("reports.hub_email", {
+  /**
+   * The button sends the per-PFI report.
+   *
+   * The nightly cron still sends the depot-grouped one (see
+   * dailyReportDispatch), deliberately: the automatic send is the one nobody
+   * is watching when it goes, so it stays on the format the desk has read for
+   * months while this one is used on demand. Switch that over once this has
+   * been read a few times — it is the same two-line change as here.
+   *
+   * One known gap, dormant rather than fixed: this report groups depot trading
+   * by PFI, so an order with no pfi_id has nowhere to appear and is missing
+   * from the litres and value on the page. 54 such orders exist historically
+   * and none in the last seven days — but placeOrder can now write a null
+   * pfi_id for a depot with no active batch, so this becomes live the day
+   * somebody sells from one.
+   */
+  const data = await buildPfiDailyReportData(reportDate ? new Date(reportDate) : new Date());
+  const result = await notifyAndWait("reports.pfi_daily", {
     to: recipients.map((email) => ({ email })),
     data,
   });
