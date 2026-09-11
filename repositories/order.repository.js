@@ -419,12 +419,12 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
       MIN(${customers.companyName})        AS "customerCompanyName",
       COUNT(*)::int                        AS "orderCount",
       COUNT(*) FILTER (
-        WHERE ROUND(${orders.totalAmount}::numeric - (paid.received - fix.adj), 2) <> 0
+        WHERE ROUND(${orders.totalAmount}::numeric - (paid.received - fix.adj - wallet.gave), 2) <> 0
       )::int                               AS "openOrderCount",
       COALESCE(SUM(${orders.totalAmount}::numeric), 0) AS "totalValue",
-      COALESCE(SUM(paid.received - fix.adj), 0) AS "totalReceived",
-      COALESCE(SUM(GREATEST(0, (paid.received - fix.adj) - ${orders.totalAmount}::numeric)), 0) AS "overpaid",
-      COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - (paid.received - fix.adj))), 0) AS "underpaid",
+      COALESCE(SUM(paid.received - fix.adj - wallet.gave), 0) AS "totalReceived",
+      COALESCE(SUM(GREATEST(0, (paid.received - fix.adj - wallet.gave) - ${orders.totalAmount}::numeric)), 0) AS "overpaid",
+      COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - (paid.received - fix.adj - wallet.gave))), 0) AS "underpaid",
       -- Stated, never silent. The report above is audited and still counts
       -- these rows; this is exactly the gap between the two, so the block can
       -- be reconciled to it line by line instead of merely disagreeing.
@@ -478,6 +478,45 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
      * it can neither create a shortfall nor half-correct anything. Across the
      * book it discounts 24 orders and leaves 11200 alone.
      */
+    /**
+     * Wallet-era surplus this order gave away.
+     *
+     * A movement recorded only in a deposit description left the giving order
+     * counting money it handed over weeks ago. The rows on the report
+     * reconstruct the missing leg; this block has to subtract the same figure
+     * or it would go on calling a customer overpaid on an order the report
+     * itself now shows as settled.
+     *
+     * Its own lateral rather than a term inside the payments sum: it is
+     * correlated on the ORDER, and a subquery correlated on a payment row
+     * cannot be evaluated inside that aggregate.
+     */
+    CROSS JOIN LATERAL (
+      SELECT CASE
+        /**
+         * Behind the same guard the rows use, so the two cannot disagree.
+         *
+         * Netted only where the order lands on exactly its own value once the
+         * movements come off — self-proving, because the remaining payments
+         * then account for the order in full. Three orders fail it: they gave
+         * away more than they ever held, so the money came from the customer's
+         * pooled wallet rather than from that order, and subtracting it here
+         * would show a shortfall the report's own rows do not.
+         */
+        WHEN g.gave > 0
+         AND ROUND(paid.received - g.gave - ${orders.totalAmount}::numeric, 2) = 0
+        THEN g.gave ELSE 0
+      END AS gave
+      FROM (
+        SELECT COALESCE(SUM(dp2.amount::numeric), 0) AS gave
+        FROM deposits dp2
+        JOIN order_deposit_allocations a2 ON a2.deposit_id = dp2.id
+        JOIN order_payments op2
+          ON op2.deposit_id = dp2.id AND op2.order_id = a2.order_id AND op2.source = 'legacy'
+        WHERE dp2.description ~ 'from order #[0-9]+'
+          AND (regexp_match(dp2.description, 'from order #([0-9]+)'))[1]::int = ${orders.id}
+      ) g
+    ) wallet
     CROSS JOIN LATERAL (
       SELECT CASE
         WHEN paid.duplicate > 0
@@ -1017,6 +1056,76 @@ const findFinanceReport = async ({
   }
 
   const decorated = rows.map((row) => {
+    /**
+     * The outgoing leg the wallet era never wrote, reconstructed.
+     *
+     * A movement recorded only in a deposit description left the money counted
+     * once instead of twice: the receiving order got a payment row, the giving
+     * order got nothing. So the giver goes on counting money it handed over
+     * weeks ago, and reads as overpaid by exactly the amount it gave.
+     *
+     * Naming it was not enough — the figure stayed wrong and so did every
+     * total built on it. It is built into a payment row here, negative, as a
+     * transfer_out leg, so it flows through `received`, the differential, the
+     * Transferred column and the totals the same way a recorded transfer does.
+     * Nothing downstream needs to know it was reconstructed.
+     *
+     * ONLY where the order lands on exactly its own value once the movements
+     * are taken off. That is self-proving: the remaining payments account for
+     * the order in full, so this is where the surplus went. Three orders fail
+     * it — they gave away more than they ever held, which means the money came
+     * from the customer's pooled wallet rather than from that order — and
+     * their movements are left named but not netted, because netting them
+     * would invent a shortfall on an order that was fully paid.
+     *
+     * The id is negative so it cannot collide with a real payment id, and
+     * `reconstructed` marks it for anything that must not offer to reverse a
+     * transfer that has no row to reverse.
+     */
+    const movedOut = movedOutByOrder.get(row.id) || [];
+    const rowTotal = Number(row.totalAmount || 0);
+    const recordedSoFar = (paymentsByOrder.get(row.id) || []).reduce((sum, p) => sum + p.amount, 0);
+    const movedTotal = movedOut.reduce((sum, m) => sum + m.amount, 0);
+    const settlesExactly =
+      movedTotal > 0 && Math.round((recordedSoFar - movedTotal) * 100) === Math.round(rowTotal * 100);
+
+    if (settlesExactly) {
+      const legs = movedOut.map((m, i) => ({
+        id: -(row.id * 1000 + i + 1),
+        orderId: row.id,
+        statementLineId: null,
+        amount: -m.amount,
+        source: "transfer_out",
+        txnDate: null,
+        depositor: "",
+        narration: "",
+        bankRef: "",
+        bankName: "",
+        accountName: "",
+        accountNumber: "",
+        confirmationBasis: "transfer_auto",
+        reviewedAt: null,
+        reviewNote: "",
+        reviewerFirstName: null,
+        reviewerSurname: null,
+        note: `Surplus moved to ${m.toOrderRef || "another order"} — recorded in the wallet ledger`,
+        createdAt: m.movedAt,
+        transferId: null,
+        recorderFirstName: null,
+        recorderSurname: null,
+        counterpartOrderId: m.toOrderId,
+        counterpartOrderRef: m.toOrderRef,
+        transferReason: "Wallet-era surplus movement",
+        originDepositor: null,
+        originBankRefs: null,
+        appliedAmount: null,
+        walletFromOrderRef: null,
+        /** Not a row in order_payments. Nothing may offer to reverse it. */
+        reconstructed: true,
+      }));
+      paymentsByOrder.set(row.id, [...(paymentsByOrder.get(row.id) || []), ...legs]);
+    }
+
     const rowPayments = paymentsByOrder.get(row.id) || [];
     const total = Number(row.totalAmount || 0);
 
@@ -1124,10 +1233,12 @@ const findFinanceReport = async ({
         .reduce((sum, p) => sum + p.amount, 0),
 
       /**
-       * Surplus that left this order in the wallet era, named rather than
-       * netted — see movedOutByOrder. Empty for every order raised since.
+       * Surplus that left this order in the wallet era. Netted above where it
+       * settles the order exactly; left named-only where it does not, so the
+       * three orders that gave away pooled wallet money still say so without
+       * being pushed into a shortfall they never had.
        */
-      surplusMovedOut: movedOutByOrder.get(row.id) || [],
+      surplusMovedOut: settlesExactly ? [] : movedOutByOrder.get(row.id) || [],
 
       /** The account(s) the money was actually paid into. */
       paidInto: [
