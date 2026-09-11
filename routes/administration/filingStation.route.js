@@ -10,6 +10,20 @@ const {
   updateFilingStation,
   deleteFilingStation,
 } = require("../../controllers/administration/filingStation.controller");
+const {
+  getStationCycleStatuses,
+  setStationCycleStatus,
+} = require("../../controllers/administration/deliveryBatch.controller");
+
+/**
+ * Closing a delivery cycle on the station register, and reopening it.
+ *
+ * Above the /:id routes deliberately, or GET /:id reads "cycles" as an id. The
+ * cycle key travels in the PATCH body rather than the path — see the
+ * controller. Migration 0029.
+ */
+router.get("/cycles", verifyStaff, getStationCycleStatuses);
+router.patch("/cycles", verifyStaff, setStationCycleStatus);
 
 router.get("/", verifyStaff, validate({ query: misc.listStations }), getFilingStations);
 router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getFilingStationById);

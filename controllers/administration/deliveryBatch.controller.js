@@ -47,4 +47,50 @@ const setDeliveryBatchStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { batch } });
 });
 
-module.exports = { getDeliveryBatchStatuses, setDeliveryBatchStatus };
+// ── Filling-station delivery cycles ─────────────────────────────────────────
+
+/** Every cycle that has a status row. Keys with none are active. */
+const getStationCycleStatuses = asyncHandler(async (req, res) => {
+  const cycles = await deliveryBatchRepo.findCycleClosures();
+  res.json({ success: true, data: { cycles } });
+});
+
+/**
+ * The key travels in the body, not the path.
+ *
+ * A cycle key is the register's own group key — "sale:AKR-221|2026-08-04::812::
+ * IBADAN OYO RD" — and it carries whatever the location field holds, slashes
+ * included. In a path that is a routing accident waiting to happen however
+ * carefully it is encoded; in the body it is just a string.
+ */
+const setStationCycleStatus = asyncHandler(async (req, res) => {
+  const cycleKey = String(req.body?.key || "").trim();
+  if (!cycleKey) {
+    return res.status(400).json({ success: false, message: "A cycle key is required" });
+  }
+
+  const status = String(req.body?.status || "").trim();
+  if (!STATUSES.includes(status)) {
+    return res.status(400).json({
+      success: false,
+      message: `status must be one of: ${STATUSES.join(", ")}`,
+    });
+  }
+
+  const staffName = String(req.user?.name || req.user?.email || "").trim();
+
+  const cycle = await deliveryBatchRepo.setCycleStatus(cycleKey, {
+    status,
+    staffName,
+    note: String(req.body?.note || "").slice(0, 2000),
+  });
+
+  res.json({ success: true, data: { cycle } });
+});
+
+module.exports = {
+  getDeliveryBatchStatuses,
+  setDeliveryBatchStatus,
+  getStationCycleStatuses,
+  setStationCycleStatus,
+};

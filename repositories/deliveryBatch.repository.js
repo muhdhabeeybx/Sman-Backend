@@ -1,6 +1,6 @@
 const { eq, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { deliveryBatches } = require("../db/schema");
+const { deliveryBatches, deliveryCycleClosures } = require("../db/schema");
 
 /**
  * Closing and reopening a delivery batch.
@@ -85,4 +85,61 @@ const removeByCodes = async (codes) => {
   return rows.length;
 };
 
-module.exports = { normalise, findStatuses, findByCode, setStatus, removeByCodes };
+// ── Filling-station delivery cycles ─────────────────────────────────────────
+//
+// The same act on the row the filling stations register is about: a loading
+// with the sales that answer to it. Kept in this file because "closing a thing
+// in delivery" is one idea; kept in its own table because a cycle and a batch
+// are identified by different keys. See migration 0029.
+
+/**
+ * A cycle key is the register's own group key and is used verbatim — not
+ * normalised the way a batch code is. It is machine-made ("loading:412"), and
+ * upper-casing it would break the "sale:" keys, which carry a location the
+ * user typed.
+ */
+const findCycleClosures = async () => {
+  const rows = await db.select().from(deliveryCycleClosures);
+  const byKey = {};
+  for (const row of rows) byKey[row.cycleKey] = row;
+  return byKey;
+};
+
+const setCycleStatus = async (cycleKey, { status, staffName = "", note = "" }) => {
+  const key = String(cycleKey || "").trim();
+  const closing = status === "completed";
+  const values = {
+    cycleKey: key,
+    status,
+    closedAt: closing ? new Date() : null,
+    closedBy: closing ? staffName || "" : "",
+    note: closing ? note || "" : "",
+    updatedAt: new Date(),
+  };
+
+  const [row] = await db
+    .insert(deliveryCycleClosures)
+    .values(values)
+    .onConflictDoUpdate({
+      target: deliveryCycleClosures.cycleKey,
+      set: {
+        status: values.status,
+        closedAt: values.closedAt,
+        closedBy: values.closedBy,
+        note: values.note,
+        updatedAt: values.updatedAt,
+      },
+    })
+    .returning();
+  return row;
+};
+
+module.exports = {
+  normalise,
+  findStatuses,
+  findByCode,
+  setStatus,
+  removeByCodes,
+  findCycleClosures,
+  setCycleStatus,
+};

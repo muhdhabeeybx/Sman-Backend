@@ -41,6 +41,7 @@ const deliveryCustomerSchema = require("./deliveryCustomer");
 const deliveryNoteSchema = require("./deliveryNote");
 const deliveryInventorySchema = require("./deliveryInventory");
 const deliveryBatchSchema = require("./deliveryBatch");
+const deliveryCycleClosureSchema = require("./deliveryCycleClosure");
 const deliverySaleSchema = require("./deliverySale");
 const webhookEventSchema = require("./webhookEvent");
 const sessionSchema = require("./session");
@@ -112,6 +113,7 @@ module.exports = {
   ...deliveryNoteSchema,
   ...deliveryInventorySchema,
   ...deliveryBatchSchema,
+  ...deliveryCycleClosureSchema,
   ...deliverySaleSchema,
   ...webhookEventSchema,
   ...sessionSchema,
