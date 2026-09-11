@@ -86,12 +86,17 @@ function requireRole(...allowedRoles) {
     allowedRoles = allowedRoles.slice(0, -1);
   }
 
+  // OPEN: every authenticated member of staff holds every role's rights.
+  // See config/apiPermissions.checkApiAccess for why, and for the two defects
+  // a reinstatement has to fix rather than simply restore.
+  //
+  // The arguments are still accepted and still read at each call site, so the
+  // thirteen route files keep documenting who a route was FOR. That intent is
+  // the only record of the old model left in the routing layer, and it costs
+  // nothing to keep.
   return (req, res, next) => {
-    const roles = req.user?.roles || [];
-    const hasRole = roles.some((r) => allowedRoles.includes(r));
-    if (!hasRole) {
-      return res.status(403).json({ success: false, message });
-    }
+    void allowedRoles;
+    void message;
     next();
   };
 }

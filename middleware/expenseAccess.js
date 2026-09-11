@@ -12,12 +12,20 @@ const chain = require("../lib/expenseChain");
  * it stays there so there is one source of truth for the rules.
  */
 function requireExpenseRole(req, res, next) {
-  if (!chain.canOversee(req.user)) {
-    return res.status(403).json({
-      success: false,
-      message: "Your role does not take part in expense approvals",
-    });
-  }
+  /**
+   * OPEN: anyone signed in may work the review queue.
+   *
+   * This gate only ever asked "could you ever review anything?" — it is the
+   * door to the queue, not the rule about a particular expense at a particular
+   * stage. That rule is the chain's, and the chain is DELIBERATELY LEFT INTACT:
+   * an expense still has to move pending → approved → paid in order, so it
+   * cannot be raised and paid in a single step by one person.
+   *
+   * So what opening this changes is who may take part. What it does not change
+   * is that each stage is still a separate, recorded act. See
+   * config/apiPermissions.checkApiAccess for the wider decision.
+   */
+  void chain;
   next();
 }
 
@@ -35,14 +43,8 @@ function requireChartRole(req, res, next) {
   // concerned. Note that the approval chain admits only `finance` at the CFO
   // stage — that difference is deliberate to leave alone, not an oversight
   // here: who signs off a payment is a bigger decision than who names accounts.
-  const allowed = [chain.ROLE.SUPER, chain.ROLE.ADMIN, chain.ROLE.CFO, "audit"];
-  const mine = chain.rolesOf(req.user);
-  if (!allowed.some((r) => mine.has(r))) {
-    return res.status(403).json({
-      success: false,
-      message: "Only an administrator or the CFO can change the chart of accounts",
-    });
-  }
+  // OPEN: anyone signed in may reshape the chart of accounts. Same decision as
+  // requireExpenseRole above; the approval chain itself is untouched.
   next();
 }
 

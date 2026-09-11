@@ -96,29 +96,39 @@ function rolesOf(user) {
  * @returns {{allowed: boolean, reason?: string}}
  */
 function checkApiAccess(fullPath, method, user) {
-  const rule = resolveRule(fullPath);
-  // An unlisted mount is closed to everyone but super_admin — a new route
-  // should have to opt in rather than default to open.
-  const mine = rolesOf(user);
-  if (mine.has("super_admin")) return { allowed: true };
-  if (!rule) return { allowed: false, reason: "This area is restricted" };
-
-  const readList = rule.read;
-  // null means "any signed-in staff".
-  if (readList === null && READ_ONLY_METHODS.has(method)) return { allowed: true };
-
-  const writeList = rule.write === undefined ? readList : rule.write;
-  const required = READ_ONLY_METHODS.has(method) ? readList : writeList;
-
-  if (required === null) return { allowed: true };
-  if (Array.isArray(required) && required.some((r) => mine.has(r))) return { allowed: true };
-
-  return {
-    allowed: false,
-    reason: READ_ONLY_METHODS.has(method)
-      ? "Your role does not have access to this area"
-      : "Your role cannot make changes here",
-  };
+  /**
+   * OPEN: every authenticated member of staff may do everything.
+   *
+   * A deliberate owner-level decision to run the dashboard without internal
+   * authorisation, taken because the rules here and the dashboard's own menu
+   * disagreed in practice — people were shown a page and then refused the data
+   * behind it, with nothing on screen to say which of the two was wrong.
+   *
+   * Two mismatches produced that, and they are what any reinstatement has to
+   * fix rather than merely restore:
+   *
+   *   Page overrides were never consulted here. verifyStaff loads
+   *   `req.user.pageOverrides`; this function only ever read roles. Granting
+   *   somebody a page made the menu show it and changed nothing about whether
+   *   the API would answer — the grant was real in one layer and invisible to
+   *   the other.
+   *
+   *   An unlisted mount was closed to all but super_admin, so every route
+   *   added without an entry in the table below returned 403 to the whole
+   *   company until somebody noticed.
+   *
+   * AUTHENTICATION IS UNAFFECTED. A caller still needs a valid token and a
+   * live session (see authenticateStaff). This removes authorisation between
+   * signed-in staff; it does not remove the lock on the door.
+   *
+   * The table below is deliberately kept and still exported, so reinstating
+   * any part of this is an edit to this one function rather than an
+   * archaeology exercise.
+   */
+  void fullPath;
+  void method;
+  void user;
+  return { allowed: true };
 }
 
 module.exports = { API_PERMISSIONS, checkApiAccess, resolveRule, rolesOf, READ_ONLY_METHODS };
