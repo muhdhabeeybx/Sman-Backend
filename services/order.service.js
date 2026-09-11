@@ -367,7 +367,6 @@ async function placeOrder({
   if (!product) {
     throw httpError(404, "Product not found");
   }
-  const productUnit = product.unit || "Liters";
 
   // Server-side pricing — the client never supplies price/total.
   const priceEntry = await depotRepo.getProductPrice(depotId, productId);
@@ -377,17 +376,13 @@ async function placeOrder({
   const serverPrice = Number(priceEntry.currentPrice);
   const totalAmount = serverPrice * Number(quantity);
 
-  const { allocations, totalAvailableStock } = await findPfiForOrder(
-    depotId,
-    productId,
-    quantity
-  );
-  if (allocations.length === 0) {
-    throw httpError(
-      400,
-      `Insufficient stock in depot. Total active PFI stock: ${totalAvailableStock.toLocaleString()} ${productUnit}`
-    );
-  }
+  // Stock no longer gates a sale — a price does (see catalog.service). We
+  // still reserve against whatever active PFI stock exists, so PFI accounting
+  // stays exact wherever batches ARE being tracked; a depot with none simply
+  // reserves nothing and the order carries no PFI. This used to throw
+  // "Insufficient stock in depot", which made a freshly priced depot
+  // unorderable even though the site offered it.
+  const { allocations } = await findPfiForOrder(depotId, productId, quantity);
 
   // --- Pickup truck declaration ---------------------------------------------
   // A pickup customer brings their own trucks and may split the order across
@@ -449,7 +444,10 @@ async function placeOrder({
         state,
         depotId,
         productId,
-        pfiId: reservedPfis[0].pfiId,
+        // Null when the depot tracks no active PFI. The column is nullable and
+        // every reader (release, tickets, queues, reports) already left-joins
+        // or guards on it.
+        pfiId: reservedPfis[0]?.pfiId ?? null,
         quantity: Number(quantity),
         price: String(serverPrice),
         totalAmount: String(totalAmount),

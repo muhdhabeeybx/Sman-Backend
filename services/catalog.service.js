@@ -34,13 +34,18 @@ const tradeCode = (product) => {
  * The single definition of "orderable" — shared by every sales channel.
  *
  * The WhatsApp engine and the portal must never disagree about what can be
- * bought where and at what price, so both load through here. The filtering
- * rule channels lean on: a depot with no priced, in-stock product simply is
- * not in the catalog. Validity is a filtering problem at load time, not an
- * error-handling problem at confirm time.
+ * bought where and at what price, so both load through here.
+ *
+ * The rule is a PRICE, and only a price: a depot sells a product when someone
+ * has set a figure above zero against it. Stock used to gate this too — a
+ * depot with no active PFI was filtered out entirely — which meant a depot
+ * created and priced in the admin stayed invisible on the site, in the
+ * snapshot and in the order flow, with nothing on screen to say why. Stock is
+ * still measured and still reserved when it exists (see placeOrder), it just
+ * no longer decides what may be advertised or bought.
  */
 
-/** All orderable depots, each with its priced + in-stock products. */
+/** All depots carrying a price, each with its priced products. */
 const loadCatalog = async () => {
   const [depotRows, priceRows, stockRows] = await Promise.all([
     db.select({ id: depots.id, name: depots.name, state: depots.state }).from(depots),
@@ -93,10 +98,14 @@ const loadCatalog = async () => {
           category: tradeCode(p),
           unit: p.unit || "Liters",
           price: Number(p.price),
+          // Still carried: order placement reserves against it where it
+          // exists. Nothing gates a sale on it any more — the WhatsApp engine
+          // capped a quantity by it until the same change reached that channel
+          // too. Zero means "no active PFI recorded", not "not for sale".
           stock: stockByKey.get(`${p.depotId}:${p.productId}`) || 0,
-        }))
-        .filter((p) => p.stock > 0),
+        })),
     }))
+    // A depot with no priced product has nothing to sell and stays out.
     .filter((depot) => depot.products.length > 0);
 };
 
@@ -104,8 +113,8 @@ const loadCatalog = async () => {
  * The catalog as the public may see it: names, states, and prices — never
  * litres. Stock levels are commercial information (the WhatsApp copy refuses
  * to reveal them even when a quantity is over stock), so the internal `stock`
- * field stops here. Being listed at all already means "in stock"; an exact
- * number would tell competitors how much we hold.
+ * field stops here — an exact number would tell competitors how much we hold.
+ * Being listed means a price is set, which is now the whole of the rule.
  */
 const publicCatalog = async () => {
   const catalog = await loadCatalog();

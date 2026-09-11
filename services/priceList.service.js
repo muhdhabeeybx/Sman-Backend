@@ -19,10 +19,10 @@ const { eq } = require("drizzle-orm");
  *
  * ── What is quoted ──────────────────────────────────────────────────────
  *
- * Active depots, with a price, holding sellable stock. Stock comes free with
- * loadCatalog (it is already the "orderable" definition every sales channel
- * shares), so a location that cannot fill an order is never advertised — the
- * portal and the SMS cannot disagree about where you can buy. Depot status is
+ * Active depots with a price. That is loadCatalog's whole rule now — stock no
+ * longer gates a sale, so a depot with no active PFI IS advertised here, the
+ * same as it is on the portal; the two still cannot disagree about where you
+ * can buy, which is the point of sharing the loader. Depot status is
  * filtered here because loadCatalog does not look at it: a depot in
  * Maintenance is still perfectly orderable as far as the catalog is concerned,
  * and there are six of them.

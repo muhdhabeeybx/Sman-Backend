@@ -34,6 +34,7 @@ const seedDepot = async (name, code) => {
 describe("public catalog — what anyone may see before signing in", () => {
   let stockedDepotId;
   let emptyDepotId;
+  let unpricedDepotId;
   let productId;
 
   before(async () => {
@@ -41,6 +42,8 @@ describe("public catalog — what anyone may see before signing in", () => {
     stockedDepotId = stocked.id;
     const empty = await seedDepot("Catalog Empty Depot", `CAE${String(RUN).slice(-5)}`);
     emptyDepotId = empty.id;
+    const unpriced = await seedDepot("Catalog Unpriced Depot", `CAU${String(RUN).slice(-5)}`);
+    unpricedDepotId = unpriced.id;
 
     const [product] = await db
       .insert(products)
@@ -51,8 +54,8 @@ describe("public catalog — what anyone may see before signing in", () => {
       .returning();
     productId = product.id;
 
-    // Both depots carry a price; only the stocked one has an active PFI, so
-    // only the stocked one is orderable.
+    // Both depots carry a price; only one has an active PFI. A price is the
+    // whole of the rule, so both are orderable and both must be listed.
     await db.insert(depotProductPrices).values([
       { depotId: stockedDepotId, productId, currentPrice: "150" },
       { depotId: emptyDepotId, productId, currentPrice: "150" },
@@ -139,9 +142,24 @@ describe("public catalog — what anyone may see before signing in", () => {
     }
   });
 
-  test("a depot with a price but no active stock is not listed at all", async () => {
+  test("a depot with a price but no active stock is listed too", async () => {
+    // The rule is a price, not a stock batch. A depot created and priced in
+    // the admin has to reach the price board, the snapshot and the order flow
+    // before anyone opens a PFI against it — it staying invisible, with
+    // nothing on screen to explain why, is the bug this pins down.
     const res = await request(app).get(CATALOG);
     const depot = res.body.data.depots.find((d) => d.id === emptyDepotId);
-    assert.equal(depot, undefined, "the empty depot must not appear");
+    assert.ok(depot, "the priced depot appears even with no active PFI");
+
+    const product = depot.products.find((p) => p.id === productId);
+    assert.ok(product, "its priced product is listed");
+    assert.equal(product.price, 150);
+    assert.ok(!("stock" in product), "and still never leaks litres");
+  });
+
+  test("a depot with no price at all is still left out", async () => {
+    const res = await request(app).get(CATALOG);
+    const depot = res.body.data.depots.find((d) => d.id === unpricedDepotId);
+    assert.equal(depot, undefined, "nothing priced, nothing to sell");
   });
 });
