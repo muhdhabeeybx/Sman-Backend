@@ -318,18 +318,23 @@ const trucksFor = async (pfiId) => {
 };
 
 /**
- * Replace the manifest, and rebuild the batch quantity from it.
+ * Replace the manifest. The batch's own quantity is not touched.
  *
- * The recompute is the reason this is one function rather than two. A batch's
- * quantity IS the sum of what its trucks actually loaded — that is what the
- * desk means by "the quantities will come" — so a manifest saved without
- * updating `starting_qty_litres` leaves the batch claiming a figure no truck
- * supports, and every landing cost, sell-through and remaining-stock number
- * derived from it is then wrong.
+ * It used to be: saving a manifest rewrote `starting_qty_litres` to the sum of
+ * what the trucks loaded, on the reasoning that a delivery batch IS its
+ * trucks. The cost of that was a PFI type whose headline figure nobody could
+ * state — it was owned by the truck rows, could not be typed on the form, and
+ * changed under the batch whenever a manifest was edited.
  *
- * Capacities are never summed. A 50,000 truck that took 47,300 carried
- * 47,300; a batch built from capacity overstates itself on every truck that
- * loaded short.
+ * A delivery PFI is a PFI that happens to be delivered. Its quantity is a fact
+ * about the batch, typed on the PFI form like every other type's, and every
+ * landing cost and sell-through figure derives from that. The manifest is a
+ * record of what carried it, which is a different question and no longer
+ * allowed to answer this one.
+ *
+ * Capacities are still never summed — a 50,000 truck that took 47,300 carried
+ * 47,300 — and the loaded total is still returned, so a caller that wants to
+ * show the manifest against the batch quantity can.
  */
 const setTrucks = async (pfiId, trucks, staffId = null) => {
   return db.transaction(async (tx) => {
@@ -356,13 +361,9 @@ const setTrucks = async (pfiId, trucks, staffId = null) => {
       `);
     }
 
-    // Rounded to whole units: starting_qty_litres is an integer column, and a
-    // manifest of fractional loads must not silently truncate downward.
-    await tx.execute(sql`
-      UPDATE pfis SET starting_qty_litres = ${Math.round(total)}, updated_at = now()
-       WHERE id = ${Number(pfiId)}
-    `);
-
+    // Deliberately no UPDATE on pfis here — see the note above. `quantity` is
+    // what the manifest adds up to, reported back for display, not written to
+    // the batch.
     return { trucks: (trucks || []).length, quantity: Math.round(total) };
   });
 };
