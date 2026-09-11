@@ -24,82 +24,21 @@
  * is the one the desk uses out loud. If the link is ever backfilled, the two
  * halves can merge; until then, joining them would be inventing a fact.
  *
- * ── Station names ─────────────────────────────────────────────────────────
+ * ── Stations are customers, not places ────────────────────────────────────
  *
- * `location` is free text on both sales and inventory, and the same place is
- * written several ways: "Damaturu" and "DAMATURU", "KANO" and "Kano Filling
- * Station". Case, spacing and a trailing "Filling Station" are normalised,
- * because those are certainly the same place.
+ * A filling station is a row in `delivery_customers` with
+ * customer_type = 'filling_station', reached through the sale's customer_id.
  *
- * Nothing else is. "JOS" and "JOSe" are one typo apart and almost certainly
- * one station, but merging them here would silently rewrite what somebody
- * typed, and a report that quietly corrects its inputs teaches nobody to fix
- * them. They are reported separately and flagged as suspected duplicates, so
- * the fix happens in the data instead.
+ * It was briefly grouped on `location` instead — free text on the sale row —
+ * which listed DAMATURU and KADUNA as stations. They are cities. Grouping on
+ * the customer also retired a whole class of spelling problem (JOS/JOSE,
+ * KADUNA/KADUAN) that the location text had, along with the fuzzy matching
+ * written to cope with it: a station is now a row with an id.
  */
 const { client } = require("../db");
 const { dayBounds, REPORT_TZ } = require("./dailyCombinedReport.service");
 
 const num = (v) => Number(v || 0);
-
-/**
- * The comparable form of a station name.
- *
- * Only differences that cannot be anything but noise: surrounding space,
- * internal runs of space, case, and the "Filling Station" suffix people add
- * about half the time. Spelling is left alone — see the header.
- */
-const stationKey = (raw) =>
-  String(raw || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, " ")
-    .replace(/\s*FILLING\s+STATION$/, "")
-    .trim() || "(UNNAMED)";
-
-/** Edit distance, capped — only ever asked whether two names are 1–2 apart. */
-const editDistance = (a, b) => {
-  if (Math.abs(a.length - b.length) > 2) return 99;
-  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i += 1) {
-    let last = prev[0];
-    prev[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const tmp = prev[j];
-      prev[j] = Math.min(
-        prev[j] + 1,
-        prev[j - 1] + 1,
-        last + (a[i - 1] === b[j - 1] ? 0 : 1)
-      );
-      last = tmp;
-    }
-  }
-  return prev[b.length];
-};
-
-/**
- * Station names within one batch that are probably the same place.
- *
- * Reported, never merged. The tolerance scales with length because a flat two
- * edits is most of a short word: it paired "YOLA" with "SOBA", two genuinely
- * different towns, which is exactly the kind of confident wrongness that makes
- * a reader stop trusting the rest of the report. Two edits only once a name is
- * long enough for two edits to still leave it recognisable; one otherwise.
- *
- * Still catches every real case in the data: JOS/JOSE, BAUCHI/BAUCH,
- * PATISKUM/POTISKUM, KADUNA/KADUAN.
- */
-const duplicateWarnings = (keys) => {
-  const out = [];
-  for (let i = 0; i < keys.length; i += 1) {
-    for (let j = i + 1; j < keys.length; j += 1) {
-      const tolerance = Math.min(keys[i].length, keys[j].length) >= 6 ? 2 : 1;
-      const d = editDistance(keys[i], keys[j]);
-      if (d > 0 && d <= tolerance) out.push([keys[i], keys[j]]);
-    }
-  }
-  return out;
-};
 
 /**
  * Everything the per-PFI report needs, for one Lagos day.
@@ -616,4 +555,4 @@ const buildPfiDailyReportData = async (date = new Date()) => {
   };
 };
 
-module.exports = { buildPfiDailyReportData, stationKey };
+module.exports = { buildPfiDailyReportData };
