@@ -8,7 +8,6 @@ const {
   customers,
   depots,
   products,
-  orderTrucks,
   pfis,
   staff,
 } = require("../db/schema");
@@ -159,6 +158,10 @@ const findAll = async ({
         customerCommissionBankName: customers.commissionBankName,
         customerCommissionAccountName: customers.commissionAccountName,
         customerCommissionAccountNumber: customers.commissionAccountNumber,
+        // The batch the order drew on. The desk settles commissions a PFI at
+        // a time, so it is a column and a sort key, not a detail.
+        pfiId: orders.pfiId,
+        pfiNumber: pfis.pfiNumber,
         depotId: commissions.depotId,
         depotName: depots.name,
         depotCity: depots.city,
@@ -184,6 +187,7 @@ const findAll = async ({
       .leftJoin(customers, eq(commissions.customerId, customers.id))
       .leftJoin(depots, eq(commissions.depotId, depots.id))
       .leftJoin(products, eq(commissions.productId, products.id))
+      .leftJoin(pfis, eq(orders.pfiId, pfis.id))
       .leftJoin(staff, eq(commissions.paidBy, staff.id))
       .where(whereClause)
       .orderBy(desc(commissions.createdAt))
@@ -192,33 +196,25 @@ const findAll = async ({
     db.select({ total: count() }).from(commissions).where(whereClause),
   ]);
 
-  // Fetch trucks for each order
-  const enriched = await Promise.all(
-    rows.map(async (row) => {
-      const trucks = await db
-        .select({
-          truckNumber: orderTrucks.truckNumber,
-          quantity: orderTrucks.quantity,
-        })
-        .from(orderTrucks)
-        .where(eq(orderTrucks.orderId, row.orderId));
-
-      const comp = row.orderCompanyName || row.customerCompanyName || "";
-      const ref = row.orderId ? generateOrderReference(comp, row.orderId) : row.orderNumber;
-      return {
-        ...row,
-        orderNumber: ref,
-        reference: ref,
-        quantity: Number(row.quantity),
-        commissionRate: parseFloat(row.commissionRate),
-        commissionAmount: parseFloat(row.commissionAmount),
-        trucks: trucks.map((t) => ({
-          truckNumber: t.truckNumber || "N/A",
-          quantity: Number(t.quantity),
-        })),
-      };
-    })
-  );
+  /**
+   * No per-row truck query any more.
+   *
+   * This ran one SELECT per commission to fill a Trucks column the page no
+   * longer has — 50 extra round trips for a page of 50, and the reason the
+   * list could not simply return everything. Nothing else read it.
+   */
+  const enriched = rows.map((row) => {
+    const comp = row.orderCompanyName || row.customerCompanyName || "";
+    const ref = row.orderId ? generateOrderReference(comp, row.orderId) : row.orderNumber;
+    return {
+      ...row,
+      orderNumber: ref,
+      reference: ref,
+      quantity: Number(row.quantity),
+      commissionRate: parseFloat(row.commissionRate),
+      commissionAmount: parseFloat(row.commissionAmount),
+    };
+  });
 
   return {
     commissions: enriched,
