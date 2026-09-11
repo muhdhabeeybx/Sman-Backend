@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, asc, desc, count, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { incidentRecords } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
 const SORTABLE = {
@@ -30,12 +31,17 @@ const findAll = async ({
   order,
   page = 1,
   limit = 50,
+  scopeUser,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+  // An incident is raised against a batch, so the batch is the dimension.
+  const scope = scopeCondition(scopeUser, { pfiColumn: incidentRecords.pfiId });
+  if (scope) conditions.push(scope);
+
   if (incidentType) conditions.push(eq(incidentRecords.incidentType, incidentType));
   if (status) conditions.push(eq(incidentRecords.status, status));
   if (submittedBy) conditions.push(eq(incidentRecords.submittedBy, submittedBy));

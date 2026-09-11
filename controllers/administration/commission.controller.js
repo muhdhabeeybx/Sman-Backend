@@ -4,7 +4,10 @@ const commissionService = require("../../services/commission.service");
 
 const getCommissions = asyncHandler(async (req, res) => {
   const { search, status, depotId, customerId, dateFrom, dateTo, page, limit } = req.query;
-  const result = await commissionRepo.findAll({ search, status, depotId, customerId, dateFrom, dateTo, page, limit });
+  const result = await commissionRepo.findAll({
+    search, status, depotId, customerId, dateFrom, dateTo, page, limit,
+    scopeUser: req.user,
+  });
   res.json({ success: true, data: result });
 });
 

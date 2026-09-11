@@ -10,6 +10,7 @@ const getDeliveryInventory = asyncHandler(async (req, res) => {
     truck_number,
     page,
     limit,
+    scopeUser: req.user,
   });
 
   res.json({ success: true, data: result });

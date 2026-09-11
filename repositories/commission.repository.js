@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, desc, count, sql, between, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { generateOrderReference } = require("../utils/helpers");
+const { scopeCondition } = require("../lib/scopeFilter");
 const {
   commissions,
   depotProductCommissions,
@@ -104,12 +105,25 @@ const findAll = async ({
   dateTo,
   page = 1,
   limit = 50,
+  scopeUser,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+  /**
+   * Scoped by the commission's own depot, and deliberately not by the order's
+   * PFI as well.
+   *
+   * The count query beside the rows query selects from `commissions` alone —
+   * no join to orders — so a condition naming orders.pfi_id compiles to a
+   * missing-FROM-clause error there and takes the whole list down. The depot
+   * is on the row itself and is a commission's natural home anyway: it is
+   * earned at a depot, and the rate is set per depot and product.
+   */
+  const scope = scopeCondition(scopeUser, { depotColumn: commissions.depotId });
+  if (scope) conditions.push(scope);
 
   if (status && status !== "all") {
     conditions.push(eq(commissions.status, status));

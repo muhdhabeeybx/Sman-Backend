@@ -6,6 +6,7 @@ const {
   pfis,
   deliveryCustomers,
 } = require("../db/schema");
+const { scopeCondition } = require("../lib/scopeFilter");
 
 const findById = async (id) => {
   const [row] = await db
@@ -22,12 +23,20 @@ const findAll = async ({
   truck_number,
   page = 1,
   limit = 500,
+  scopeUser,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+  /**
+   * Scoped by the PFI the load was drawn from. The depot here is free text —
+   * a name somebody typed, not an id — so it cannot be matched against an
+   * assignment; the batch is the dimension that can.
+   */
+  const scope = scopeCondition(scopeUser, { pfiColumn: deliveryInventory.pfiId });
+  if (scope) conditions.push(scope);
 
   if (loading_status) {
     conditions.push(eq(deliveryInventory.loadingStatus, loading_status));

@@ -5,7 +5,7 @@ const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
 
 const getIncidents = asyncHandler(async (req, res) => {
-  const result = await incidentRecordRepo.findAll(req.query);
+  const result = await incidentRecordRepo.findAll({ ...req.query, scopeUser: req.user });
   res.json({ success: true, data: result });
 });
 
