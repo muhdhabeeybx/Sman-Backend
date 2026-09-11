@@ -213,17 +213,38 @@ const buildPfiDailyReportData = async (date = new Date()) => {
        AND deleted_at IS NULL
      GROUP BY pfi_id`;
 
+  /**
+   * Commission, per PFI, through the order that earned it.
+   *
+   * `commissions` carries no pfi_id — it hangs off an order, and the order
+   * knows its batch. Pending and paid are kept apart because they answer
+   * different questions: what is owed to agents, and what has already gone.
+   */
+  const commissionRows = await client`
+    SELECT o.pfi_id,
+           COUNT(*)                                                                     AS entries,
+           COALESCE(SUM(c.commission_amount::numeric) FILTER (WHERE c.status <> 'paid'), 0) AS due,
+           COALESCE(SUM(c.commission_amount::numeric) FILTER (WHERE c.status =  'paid'), 0) AS paid,
+           COALESCE(SUM(c.quantity), 0)                                                 AS litres
+      FROM commissions c
+      JOIN orders o ON o.id = c.order_id
+     WHERE o.pfi_id IS NOT NULL
+       AND o.status NOT IN ('Cancelled', 'Expired')
+     GROUP BY o.pfi_id`;
+
   const byPfi = (rows) => new Map(rows.map((r) => [Number(r.pfi_id), r]));
   const orders = byPfi(orderRows);
   const collections = byPfi(collectionRows);
   const trucks = byPfi(truckRows);
   const expenses = byPfi(expenseRows);
+  const commissions = byPfi(commissionRows);
 
   const pfis = pfiRows.map((p) => {
     const o = orders.get(Number(p.id)) || {};
     const collected = num((collections.get(Number(p.id)) || {}).paid_today);
     const t = trucks.get(Number(p.id)) || {};
     const e = expenses.get(Number(p.id)) || {};
+    const cm = commissions.get(Number(p.id)) || {};
 
     const starting = num(p.starting_qty_litres);
     const sold = num(p.sold_qty_litres);
@@ -265,209 +286,218 @@ const buildPfiDailyReportData = async (date = new Date()) => {
         today: { count: Number(e.expenses_today || 0), amount: num(e.amount_today) },
         toDate: { count: Number(e.expenses_all || 0), amount: num(e.amount_all), paid: num(e.paid_all) },
       },
+
+      commission: {
+        entries: Number(cm.entries || 0),
+        due: num(cm.due),
+        paid: num(cm.paid),
+        litres: num(cm.litres),
+      },
     };
   });
 
-  // ── Truck sales, grouped by allocation_code ─────────────────────────────
-  //
-  // Only codes with stock allocated or sales recorded appear; a code that has
-  // gone quiet is finished business and does not belong on a daily report.
-  const invRows = await client`
-    SELECT COALESCE(NULLIF(TRIM(allocation_code), ''), '(unassigned)') AS code,
-           location,
-           COUNT(*)                                   AS trucks,
-           COALESCE(SUM(quantity_allocated), 0)       AS allocated,
-           COUNT(*) FILTER (WHERE date_offloaded IS NOT NULL) AS offloaded,
-           MAX(date_allocated)                        AS last_allocated
-      FROM delivery_inventory
-     GROUP BY 1, 2`;
-
   /**
-   * Truck sales, at the grain of a truck load rather than a row.
+   * Delivery trading splits in two, by who bought.
    *
-   * `delivery_sales` is not one row per sale. It is one row per PAYMENT: the
-   * truck, its quantity and its sales value are repeated on every instalment,
-   * so BWR802XB appears fourteen times carrying 50,000 L and ₦62,500,000 each
-   * time. 1,460 rows are 483 actual truck loads.
+   * `delivery_customers.customer_type` is either 'customer' or
+   * 'filling_station', and the two are different businesses wearing the same
+   * table. A customer buys a truck; a filling station holds stock and sells it
+   * down. So a truck sale is counted in TRUCKS — how many went out, what they
+   * were worth, what is still owed — and a station is counted in LITRES, because
+   * the question there is how much is left in the ground.
    *
-   * Summing the row as it stands therefore multiplies volume and revenue by
-   * however many times a customer happened to pay — which is why an earlier
-   * cut of this report had more litres sold than were ever allocated, and a
-   * negative remaining stock of 38 million litres.
-   *
-   * So the sale figures are taken once per distinct load, and only the money
-   * is summed across rows. `date_loaded` is in the key: it is never null, it
-   * costs nothing today (483 either way), and it keeps two identical loads by
-   * the same truck from collapsing into one if that ever happens.
+   * An earlier cut grouped both by `location`, which is a free-text town on the
+   * sale row. That listed DAMATURU and KADUNA as "stations". They are cities;
+   * the station is the customer. Grouping on the customer removes the whole
+   * class of spelling problems with it — a station is a row with an id.
    */
-  const saleRows = await client`
+  const loadRows = await client`
     WITH loads AS (
       SELECT DISTINCT ON (allocation_code, truck_number, date_loaded, quantity, sales_value)
              COALESCE(NULLIF(TRIM(allocation_code), ''), '(unassigned)') AS code,
-             location,
+             customer_id,
+             customer_name,
              truck_number,
              date_loaded,
              quantity,
-             sales_value::numeric   AS sales_value,
+             sales_value::numeric     AS sales_value,
              expenses_amount::numeric AS expenses_amount
         FROM delivery_sales
     )
-    SELECT code, location,
-           COUNT(*)                          AS loads_all,
-           COALESCE(SUM(quantity), 0)        AS litres_all,
-           COALESCE(SUM(sales_value), 0)     AS value_all,
-           COALESCE(SUM(expenses_amount), 0) AS expenses_all,
-           COUNT(*)                     FILTER (WHERE date_loaded = ${dayStr}) AS loads_today,
-           COALESCE(SUM(quantity)       FILTER (WHERE date_loaded = ${dayStr}), 0) AS litres_today,
-           COALESCE(SUM(sales_value)    FILTER (WHERE date_loaded = ${dayStr}), 0) AS value_today,
-           MAX(date_loaded)                  AS last_load
-      FROM loads
-     GROUP BY code, location`;
+    SELECT l.code,
+           COALESCE(dc.customer_type, 'customer')                  AS customer_type,
+           COALESCE(NULLIF(TRIM(dc.name), ''), NULLIF(TRIM(l.customer_name), ''), '(unnamed)') AS party,
+           COUNT(*)                                                AS loads_all,
+           COALESCE(SUM(l.quantity), 0)                            AS litres_all,
+           COALESCE(SUM(l.sales_value), 0)                         AS value_all,
+           COALESCE(SUM(l.expenses_amount), 0)                     AS expenses_all,
+           COUNT(*)                  FILTER (WHERE l.date_loaded = ${dayStr}) AS loads_today,
+           COALESCE(SUM(l.quantity)  FILTER (WHERE l.date_loaded = ${dayStr}), 0) AS litres_today,
+           COALESCE(SUM(l.sales_value) FILTER (WHERE l.date_loaded = ${dayStr}), 0) AS value_today,
+           MAX(l.date_loaded)                                      AS last_load
+      FROM loads l
+      LEFT JOIN delivery_customers dc ON dc.id = l.customer_id
+     GROUP BY l.code, COALESCE(dc.customer_type, 'customer'),
+              COALESCE(NULLIF(TRIM(dc.name), ''), NULLIF(TRIM(l.customer_name), ''), '(unnamed)')`;
 
-  /**
-   * The money, summed across every instalment row.
-   *
-   * Dated by `date_of_payment` — when the money actually arrived — falling back
-   * to `created_at` for the eight rows that have none. Using created_at alone
-   * would date a September instalment against a truck loaded in July as a sale
-   * made in September.
-   */
+  /** Money, summed across every instalment row. See the header. */
   const paymentRows = await client`
-    SELECT COALESCE(NULLIF(TRIM(allocation_code), ''), '(unassigned)') AS code,
-           location,
-           COALESCE(SUM(payment_amount::numeric), 0) AS paid_all,
-           COALESCE(SUM(payment_amount::numeric) FILTER (
-             WHERE COALESCE(NULLIF(date_of_payment, ''),
-                            to_char(created_at AT TIME ZONE ${REPORT_TZ}, 'YYYY-MM-DD')) = ${dayStr}), 0) AS paid_today
-      FROM delivery_sales
-     GROUP BY code, location`;
+    SELECT COALESCE(NULLIF(TRIM(ds.allocation_code), ''), '(unassigned)') AS code,
+           COALESCE(dc.customer_type, 'customer') AS customer_type,
+           COALESCE(NULLIF(TRIM(dc.name), ''), NULLIF(TRIM(ds.customer_name), ''), '(unnamed)') AS party,
+           COALESCE(SUM(ds.payment_amount::numeric), 0) AS paid_all,
+           COALESCE(SUM(ds.payment_amount::numeric) FILTER (
+             WHERE COALESCE(NULLIF(ds.date_of_payment, ''),
+                            to_char(ds.created_at AT TIME ZONE ${REPORT_TZ}, 'YYYY-MM-DD')) = ${dayStr}), 0) AS paid_today
+      FROM delivery_sales ds
+      LEFT JOIN delivery_customers dc ON dc.id = ds.customer_id
+     GROUP BY 1, 2, 3`;
 
-  /** code → station key → the running figures for that station. */
-  const batches = new Map();
-  const stationOf = (code, rawLocation) => {
-    if (!batches.has(code)) batches.set(code, { code, stations: new Map(), lastActivity: null });
-    const batch = batches.get(code);
-    const key = stationKey(rawLocation);
-    if (!batch.stations.has(key)) {
-      batch.stations.set(key, {
-        key,
-        // The first spelling seen is the display name; the key is what groups.
-        name: String(rawLocation || "").trim() || "(unnamed)",
-        allocatedLitres: 0,
-        trucksAllocated: 0,
-        trucksOffloaded: 0,
-        soldLitres: 0,
-        soldLitresToday: 0,
-        trucksSold: 0,
-        trucksSoldToday: 0,
-        salesValue: 0,
-        salesValueToday: 0,
-        deposited: 0,
-        depositedToday: 0,
+  /** Stock put on the ground, per station. Stations only — see above. */
+  const stockRows = await client`
+    SELECT COALESCE(NULLIF(TRIM(di.allocation_code), ''), '(unassigned)') AS code,
+           COALESCE(NULLIF(TRIM(dc.name), ''), NULLIF(TRIM(di.customer_name), ''), '(unnamed)') AS party,
+           COUNT(*)                             AS trucks,
+           COALESCE(SUM(di.quantity_allocated), 0) AS allocated
+      FROM delivery_inventory di
+      LEFT JOIN delivery_customers dc ON dc.id = di.customer_id
+     WHERE dc.customer_type = 'filling_station'
+     GROUP BY 1, 2`;
+
+  const key = (code, party) => `${code}\u0000${party}`;
+  const rowsBy = new Map();
+  const at = (code, party, type) => {
+    const k = key(code, party);
+    if (!rowsBy.has(k)) {
+      rowsBy.set(k, {
+        code, party, customerType: type,
+        loads: 0, loadsToday: 0,
+        litres: 0, litresToday: 0,
+        salesValue: 0, salesValueToday: 0,
+        fundsReceived: 0, fundsReceivedToday: 0,
         expenses: 0,
+        allocatedLitres: 0, trucksAllocated: 0,
+        lastLoad: null,
       });
     }
-    return batch.stations.get(key);
+    const row = rowsBy.get(k);
+    if (type && row.customerType !== type) row.customerType = type;
+    return row;
   };
 
-  for (const r of invRows) {
-    const s = stationOf(r.code, r.location);
-    s.allocatedLitres += num(r.allocated);
-    s.trucksAllocated += Number(r.trucks || 0);
-    s.trucksOffloaded += Number(r.offloaded || 0);
+  for (const r of loadRows) {
+    const row = at(r.code, r.party, r.customer_type);
+    row.loads += Number(r.loads_all || 0);
+    row.loadsToday += Number(r.loads_today || 0);
+    row.litres += num(r.litres_all);
+    row.litresToday += num(r.litres_today);
+    row.salesValue += num(r.value_all);
+    row.salesValueToday += num(r.value_today);
+    row.expenses += num(r.expenses_all);
+    if (r.last_load && (!row.lastLoad || r.last_load > row.lastLoad)) row.lastLoad = r.last_load;
   }
-
-  for (const r of saleRows) {
-    const s = stationOf(r.code, r.location);
-    s.soldLitres += num(r.litres_all);
-    s.soldLitresToday += num(r.litres_today);
-    s.trucksSold += Number(r.loads_all || 0);
-    s.trucksSoldToday += Number(r.loads_today || 0);
-    s.salesValue += num(r.value_all);
-    s.salesValueToday += num(r.value_today);
-    s.expenses += num(r.expenses_all);
-
-    const batch = batches.get(r.code);
-    const last = r.last_load ? new Date(r.last_load) : null;
-    if (last && (!batch.lastActivity || last > batch.lastActivity)) batch.lastActivity = last;
-  }
-
   for (const r of paymentRows) {
-    const s = stationOf(r.code, r.location);
-    s.deposited += num(r.paid_all);
-    s.depositedToday += num(r.paid_today);
+    const row = at(r.code, r.party, r.customer_type);
+    row.fundsReceived += num(r.paid_all);
+    row.fundsReceivedToday += num(r.paid_today);
+  }
+  for (const r of stockRows) {
+    const row = at(r.code, r.party, "filling_station");
+    row.allocatedLitres += num(r.allocated);
+    row.trucksAllocated += Number(r.trucks || 0);
+  }
+
+  const all = [...rowsBy.values()].map((r) => ({
+    ...r,
+    // Never negative: an overpayment is a real thing, but it is not a debt,
+    // and summing it against other lines would understate what is owed.
+    balance: Math.max(0, r.salesValue - r.fundsReceived),
+    remainingLitres: r.allocatedLitres - r.litres,
+    stockKnown: r.allocatedLitres > 0 && r.allocatedLitres >= r.litres,
+  }));
+
+  /**
+   * Live, or finished.
+   *
+   * Until an allocation carries a state of its own, this is derived: a batch
+   * or station is live if it moved today, took money today, or still has stock
+   * on the ground. Everything else is finished business and is left out, which
+   * is the point — a report carrying nine dormant batches buries the two that
+   * matter.
+   *
+   * A finished line that still owes money is NOT dropped silently; it is
+   * summarised in `settled` so the debt stays visible without the detail.
+   */
+  const isLive = (r) =>
+    r.loadsToday > 0 ||
+    r.fundsReceivedToday > 0 ||
+    (r.stockKnown && r.remainingLitres > 0) ||
+    // Sold out but still owed is not finished — it is the line somebody has to
+    // chase. Dropping it would hide N1.6bn of debt to tidy the page up.
+    r.balance > 0;
+
+  const byValue = (a, b) => b.salesValue - a.salesValue;
+  const liveRows = all.filter(isLive);
+  const dormant = all.filter((r) => !isLive(r));
+
+  /** Truck sales roll up to the batch: the customer is not the unit here. */
+  const batches = new Map();
+  for (const r of liveRows.filter((x) => x.customerType !== "filling_station")) {
+    if (!batches.has(r.code)) {
+      batches.set(r.code, {
+        code: r.code, customers: 0,
+        trucksSoldToday: 0, trucksSold: 0,
+        salesValue: 0, salesValueToday: 0,
+        fundsReceived: 0, fundsReceivedToday: 0, expenses: 0,
+      });
+    }
+    const b = batches.get(r.code);
+    b.customers += 1;
+    b.trucksSoldToday += r.loadsToday;
+    b.trucksSold += r.loads;
+    b.salesValue += r.salesValue;
+    b.salesValueToday += r.salesValueToday;
+    b.fundsReceived += r.fundsReceived;
+    b.fundsReceivedToday += r.fundsReceivedToday;
+    b.expenses += r.expenses;
   }
 
   const truckSales = [...batches.values()]
-    .map((b) => {
-      const stations = [...b.stations.values()]
-        .map((s) => ({
-          ...s,
-          remainingLitres: s.allocatedLitres - s.soldLitres,
-          /**
-           * Whether "remaining" means anything for this station.
-           *
-           * delivery_inventory is an allocation register, not a complete
-           * history: some batches have sales for trucks it never recorded, and
-           * the '(unassigned)' code has 680,000 L sold against no allocation at
-           * all. Where that happens, allocated minus sold is negative — which
-           * is not a stock level, it is the register being behind.
-           *
-           * The figure is still carried so the gap is visible, but flagged, so
-           * the email can say "allocation incomplete" instead of printing a
-           * negative stock that no reader could act on.
-           */
-          stockKnown: s.allocatedLitres > 0 && s.allocatedLitres >= s.soldLitres,
-          outstanding: s.salesValue - s.deposited,
-        }))
-        .sort((a, b2) => b2.salesValue - a.salesValue);
+    .map((b) => ({ ...b, balance: b.salesValue - b.fundsReceived }))
+    .sort(byValue);
 
-      const sum = (f) => stations.reduce((n, s) => n + f(s), 0);
-      const salesValue = sum((s) => s.salesValue);
-      const deposited = sum((s) => s.deposited);
-      const allocated = sum((s) => s.allocatedLitres);
-      const sold = sum((s) => s.soldLitres);
-      // Judged on the batch's own totals, not on every station agreeing: one
-      // station whose allocation was never recorded should not blank out a
-      // batch figure that is otherwise sound. Stations carry their own flag.
-      const stockKnown = allocated > 0 && allocated >= sold;
+  const stations = liveRows
+    .filter((r) => r.customerType === "filling_station")
+    .sort(byValue);
 
-      return {
-        code: b.code,
-        lastActivity: b.lastActivity ? b.lastActivity.toISOString() : null,
-        stations,
-        // Names one or two characters apart inside a batch: reported, not merged.
-        possibleDuplicates: duplicateWarnings(stations.map((s) => s.key)),
-        totals: {
-          stations: stations.length,
-          trucksAllocated: sum((s) => s.trucksAllocated),
-          trucksSold: sum((s) => s.trucksSold),
-          trucksSoldToday: sum((s) => s.trucksSoldToday),
-          allocatedLitres: sum((s) => s.allocatedLitres),
-          soldLitres: sum((s) => s.soldLitres),
-          soldLitresToday: sum((s) => s.soldLitresToday),
-          remainingLitres: allocated - sold,
-          stockKnown,
+  const settled = dormant.reduce(
+    (acc, r) => {
+      acc.lines += 1;
+      acc.salesValue += r.salesValue;
+      acc.fundsReceived += r.fundsReceived;
+      acc.balance += r.balance;
+      return acc;
+    },
+    { lines: 0, salesValue: 0, fundsReceived: 0, balance: 0 }
+  );
 
-          salesValue,
-          salesValueToday: sum((s) => s.salesValueToday),
-          deposited,
-          depositedToday: sum((s) => s.depositedToday),
-          outstanding: salesValue - deposited,
-          expenses: sum((s) => s.expenses),
-        },
-      };
-    })
-    // A batch with nothing allocated and nothing sold is closed business.
-    .filter((b) => b.totals.allocatedLitres > 0 || b.totals.soldLitres > 0)
-    .sort((a, b2) => {
-      // Today's activity first, then by what is still owed — the two reasons
-      // somebody opens this report at all.
-      const at = a.totals.soldLitresToday > 0 ? 1 : 0;
-      const bt = b2.totals.soldLitresToday > 0 ? 1 : 0;
-      if (at !== bt) return bt - at;
-      return b2.totals.outstanding - a.totals.outstanding;
-    });
+  /**
+   * The sheets each desk filed today.
+   *
+   * daily_reports carries pfi_number, so a sheet can be read against the batch
+   * it was filed for rather than only against a location.
+   */
+  const staffEntries = await client`
+    SELECT report_type::text AS role, location, pfi_number, product_name,
+           submitted_by_name, litres_sold::numeric AS litres_sold,
+           total_sales_amount::numeric AS sales_value,
+           amount_paid::numeric AS amount_paid,
+           opening_stock::numeric AS opening_stock,
+           tank_balance::numeric AS tank_balance,
+           trucks_entered, truck_count, status::text AS status, remarks
+      FROM daily_reports
+     WHERE report_date = ${dayStr}
+     ORDER BY report_type, location`;
 
   // ── One line for the top of the email ───────────────────────────────────
   const depotTotals = pfis.reduce(
@@ -484,16 +514,16 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     { ordersToday: 0, litresToday: 0, valueToday: 0, paidToday: 0, outstanding: 0, exitedToday: 0, expensesToday: 0 }
   );
 
-  const saleTotals = truckSales.reduce(
-    (acc, b) => {
-      acc.litresToday += b.totals.soldLitresToday;
-      acc.valueToday += b.totals.salesValueToday;
-      acc.depositedToday += b.totals.depositedToday;
-      acc.outstanding += b.totals.outstanding;
-      acc.remainingLitres += b.totals.remainingLitres;
+  const saleTotals = liveRows.reduce(
+    (acc, r) => {
+      acc.litresToday += r.litresToday;
+      acc.valueToday += r.salesValueToday;
+      acc.receivedToday += r.fundsReceivedToday;
+      acc.balance += r.balance;
+      acc.trucksToday += r.loadsToday;
       return acc;
     },
-    { litresToday: 0, valueToday: 0, depositedToday: 0, outstanding: 0, remainingLitres: 0 }
+    { litresToday: 0, valueToday: 0, receivedToday: 0, balance: 0, trucksToday: 0 }
   );
 
   return {
@@ -502,15 +532,19 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     summary: {
       activePfis: pfis.length,
       activeBatches: truckSales.length,
-      litresToday: depotTotals.litresToday + saleTotals.litresToday,
-      valueToday: depotTotals.valueToday + saleTotals.valueToday,
-      collectedToday: depotTotals.paidToday + saleTotals.depositedToday,
-      outstanding: depotTotals.outstanding + saleTotals.outstanding,
+      activeStations: stations.length,
+      litresSold: depotTotals.litresToday + saleTotals.litresToday,
+      salesValue: depotTotals.valueToday + saleTotals.valueToday,
+      fundsReceived: depotTotals.paidToday + saleTotals.receivedToday,
+      balance: depotTotals.outstanding + saleTotals.balance,
       depot: depotTotals,
-      truckSales: saleTotals,
+      delivery: saleTotals,
+      settled,
     },
     pfis,
     truckSales,
+    stations,
+    staffEntries,
   };
 };
 

@@ -1768,7 +1768,7 @@ const CATALOG = {
     category: "reports",
     priority: "normal",
     channels: EMAIL_ONLY,
-    title: (d) => `PFI Daily Report - ${formatDate(d.reportDate)}`,
+    title: (d) => `Soroman Daily Report - ${formatDate(d.reportDate)}`,
     body: (d) =>
       `${d.summary?.activePfis ?? 0} active PFI(s), ${d.summary?.activeBatches ?? 0} truck-sales batch(es).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),

@@ -52,11 +52,14 @@ async function main() {
 
     const s = data.summary;
     console.log(`\n${rendered.subject}\n`);
-    console.log(`  litres sold today   ${Number(s.litresToday).toLocaleString("en-NG")} L`);
-    console.log(`  sales value today   ₦${Math.round(s.valueToday).toLocaleString("en-NG")}`);
-    console.log(`  collected today     ₦${Math.round(s.collectedToday).toLocaleString("en-NG")}`);
-    console.log(`  outstanding         ₦${Math.round(s.outstanding).toLocaleString("en-NG")}`);
-    console.log(`\n  ${s.activePfis} active PFI(s), ${s.activeBatches} truck-sales batch(es)`);
+    console.log(`  litres sold      ${Number(s.litresSold).toLocaleString("en-NG")} L`);
+    console.log(`  sales value      ₦${Math.round(s.salesValue).toLocaleString("en-NG")}`);
+    console.log(`  funds received   ₦${Math.round(s.fundsReceived).toLocaleString("en-NG")}`);
+    console.log(`  balance          ₦${Math.round(s.balance).toLocaleString("en-NG")}`);
+    console.log(
+      `\n  ${s.activePfis} active PFI(s), ${s.activeBatches} truck-sales batch(es), ${s.activeStations} filling station(s)` +
+        (s.settled?.lines ? `, ${s.settled.lines} completed line(s) omitted` : "")
+    );
     console.log(`\n  written to ${out}  (${Math.round(rendered.html.length / 1024)}KB — Gmail clips at 100KB)`);
     console.log(`  open it:  open ${JSON.stringify(out)}`);
     console.log(`\n  nothing sent. Add --to=you@example.com to send it.\n`);
