@@ -1,7 +1,6 @@
-const { and, eq, inArray, notInArray, count } = require("drizzle-orm");
+const { and, eq, inArray, notInArray, count, or, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
-const { scopeCondition } = require("../lib/scopeFilter");
 
 /**
  * How much work is waiting, per desk.
@@ -15,9 +14,22 @@ const { scopeCondition } = require("../lib/scopeFilter");
  * dumb lookup (`counts[item.path]`) and adding a queue is a change in one
  * place rather than a change here plus a mapping table over there.
  *
- * Scoped the same way every other list is: a user assigned to two depots
- * counts those two depots' work, not the company's. See lib/scopeFilter.
- * Without that the badge would promise a queue the page then shows as empty.
+ * ── Scoped to the person, and not a permission gate ────────────────────────
+ *
+ * A badge answers "how much is waiting on ME". Somebody who runs Calabar
+ * wants Calabar's two pending tickets, not the company's two thousand — a
+ * number they cannot act on is a number they learn to ignore, and once they
+ * ignore it the badge is worse than absent.
+ *
+ * This deliberately does NOT go through lib/scopeFilter. That helper is the
+ * authorisation gate, and it was switched off at the owner's instruction in
+ * 76d3e95 — every signed-in member of staff may do everything, and that
+ * stands. Nothing here stops anyone opening any page or acting on any row.
+ * It narrows what gets COUNTED for them, which is a view preference.
+ *
+ * A user with no depots and no PFIs assigned is not narrowed to nothing: they
+ * see the company's queues. Failing closed here would hand somebody an empty
+ * dashboard and no clue why, which is the exact defect 76d3e95 records.
  */
 
 /**
@@ -32,6 +44,39 @@ const { scopeCondition } = require("../lib/scopeFilter");
  * only pushing the scope `if (scope)`. This is that, as a one-liner.
  */
 const where = (...conditions) => and(...conditions.filter(Boolean));
+
+/**
+ * The rows this person's badges should count.
+ *
+ * Depots OR PFIs — somebody can hold both, and either should let a row
+ * through. Null when they hold neither, which means "count everything": see
+ * the note above on why this must not fail closed.
+ */
+const mine = (user, { depotColumn, pfiColumn } = {}) => {
+  const { depotIds = [], pfiIds = [] } = user?.scope || {};
+  const clauses = [];
+  if (depotColumn && depotIds.length) clauses.push(inArray(depotColumn, depotIds));
+  if (pfiColumn && pfiIds.length) clauses.push(inArray(pfiColumn, pfiIds));
+  if (!clauses.length) return null;
+  return clauses.length === 1 ? clauses[0] : or(...clauses);
+};
+
+/**
+ * Work on a closed batch is not work.
+ *
+ * A finished PFI has been closed out: its orders are history, and an order
+ * sitting at Paid on a batch closed months ago is nobody's queue. Counting
+ * them put 2,562 orders behind the ticketing badge against a real queue of
+ * 124 — a four-figure number that never went down, which is how a badge stops
+ * being read.
+ *
+ * NOT EXISTS rather than a join, so an order with no PFI at all still counts:
+ * it is not on a closed batch, it is on no batch, and that is somebody's work
+ * either way.
+ */
+const notOnClosedPfi = (pfiColumn) => sql`NOT EXISTS (
+  SELECT 1 FROM pfis p WHERE p.id = ${pfiColumn} AND p.status = 'finished'
+)`;
 
 /** Orders that have taken money and are on their way — not finished, not dead. */
 const AWAITING_TICKETING = ["Paid", "Released"];
@@ -67,7 +112,8 @@ const QUEUES = [
           where(
             inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
             inArray(orders.status, PAYABLE_STATUSES),
-            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+            notOnClosedPfi(orders.pfiId),
+            mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
   },
@@ -84,7 +130,8 @@ const QUEUES = [
         .where(
           where(
             inArray(orders.status, AWAITING_TICKETING),
-            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+            notOnClosedPfi(orders.pfiId),
+            mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
   },
@@ -109,7 +156,8 @@ const QUEUES = [
           where(
             eq(orderTrucks.status, "pending"),
             inArray(orders.status, GATE_LIVE_STATUSES),
-            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+            notOnClosedPfi(orders.pfiId),
+            mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
   },
@@ -131,7 +179,8 @@ const QUEUES = [
           where(
             inArray(orderTrucks.status, ["gated_in", "loaded"]),
             notInArray(orders.status, ORDER_DEAD_STATUSES),
-            scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
+            notOnClosedPfi(orders.pfiId),
+            mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
   },
@@ -156,7 +205,8 @@ const QUEUES = [
         .where(
           where(
             eq(pfiExpenses.status, "pending"),
-            scopeCondition(user, { pfiColumn: pfiExpenses.pfiId }),
+            notOnClosedPfi(pfiExpenses.pfiId),
+            mine(user, { pfiColumn: pfiExpenses.pfiId }),
           ),
         ),
   },
