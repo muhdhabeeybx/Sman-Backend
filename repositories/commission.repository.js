@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, desc, count, sql, between } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, count, sql, between, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { generateOrderReference } = require("../utils/helpers");
 const {
@@ -120,13 +120,22 @@ const findAll = async ({
   if (customerId) {
     conditions.push(eq(commissions.customerId, parseInt(customerId)));
   }
+  /**
+   * gte/lte rather than a raw sql`` comparison.
+   *
+   * A Date interpolated into Drizzle's sql`` template is passed to the driver
+   * as an opaque parameter with no column type behind it, and postgres.js then
+   * refuses it: "The 'string' argument must be of type string ... Received an
+   * instance of Date". Every commissions request carrying a date filter was a
+   * 500. gte/lte know the column is a timestamp and serialise it properly.
+   */
   if (dateFrom) {
-    conditions.push(sql`${commissions.createdAt} >= ${new Date(dateFrom)}`);
+    conditions.push(gte(commissions.createdAt, new Date(dateFrom)));
   }
   if (dateTo) {
     const end = new Date(dateTo);
     end.setHours(23, 59, 59, 999);
-    conditions.push(sql`${commissions.createdAt} <= ${end}`);
+    conditions.push(lte(commissions.createdAt, end));
   }
   if (search) {
     const pattern = `%${search}%`;
@@ -344,11 +353,13 @@ const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   const conditions = [];
   if (depotId) conditions.push(eq(commissions.depotId, parseInt(depotId)));
   if (customerId) conditions.push(eq(commissions.customerId, parseInt(customerId)));
-  if (dateFrom) conditions.push(sql`${commissions.createdAt} >= ${new Date(dateFrom)}`);
+  // Same as findAll above: a Date through sql`` has no column type behind it
+  // and the driver rejects it, so the summary 500'd on the same requests.
+  if (dateFrom) conditions.push(gte(commissions.createdAt, new Date(dateFrom)));
   if (dateTo) {
     const end = new Date(dateTo);
     end.setHours(23, 59, 59, 999);
-    conditions.push(sql`${commissions.createdAt} <= ${end}`);
+    conditions.push(lte(commissions.createdAt, end));
   }
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

@@ -235,14 +235,19 @@ const logFilters = ({ channel, status, type, campaignId, reason, from, to, searc
   if (type) where.push(sql`nd.type = ${type}`);
   if (campaignId) where.push(sql`nd.campaign_id = ${Number(campaignId)}`);
   if (reason && reason !== "all") where.push(sql`${sql.raw(REASON_SQL)} = ${reason}`);
-  if (from) where.push(sql`nd.created_at >= ${new Date(from)}`);
+  // .toISOString(), not the Date itself: this is a raw sql`` fragment against
+  // a bare column name, so there is no column type behind the parameter and
+  // the driver rejects a Date outright — "The 'string' argument must be of
+  // type string ... Received an instance of Date". Same fault that made every
+  // dated /api/commissions request a 500.
+  if (from) where.push(sql`nd.created_at >= ${new Date(from).toISOString()}`);
   // `to` is a day, and a day includes the whole of it. Comparing against
   // midnight would silently exclude everything sent on the end date, which is
   // the day someone picking a range is most often asking about.
   if (to) {
     const end = new Date(to);
     end.setHours(23, 59, 59, 999);
-    where.push(sql`nd.created_at <= ${end}`);
+    where.push(sql`nd.created_at <= ${end.toISOString()}`);
   }
   if (search) {
     // Name or destination — "who did this go to?" is asked both ways, by the
