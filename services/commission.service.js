@@ -3,7 +3,6 @@ const { db } = require("../config/db");
 const { orderTrucks } = require("../db/schema");
 const commissionRepo = require("../repositories/commission.repository");
 const { orderRepo } = require("../repositories");
-const walletService = require("./wallet.service");
 
 /**
  * Create — or re-snapshot — the commission record for a paid order.
@@ -117,14 +116,25 @@ async function commissionQuantity(order) {
 }
 
 /**
- * Confirm a commission payment.
+ * Mark a commission paid. Nothing moves in this system.
  *
- * Validates the commission exists and is still pending, then:
- * 1. Credits the customer's wallet balance with the commission amount
- * 2. Creates a deposit entry (visible in deposit history)
- * 3. Marks the commission as "paid"
+ * The money goes out of the bank, by transfer, to the account the facilitator
+ * gave — offline, before or after somebody presses this. All this records is
+ * that it happened, so the row leaves the queue and the desk knows not to pay
+ * it twice.
  *
- * All steps run in a single transaction.
+ * ── What this used to do ───────────────────────────────────────────────────
+ *
+ * It credited the customer's wallet with the commission and wrote a deposit
+ * against it. That was the wallet era: a customer's balance was money the
+ * system held for them, so paying a commission INTO it was a real transfer.
+ * The wallet payment path is gone — payments live against orders now — and a
+ * credit into a balance nothing spends is not a payment, it is a number
+ * inflating a customer's standing for no reason anyone can trace.
+ *
+ * Commissions already confirmed under the old behaviour keep their credits
+ * and their deposits. Those were real entries at the time and unwinding them
+ * here would be a second wrong; they are history, not a bug to reverse.
  */
 async function confirmPayment(commissionId, staffId) {
   const commission = await commissionRepo.findById(commissionId);
@@ -135,32 +145,22 @@ async function confirmPayment(commissionId, staffId) {
     throw Object.assign(new Error("Commission already paid"), { status: 400 });
   }
 
+  /**
+   * Still refused at zero. Nothing was sent to anybody, so there is nothing to
+   * record as paid — and an order that genuinely carries no commission has its
+   * own exit now. Skip it.
+   */
   const amount = parseFloat(commission.commissionAmount);
   if (amount <= 0) {
-    throw Object.assign(new Error("Commission amount is zero — set a rate first"), { status: 400 });
+    throw Object.assign(
+      new Error("Commission amount is zero — set a rate first, or skip this order"),
+      { status: 400 },
+    );
   }
 
-  // Credit the customer's wallet balance
-  const reference = `COM-${commission.orderNumber || commission.orderId}-${commissionId}`;
-  const description = `Commission for Order ${commission.orderNumber || commission.orderId}`;
-
-  const creditResult = await walletService.credit({
-    customerId: commission.customerId,
-    amount,
-    description,
-    reference,
-    recordedBy: staffId,
-    trackDeposit: true,
-  });
-
-  if (!creditResult.success) {
-    throw Object.assign(new Error(creditResult.message || "Failed to credit wallet"), { status: 400 });
-  }
-
-  // Mark the commission as paid
   const paid = await commissionRepo.markAsPaid(commissionId, staffId);
 
-  return { commission: paid, deposit: creditResult.deposit };
+  return { commission: paid };
 }
 
 /**

@@ -26,7 +26,7 @@ const confirmPayment = asyncHandler(async (req, res) => {
   );
   res.json({
     success: true,
-    message: `Commission confirmed — ₦${parseFloat(result.commission.commissionAmount).toLocaleString()} credited to customer account`,
+    message: `Commission marked paid — ₦${parseFloat(result.commission.commissionAmount).toLocaleString()}`,
     data: result,
   });
 });
@@ -62,7 +62,7 @@ const bulkResolve = asyncHandler(async (req, res) => {
     staffId: req.user.id,
   });
 
-  const verb = action === "skip" ? "skipped" : "confirmed";
+  const verb = action === "skip" ? "skipped" : "marked paid";
   const message = results.failed.length
     ? `${results.done.length} ${verb}, ${results.failed.length} could not be`
     : `${results.done.length} commission${results.done.length === 1 ? "" : "s"} ${verb}`;
